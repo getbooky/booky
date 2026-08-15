@@ -356,3 +356,39 @@ func TestManualImportUploadRejectsNonBooks(t *testing.T) {
 		t.Errorf("rejected uploads left files behind: %v", entries)
 	}
 }
+
+// The Hardcover identity is editable over the API like any other field:
+// set → echoed back and locked; cleared → gone from the response.
+func TestEditBookHardcoverID(t *testing.T) {
+	srv := testServer(t)
+	h := srv.Handler()
+
+	_, out := doJSON(t, h, "POST", "/api/v1/libraries", map[string]string{"name": "Alex", "rootPath": "/data/x"})
+	libID := int64(out["id"].(float64))
+	_, book := doJSON(t, h, "POST", "/api/v1/books", map[string]any{
+		"meta":      map[string]any{"provider": "manual", "title": "Burrow", "authors": []string{"Emmett Hale"}, "hardcoverId": "1552814"},
+		"libraryId": libID, "monitored": true,
+	})
+	id := int64(book["id"].(float64))
+
+	rec, edited := doJSON(t, h, "PATCH", fmt.Sprintf("/api/v1/books/%d", id), map[string]any{
+		"fields": map[string]string{"hardcoverId": "42"},
+	})
+	if rec.Code != http.StatusOK || edited["hardcoverId"] != "42" {
+		t.Fatalf("set: code=%d book=%+v", rec.Code, edited)
+	}
+	locks, _ := edited["fieldLocks"].(map[string]any)
+	if locks["hardcoverId"] != true {
+		t.Fatalf("edited hardcoverId should lock, locks=%+v", locks)
+	}
+
+	rec, edited = doJSON(t, h, "PATCH", fmt.Sprintf("/api/v1/books/%d", id), map[string]any{
+		"fields": map[string]string{"hardcoverId": ""},
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("clear: code=%d", rec.Code)
+	}
+	if v, present := edited["hardcoverId"]; present && v != "" {
+		t.Fatalf("cleared hardcoverId still present: %v", v)
+	}
+}

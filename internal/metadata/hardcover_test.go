@@ -465,3 +465,40 @@ func TestHardcoverSearchBareQueryMatchesAuthor(t *testing.T) {
 		}
 	}
 }
+
+func TestHardcoverFetchByHardcoverID(t *testing.T) {
+	h, lastQuery := fakeHardcover(t, `{"books": [
+		{"id": 42, "title": "The Current", "description": "A guide on the water.",
+		 "release_date": "2011-09-01",
+		 "contributions": [{"author": {"id": 7, "name": "Nora Whitfield"}}],
+		 "book_series": [{"position": 1, "series": {"id": 3, "name": "Current"}}]}
+	]}`)
+
+	m, err := h.FetchByHardcoverID(context.Background(), "42")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m == nil || m.HardcoverID != "42" || m.Title != "The Current" || m.SeriesName != "Current" {
+		t.Fatalf("meta = %+v", m)
+	}
+	if !strings.Contains(*lastQuery, "id: {_eq: $id}") {
+		t.Errorf("query should fetch by exact id: %s", *lastQuery)
+	}
+}
+
+// A dangling id (deleted/merged record) is a soft miss, not an error — the
+// caller falls back to its stored metadata.
+func TestHardcoverFetchByHardcoverIDMissing(t *testing.T) {
+	h, _ := fakeHardcover(t, `{"books": []}`)
+	m, err := h.FetchByHardcoverID(context.Background(), "42")
+	if err != nil || m != nil {
+		t.Fatalf("missing id should be (nil, nil), got %+v, %v", m, err)
+	}
+}
+
+func TestHardcoverFetchByHardcoverIDRejectsGarbage(t *testing.T) {
+	h, _ := fakeHardcover(t, `{"books": []}`)
+	if _, err := h.FetchByHardcoverID(context.Background(), "not-a-number"); err == nil {
+		t.Fatal("non-numeric id should error, not query")
+	}
+}

@@ -289,3 +289,73 @@ func TestHardcoverLiveSearchLanguage(t *testing.T) {
 		t.Error("top result for a popular thriller carried no genres — cached_tags drifted?")
 	}
 }
+
+// The exact-record fetch behind "refresh from a known Hardcover ID". The id
+// is resolved live: search a stable title first, then fetch its id and check
+// the record round-trips.
+func TestHardcoverLiveFetchByHardcoverID(t *testing.T) {
+	h := liveHardcover(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	hits, err := h.Search(ctx, SearchParams{Title: "Project Hail Mary", Author: "Andy Weir", Limit: 3})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(hits) == 0 || hits[0].HardcoverID == "" {
+		t.Fatalf("no live search hit to fetch by id: %+v", hits)
+	}
+
+	m, err := h.FetchByHardcoverID(ctx, hits[0].HardcoverID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m == nil || m.HardcoverID != hits[0].HardcoverID {
+		t.Fatalf("by-id fetch = %+v, want id %s", m, hits[0].HardcoverID)
+	}
+	if m.Title == "" || len(m.Authors) == 0 {
+		t.Errorf("by-id record is thin: %+v", m)
+	}
+
+	// a nonsense id must be a soft miss, not an error
+	miss, err := h.FetchByHardcoverID(ctx, "999999999")
+	if err != nil {
+		t.Fatalf("dangling id should be soft: %v", err)
+	}
+	if miss != nil {
+		t.Errorf("dangling id returned a record: %+v", miss)
+	}
+}
+
+// The reported wrong-book regression, against live data: "The River" is a
+// crowded title whose most popular record credits a different author
+// entirely. Whatever the search pool returns, the enrich pick must never be
+// a record credited to someone other than the wanted author — an empty pick
+// (nothing adopted) is the correct outcome when the author's own record
+// isn't on Hardcover.
+func TestHardcoverLiveEnrichWrongAuthorGuard(t *testing.T) {
+	h := liveHardcover(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	const wantAuthor = "Noelle W. Ihli"
+	hits, err := h.Search(ctx, SearchParams{Title: "The River", Author: wantAuthor, Limit: 5})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("live pool for %q: %d hits", "The River", len(hits))
+	for _, m := range hits {
+		t.Logf("  id=%s authors=%v ratings=%d series=%q", m.HardcoverID, m.Authors, m.RatingsCount, m.SeriesName)
+	}
+
+	best, ok := bestEnrichMatch(hits, "The River", wantAuthor)
+	if !ok {
+		t.Log("no candidate cleared the bar — correct when the author's own record is absent")
+		return
+	}
+	if len(best.Authors) > 0 && !authorsOverlap(best, wantAuthor) {
+		t.Errorf("picked a wrong-author record: %+v", best)
+	} else {
+		t.Logf("picked %q by %v (id %s)", best.Title, best.Authors, best.HardcoverID)
+	}
+}

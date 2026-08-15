@@ -285,6 +285,14 @@ type goodreadsByID interface {
 	FetchBook(ctx context.Context, id string) (*BookMeta, bool, error)
 }
 
+// hardcoverByID is implemented by the Hardcover provider: given the book's
+// canonical Hardcover ID, it fetches that exact book — an identity lookup
+// that can never wander to a same-titled book by someone else the way a
+// title search can.
+type hardcoverByID interface {
+	FetchByHardcoverID(ctx context.Context, id string) (*BookMeta, error)
+}
+
 // defaultPerProviderTimeout caps one provider's lookup so a blocked or slow
 // source (Goodreads is frequently WAF-gated) can't starve the providers
 // ranked after it — the symptom being "put Goodreads first, nothing fills in".
@@ -303,6 +311,7 @@ func (c *Chain) Enrich(ctx context.Context, meta BookMeta) BookMeta {
 		seedAuthor = meta.Authors[0]
 	}
 	seedGoodreadsID := meta.GoodreadsID
+	seedHardcoverID := meta.HardcoverID
 
 	timeout := c.PerProviderTimeout
 	if timeout <= 0 {
@@ -316,7 +325,7 @@ func (c *Chain) Enrich(ctx context.Context, meta BookMeta) BookMeta {
 			break
 		}
 		pctx, cancel := context.WithTimeout(ctx, timeout)
-		candidate, ok := c.lookup(pctx, provider, seedISBN, seedTitle, seedAuthor, seedGoodreadsID)
+		candidate, ok := c.lookup(pctx, provider, seedISBN, seedTitle, seedAuthor, seedGoodreadsID, seedHardcoverID)
 		cancel()
 		if ok {
 			Merge(&meta, candidate)
@@ -326,10 +335,18 @@ func (c *Chain) Enrich(ctx context.Context, meta BookMeta) BookMeta {
 }
 
 // lookup resolves one provider's view of the book, preferring the strongest
-// key available and falling back through weaker ones: the Goodreads book ID
-// (exact), then ISBN (exact), then a fuzzy-verified title/author match.
-func (c *Chain) lookup(ctx context.Context, provider Provider, isbn, title, author, goodreadsID string) (BookMeta, bool) {
-	// exact Goodreads detail fetch when we hold the id and this is Goodreads
+// key available and falling back through weaker ones: the provider's own
+// book ID (exact — Hardcover ID for Hardcover, Goodreads ID for Goodreads),
+// then ISBN (exact), then a fuzzy-verified title/author match.
+func (c *Chain) lookup(ctx context.Context, provider Provider, isbn, title, author, goodreadsID, hardcoverID string) (BookMeta, bool) {
+	// exact detail fetch when we hold the provider's own id
+	if hardcoverID != "" {
+		if hc, ok := provider.(hardcoverByID); ok {
+			if m, err := hc.FetchByHardcoverID(ctx, hardcoverID); err == nil && m != nil && m.Title != "" {
+				return *m, true
+			}
+		}
+	}
 	if goodreadsID != "" {
 		if gr, ok := provider.(goodreadsByID); ok {
 			if m, _, err := gr.FetchBook(ctx, goodreadsID); err == nil && m != nil && m.Title != "" {
@@ -345,15 +362,11 @@ func (c *Chain) lookup(ctx context.Context, provider Provider, isbn, title, auth
 	if title == "" {
 		return BookMeta{}, false
 	}
-	r, err := provider.Search(ctx, SearchParams{Title: title, Author: author, Limit: 1})
+	r, err := provider.Search(ctx, SearchParams{Title: title, Author: author, Limit: 5})
 	if err != nil || len(r) == 0 {
 		return BookMeta{}, false
 	}
-	// verify the fuzzy match before trusting it
-	if scoreCandidate(r[0], title, author) < 60 {
-		return BookMeta{}, false
-	}
-	return r[0], true
+	return bestEnrichMatch(r, title, author)
 }
 
 // dropSiblingOmnibuses removes a bibliography entry whose title contains two

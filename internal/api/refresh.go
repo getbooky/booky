@@ -51,9 +51,13 @@ func (s *Server) runLibraryRefresh(libraryID int64) {
 			break
 		}
 		seed := metadata.BookMeta{
-			Provider:    "refresh", // never matches a provider key, so all are queried
-			Title:       b.Title,
-			Authors:     []string{b.Author},
+			Provider: "refresh", // never matches a provider key, so all are queried
+			Title:    b.Title,
+			Authors:  []string{b.Author},
+			// the stored series rides along so a fuzzy provider answer can
+			// only fill an empty series, never replace the one on the book
+			SeriesName:  b.SeriesName,
+			SeriesIndex: b.SeriesNum,
 			ISBN13:      b.ISBN13,
 			GoodreadsID: b.GoodreadsID,
 			HardcoverID: b.HardcoverID,
