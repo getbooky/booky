@@ -1,0 +1,11 @@
+packages: []
+
+# Supply-chain guard: refuse packages younger than 24h (npm hijacks are
+# usually caught within hours). The excluded packages are browser-support
+# data that legitimately releases daily.
+minimumReleaseAge: 1440
+minimumReleaseAgeExclude:
+  - baseline-browser-mapping
+  - browserslist
+  - electron-to-chromium
+  - caniuse-lite

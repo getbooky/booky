@@ -1,0 +1,44 @@
+name: Wiki
+
+# docs/wiki/ is the wiki's source of truth: every push to main that touches it
+# republishes the GitHub wiki wholesale. Edit pages via PR, never in the wiki
+# UI — direct wiki edits are overwritten on the next sync.
+on:
+  push:
+    branches: [main]
+    paths: ["docs/wiki/**", ".github/workflows/wiki.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: write # the GITHUB_TOKEN's contents scope covers the wiki repo
+
+concurrency:
+  group: wiki
+  cancel-in-progress: true
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Publish docs/wiki to the GitHub wiki
+        run: |
+          if ! git clone --depth 1 \
+            "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.wiki.git" wiki; then
+            echo "::notice::No wiki repo yet — wikis need a public repo (or a paid plan) plus one first page created in the UI. docs/wiki/ stays browsable in-repo; this sync activates once the wiki exists."
+            exit 0
+          fi
+          rsync -a --delete --exclude .git docs/wiki/ wiki/
+          # in-repo links say Page.md so GitHub's file view works; the wiki
+          # serves pages extensionless, so strip .md from relative links
+          sed -i -E 's/\]\(([A-Za-z0-9_-]+)\.md(#[A-Za-z0-9_-]+)?\)/](\1\2)/g' wiki/*.md
+          cd wiki
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          if git diff --cached --quiet; then
+            echo "wiki already up to date"
+            exit 0
+          fi
+          git commit -m "Sync wiki from docs/wiki @ ${GITHUB_SHA::7}"
+          git push

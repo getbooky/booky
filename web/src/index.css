@@ -1,0 +1,202 @@
+@import 'tailwindcss';
+
+@plugin 'tailwindcss-animate';
+
+@custom-variant dark (&:is(.dark *));
+
+@theme {
+  --color-border: hsl(var(--border));
+  --color-input: hsl(var(--input));
+  --color-ring: hsl(var(--ring));
+  --color-background: hsl(var(--background));
+  --color-foreground: hsl(var(--foreground));
+  --color-surface: hsl(var(--surface));
+  --color-surface2: hsl(var(--surface2));
+  --color-surface3: hsl(var(--surface3));
+  --color-linesoft: hsl(var(--line-soft));
+  --color-faint: hsl(var(--faint));
+  --color-good: hsl(var(--good));
+  --color-info: hsl(var(--info));
+  --color-want: hsl(var(--want));
+  --color-brass: hsl(var(--brass));
+  --color-brass-ink: hsl(var(--brass-ink));
+
+  --color-primary: hsl(var(--primary));
+  --color-primary-foreground: hsl(var(--primary-foreground));
+
+  --color-secondary: hsl(var(--secondary));
+  --color-secondary-foreground: hsl(var(--secondary-foreground));
+
+  --color-destructive: hsl(var(--destructive));
+  --color-destructive-foreground: hsl(var(--destructive-foreground));
+
+  --color-muted: hsl(var(--muted));
+  --color-muted-foreground: hsl(var(--muted-foreground));
+
+  --color-accent: hsl(var(--accent));
+  --color-accent-foreground: hsl(var(--accent-foreground));
+
+  --color-popover: hsl(var(--popover));
+  --color-popover-foreground: hsl(var(--popover-foreground));
+
+  --color-card: hsl(var(--card));
+  --color-card-foreground: hsl(var(--card-foreground));
+
+  --font-book: 'Iowan Old Style', 'Palatino Linotype', Palatino, Georgia, serif;
+  --font-label: ui-monospace, 'SF Mono', 'Cascadia Code', Menlo, monospace;
+
+  --radius-lg: var(--radius);
+  --radius-md: calc(var(--radius) - 1px);
+  --radius-sm: calc(var(--radius) - 2px);
+
+  --animate-accordion-down: accordion-down 0.2s ease-out;
+  --animate-accordion-up: accordion-up 0.2s ease-out;
+
+  @keyframes accordion-down {
+    from {
+      height: 0;
+    }
+    to {
+      height: var(--radix-accordion-content-height);
+    }
+  }
+  @keyframes accordion-up {
+    from {
+      height: var(--radix-accordion-content-height);
+    }
+    to {
+      height: 0;
+    }
+  }
+}
+
+/*
+  The default border color has changed to `currentcolor` in Tailwind CSS v4,
+  so we've added these compatibility styles to make sure everything still
+  looks the same as it did with Tailwind CSS v3.
+
+  If we ever want to remove these styles, we need to add an explicit border
+  color utility to any element that depends on these defaults.
+*/
+@layer base {
+  *,
+  ::after,
+  ::before,
+  ::backdrop,
+  ::file-selector-button {
+    border-color: var(--color-gray-200, currentcolor);
+  }
+}
+
+@utility mono-label {
+  @apply font-label uppercase tracking-[0.11em];
+  font-size: 10.5px;
+}
+
+@utility cover-shadow {
+  box-shadow: var(--cover-shadow);
+}
+
+@utility cover-shine {
+  &::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    border-radius: inherit;
+    background: linear-gradient(
+      90deg,
+      rgba(0, 0, 0, 0.28),
+      rgba(255, 255, 255, 0.1) 5%,
+      rgba(255, 255, 255, 0) 12%,
+      rgba(0, 0, 0, 0.12) 97%
+    );
+    pointer-events: none;
+  }
+}
+
+/* Reading-room palette — dark-first. HSL triplets for shadcn compat. */
+@layer base {
+  :root {
+    --background: 30 25% 6%;          /* warm near-black */
+    --foreground: 40 39% 88%;         /* warm off-white */
+    --surface: 30 22% 9%;
+    --surface2: 30 24% 12%;
+    --surface3: 32 25% 15%;
+    --line-soft: 33 27% 13%;
+    --faint: 33 17% 36%;
+    --brass: 38 70% 51%;              /* lamp-light amber */
+    --brass-ink: 33 70% 6%;
+    --good: 96 31% 55%;
+    --info: 212 55% 67%;
+    --want: 6 52% 61%;
+
+    --card: var(--surface);
+    --card-foreground: var(--foreground);
+    --popover: var(--surface2);
+    --popover-foreground: var(--foreground);
+    --primary: var(--brass);
+    --primary-foreground: var(--brass-ink);
+    --secondary: var(--surface2);
+    --secondary-foreground: var(--foreground);
+    --muted: var(--surface2);
+    --muted-foreground: 34 17% 57%;
+    --accent: var(--surface3);
+    --accent-foreground: var(--foreground);
+    --destructive: var(--want);
+    --destructive-foreground: var(--foreground);
+    --border: 33 27% 17%;
+    --input: 33 27% 17%;
+    --ring: var(--brass);
+    --radius: 10px;
+    --cover-shadow: 0 5px 16px rgba(0, 0, 0, 0.5);
+  }
+
+  @media (prefers-color-scheme: light) {
+    :root:not([data-theme="dark"]) {
+      --background: 42 36% 91%;       /* aged paper */
+      --foreground: 35 25% 14%;
+      --surface: 44 48% 95%;
+      --surface2: 43 40% 90%;
+      --surface3: 41 36% 84%;
+      --line-soft: 41 31% 82%;
+      --faint: 38 17% 56%;
+      --brass: 38 75% 35%;
+      --brass-ink: 44 73% 97%;
+      --good: 105 36% 36%;
+      --info: 214 51% 40%;
+      --want: 6 49% 44%;
+      --muted-foreground: 38 19% 39%;
+      --border: 40 29% 76%;
+      --input: 40 29% 76%;
+      --cover-shadow: 0 4px 12px rgba(60, 48, 28, 0.28);
+    }
+  }
+  :root[data-theme="light"] {
+    --background: 42 36% 91%;
+    --foreground: 35 25% 14%;
+    --surface: 44 48% 95%;
+    --surface2: 43 40% 90%;
+    --surface3: 41 36% 84%;
+    --line-soft: 41 31% 82%;
+    --faint: 38 17% 56%;
+    --brass: 38 75% 35%;
+    --brass-ink: 44 73% 97%;
+    --good: 105 36% 36%;
+    --info: 214 51% 40%;
+    --want: 6 49% 44%;
+    --muted-foreground: 38 19% 39%;
+    --border: 40 29% 76%;
+    --input: 40 29% 76%;
+    --cover-shadow: 0 4px 12px rgba(60, 48, 28, 0.28);
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+  body {
+    @apply bg-background text-foreground;
+    font: 14px/1.5 system-ui, "Segoe UI", -apple-system, sans-serif;
+  }
+}

@@ -1,0 +1,25 @@
+# binaries & build output
+/booky
+/dist/
+web/dist/
+web/node_modules
+
+# local data
+*.db
+*.db-shm
+*.db-wal
+/config/
+/data/
+
+# editor / OS
+.DS_Store
+*.swp
+.idea/
+.vscode/
+
+# env & secrets — never commit real credentials
+.env
+.env.*
+
+# per-user agent config
+.claude/

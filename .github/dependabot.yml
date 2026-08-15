@@ -1,0 +1,30 @@
+# Weekly grouped dependency bumps — the scanners (govulncheck, pnpm audit,
+# Trivy) report known CVEs; this is what actually moves the versions.
+version: 2
+updates:
+  - package-ecosystem: gomod
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      go-deps:
+        patterns: ["*"]
+  - package-ecosystem: npm
+    directory: /web
+    schedule:
+      interval: weekly
+    groups:
+      npm-deps:
+        patterns: ["*"]
+    # Major bumps (Tailwind 4, TypeScript 7, …) break the build and need a
+    # deliberate migration — keep the auto-PRs to minors and patches.
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]

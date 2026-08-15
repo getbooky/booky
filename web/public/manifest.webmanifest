@@ -1,0 +1,13 @@
+{
+  "name": "Booky",
+  "short_name": "Booky",
+  "description": "Your self-hosted ebook library",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#130f0b",
+  "theme_color": "#1c1712",
+  "icons": [
+    { "src": "/favicon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" },
+    { "src": "/apple-touch-icon.png", "sizes": "180x180", "type": "image/png" }
+  ]
+}
