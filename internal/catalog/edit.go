@@ -23,6 +23,11 @@ var editableFields = map[string]string{
 	"releaseDate": "release_date",
 	"isbn13":      "isbn13",
 	"genres":      "genres",
+	// The canonical Hardcover identity is hand-editable so a wrong adoption
+	// is recoverable: paste the right id (refresh then pulls that exact
+	// book), or clear it (the next refresh re-matches by title/author —
+	// unless the cleared field is locked, which stops adoption entirely).
+	"hardcoverId": "hardcover_id",
 }
 
 // lockKey maps an edited field to its refresh-protection lock name.
@@ -149,6 +154,7 @@ func (s *Store) EditBook(bookID int64, updates map[string]string, lock bool) err
 		publisher    = CASE WHEN ? THEN ? ELSE publisher END,
 		release_date = CASE WHEN ? THEN ? ELSE release_date END,
 		isbn13       = CASE WHEN ? THEN ? ELSE isbn13 END,
+		hardcover_id = CASE WHEN ? THEN ? ELSE hardcover_id END,
 		genres       = CASE WHEN ? THEN ? ELSE genres END,
 		series_id    = CASE WHEN ? THEN ? ELSE series_id END,
 		series_num   = CASE WHEN ? THEN ? ELSE series_num END,
@@ -160,6 +166,9 @@ func (s *Store) EditBook(bookID int64, updates map[string]string, lock bool) err
 		has("publisher"), updates["publisher"],
 		has("releaseDate"), nullStr(updates["releaseDate"]),
 		has("isbn13"), nullStr(strings.TrimSpace(updates["isbn13"])),
+		// empty clears to NULL — the column is UNIQUE, and "" on many rows
+		// would collide where NULL never does
+		has("hardcoverId"), nullStr(strings.TrimSpace(updates["hardcoverId"])),
 		has("genres"), genresJSON(splitGenres(updates["genres"])),
 		setSeriesID, seriesIDVal,
 		hasNum, seriesNum,

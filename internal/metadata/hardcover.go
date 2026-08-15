@@ -151,6 +151,33 @@ func (h *Hardcover) byISBN(ctx context.Context, isbn string) ([]BookMeta, error)
 	return metas, nil
 }
 
+// FetchByHardcoverID fetches one exact book by its canonical Hardcover ID —
+// the strongest key the enrich chain can hold. Returns (nil, nil) when the
+// id doesn't resolve (deleted/merged records) so callers can fall back.
+func (h *Hardcover) FetchByHardcoverID(ctx context.Context, id string) (*BookMeta, error) {
+	if h.Token() == "" {
+		return nil, nil // not configured — chain moves on
+	}
+	n, err := strconv.ParseInt(strings.TrimSpace(id), 10, 64)
+	if err != nil {
+		return nil, fmt.Errorf("hardcover id %q is not numeric", id)
+	}
+	query := fmt.Sprintf(`query ($id: Int!) {
+	  books(where: {id: {_eq: $id}}, limit: 1) { %s }
+	}`, hcBookFields)
+	var out struct {
+		Books []hcBook `json:"books"`
+	}
+	if err := h.do(ctx, query, map[string]any{"id": n}, &out); err != nil {
+		return nil, err
+	}
+	if len(out.Books) == 0 {
+		return nil, nil
+	}
+	m := out.Books[0].toMeta()
+	return &m, nil
+}
+
 // byTitle resolves a title query through Hardcover's search endpoint
 // (Typesense-backed, relevance-ranked). The former books(title: {_ilike})
 // query is rejected by the live API ("ilike and related operations are not

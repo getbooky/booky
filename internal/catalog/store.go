@@ -352,7 +352,7 @@ func (s *Store) upsertBookWithAuthor(meta metadata.BookMeta, authorID int64) (in
 		seriesFlag, seriesIDVal,
 		seriesFlag, nullFloat(meta.SeriesIndex),
 		meta.GoodreadsID != "" && !s.hasIdentity(bookID, "goodreads_id"), nullStr(meta.GoodreadsID),
-		meta.HardcoverID != "" && !s.hasIdentity(bookID, "hardcover_id"), nullStr(meta.HardcoverID),
+		meta.HardcoverID != "" && !locks["hardcoverId"] && !s.hasIdentity(bookID, "hardcover_id"), nullStr(meta.HardcoverID),
 		meta.ISBN13 != "" && !locks["isbn13"] && !s.hasIdentity(bookID, "isbn13"), nullStr(meta.ISBN13),
 		bookID); err != nil {
 		return 0, fmt.Errorf("update book: %w", err)

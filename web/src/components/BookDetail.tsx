@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react"
 import { acquisition, api, canRead, coverUrl } from "@/api"
-import type { ApiBook } from "@/api"
+import type { ApiBook, ApiLibrary } from "@/api"
+import { AddToLibraryButton } from "@/components/AddToLibrary"
 import { Cover, hashColors } from "@/components/Cover"
 import { Tag, Fmt } from "@/components/bits"
 import { Button } from "@/components/ui/button"
@@ -129,6 +130,7 @@ export function EditMetadataDialog({ open, onOpenChange, book, onSaved }: {
   const [seriesNum, setSeriesNum] = useState(book.seriesNum ? String(book.seriesNum) : "")
   const [genres, setGenres] = useState((book.genres ?? []).join(", "))
   const [isbn13, setIsbn13] = useState(book.isbn13 ?? "")
+  const [hardcoverId, setHardcoverId] = useState(book.hardcoverId ?? "")
   // per-field refresh-protection locks; fetched fresh because list responses
   // don't carry them
   const [locks, setLocks] = useState<Record<string, boolean>>({})
@@ -194,6 +196,7 @@ export function EditMetadataDialog({ open, onOpenChange, book, onSaved }: {
     if (seriesNum !== numOrig) fields.seriesNum = seriesNum
     if (genres !== (book.genres ?? []).join(", ")) fields.genres = genres
     if (isbn13 !== (book.isbn13 ?? "")) fields.isbn13 = isbn13
+    if (hardcoverId !== (book.hardcoverId ?? "")) fields.hardcoverId = hardcoverId.trim()
     if (Object.keys(fields).length === 0) { onOpenChange(false); return }
     try {
       await api.editBook(book.id, fields, true)
@@ -257,6 +260,14 @@ export function EditMetadataDialog({ open, onOpenChange, book, onSaved }: {
             <Field label="Release date" lockKey="releaseDate"><Input value={releaseDate} onChange={e => setReleaseDate(e.target.value)} placeholder="YYYY-MM-DD" /></Field>
             <Field label="ISBN-13" lockKey="isbn13"><Input value={isbn13} onChange={e => setIsbn13(e.target.value)} /></Field>
           </div>
+          <Field label="Hardcover ID" lockKey="hardcoverId">
+            <Input value={hardcoverId} onChange={e => setHardcoverId(e.target.value)} placeholder="none" inputMode="numeric" />
+            <p className="mt-1 text-xs text-faint">
+              The canonical Hardcover identity — Refresh metadata pulls this exact book. Paste a
+              known id to re-link a wrong match, or clear it to let the next refresh re-match by
+              title and author (lock the empty field to stop matching entirely).
+            </p>
+          </Field>
           <Field label="Genres" lockKey="genres"><Input value={genres} onChange={e => setGenres(e.target.value)} placeholder="Thriller, Mystery, …" /></Field>
           <Field label="Description" lockKey="description"><Textarea value={description} onChange={e => setDescription(e.target.value)} rows={4} className="text-[13px]" /></Field>
           <Field label="Cover" lockKey="cover">
@@ -367,6 +378,26 @@ export function BookDetail({ book: initial, onBack, onChanged, onRead, onOpenSer
       onChanged()
     } catch (e) {
       toast.error(`Couldn't update: ${e instanceof Error ? e.message : e}`)
+    }
+  }
+
+  // Monitoring a catalog-only book is what puts it in a library (same as the
+  // author/series pages) — so a book that isn't shelved yet gets a Monitor
+  // button naming its destination instead of no control at all.
+  const { data: libData } = useApi(() => api.libraries())
+  const libraries = libData?.libraries ?? []
+  const [monitoring, setMonitoring] = useState(false)
+  const monitorInto = async (l: ApiLibrary) => {
+    setMonitoring(true)
+    try {
+      await api.setBookMonitored(l.id, book.id, true)
+      setBook({ ...book, libraryId: l.id, monitored: true })
+      toast.success(`${book.title} added to ${l.name} — monitored`)
+      onChanged()
+    } catch (e) {
+      toast.error(`Couldn't monitor: ${e instanceof Error ? e.message : e}`)
+    } finally {
+      setMonitoring(false)
     }
   }
 
@@ -500,7 +531,10 @@ export function BookDetail({ book: initial, onBack, onChanged, onRead, onOpenSer
               <span className="ml-2 flex items-center gap-2 text-xs text-muted-foreground">
                 Monitored <Switch checked={book.monitored} onCheckedChange={toggleMonitored} />
               </span>
-            ) : null}
+            ) : (
+              <AddToLibraryButton libraries={libraries} label="Monitor" className="ml-2 h-8"
+                onPick={monitorInto} busy={monitoring} />
+            )}
           </div>
           <p className="mt-4 max-w-[62ch] text-[13.5px] leading-relaxed text-muted-foreground">
             {book.description || "No description cached yet — it arrives with the next metadata refresh."}

@@ -305,6 +305,41 @@ func BestConfidentMatch(candidates []BookMeta, wantTitle, wantAuthor string) (Bo
 	return best, found
 }
 
+// bestEnrichMatch picks the candidate an Enrich gap-fill may trust: highest
+// scoreCandidate ≥ 60 (titles scored raw and series-suffix-stripped, like
+// BestConfidentMatch), with one extra gate — a candidate whose credited
+// authors CONTRADICT the wanted author is rejected outright. An exact title
+// match alone scores 100, so without the gate a same-titled book by a
+// completely different author ("The River" by the wrong author entirely)
+// passes verification and its identity, series, and cover merge into the
+// record. Unlike BestConfidentMatch's bar for canonical adoption, a candidate
+// crediting no authors at all is still allowed: it cannot contradict anyone,
+// and enrich merges only ever fill blanks.
+func bestEnrichMatch(candidates []BookMeta, wantTitle, wantAuthor string) (BookMeta, bool) {
+	cleaned := StripSeriesSuffix(wantTitle)
+	var best BookMeta
+	bestScore := 0.0
+	found := false
+	for _, c := range candidates {
+		score := scoreCandidate(c, wantTitle, wantAuthor)
+		if cleaned != wantTitle {
+			if s := scoreCandidate(c, cleaned, wantAuthor); s > score {
+				score = s
+			}
+		}
+		if score < confidentMatchScore {
+			continue
+		}
+		if wantAuthor != "" && len(c.Authors) > 0 && !authorsOverlap(c, wantAuthor) {
+			continue
+		}
+		if !found || score > bestScore {
+			best, bestScore, found = c, score, true
+		}
+	}
+	return best, found
+}
+
 // authorsOverlap reports whether a candidate's credited authors credibly
 // include the wanted author — exact/containment match on normalized names, or
 // at least half the wanted name's tokens present (initials and middle names

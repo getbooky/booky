@@ -25,9 +25,15 @@ func (s *Server) seedFromBook(bookID int64) (metadata.BookMeta, error) {
 		return metadata.BookMeta{}, errors.New("book not found")
 	}
 	return metadata.BookMeta{
-		Provider:    "refresh",
-		Title:       b.Title,
-		Authors:     []string{b.Author},
+		Provider: "refresh",
+		Title:    b.Title,
+		Authors:  []string{b.Author},
+		// The stored series rides along so enrich treats it as known: a fuzzy
+		// provider answer can only fill an EMPTY series, never replace the one
+		// already on the book. (A same-titled book by another author once
+		// swapped a correct series for its own this way.)
+		SeriesName:  b.SeriesName,
+		SeriesIndex: b.SeriesNum,
 		ISBN13:      b.ISBN13,
 		GoodreadsID: b.GoodreadsID,
 		HardcoverID: b.HardcoverID,
@@ -54,8 +60,9 @@ func (s *Server) handleBookRefresh(w http.ResponseWriter, r *http.Request) {
 	}
 	// no canonical identity yet: adopt one, silently falling back to a plain
 	// enrich when no confident match exists (refresh must never hard-fail on
-	// a messy title the way the explicit re-match endpoint does)
-	if book.HardcoverID == "" {
+	// a messy title the way the explicit re-match endpoint does). A locked
+	// hardcoverId is the user saying "stop guessing" — no adoption attempt.
+	if book.HardcoverID == "" && !book.FieldLocks["hardcoverId"] {
 		if adopted, err := s.rematchToHardcover(r.Context(), id); err == nil && adopted != nil {
 			writeJSON(w, http.StatusOK, adopted)
 			return
@@ -65,6 +72,24 @@ func (s *Server) handleBookRefresh(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeErr(w, http.StatusNotFound, err)
 		return
+	}
+	// A book that carries its canonical Hardcover identity is refreshed FROM
+	// that identity: fetch the exact record and make it the seed, so the
+	// canonical title, series, date, and cover flow through the upsert (where
+	// locked fields still win) instead of merely filling blanks. This is also
+	// what makes a hand-corrected Hardcover ID work — edit the id, hit
+	// refresh, and THAT book's metadata arrives. Any fetch trouble falls back
+	// to the stored seed: refresh degrades to gap-fill rather than failing.
+	if book.HardcoverID != "" {
+		hc := metadata.NewHardcover(func() string { return s.Settings.Get("hardcover_token") })
+		if m, err := hc.FetchByHardcoverID(r.Context(), book.HardcoverID); err == nil && m != nil && m.Title != "" {
+			// stored identities Hardcover doesn't know carry over
+			m.GoodreadsID = book.GoodreadsID
+			if m.ISBN13 == "" {
+				m.ISBN13 = book.ISBN13
+			}
+			seed = *m
+		}
 	}
 	enriched := s.Chain.Enrich(r.Context(), seed)
 	if _, err := s.Catalog.UpsertBook(enriched); err != nil {

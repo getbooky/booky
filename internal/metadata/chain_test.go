@@ -410,6 +410,95 @@ func TestSearchSkipsEnrichOnlyProvider(t *testing.T) {
 	}
 }
 
+// The wrong-book regression: a same-titled book by a COMPLETELY different
+// author arrives as the provider's top title-search hit (an exact title match
+// alone scores 100), and enrich used to merge its identity, series, and cover
+// into the record — turning a correct book page into a chimera of the stored
+// author and the wrong book's everything-else.
+func TestEnrichRejectsSameTitleDifferentAuthor(t *testing.T) {
+	hc := &paramFake{key: "hardcover", fn: func(p SearchParams) []BookMeta {
+		if p.Title == "" {
+			return nil
+		}
+		return []BookMeta{{
+			Provider: "hardcover", Title: "The Current", Authors: []string{"Wade Merrell"},
+			HardcoverID: "1552814", SeriesName: "Current", SeriesIndex: 1,
+			CoverURL: "https://img.example/wrong.jpg", ReleaseDate: "2011-09-01", RatingsCount: 2100,
+		}}
+	}}
+	chain := NewChain(func() []string { return []string{"hardcover"} }, hc)
+
+	seed := BookMeta{Provider: "refresh", Title: "The Current", Authors: []string{"Nora Whitfield"}}
+	got := chain.Enrich(context.Background(), seed)
+	if got.HardcoverID != "" || got.SeriesName != "" || got.CoverURL != "" {
+		t.Fatalf("wrong-author book must not merge, got %+v", got)
+	}
+}
+
+// With several hits in hand, the author-verified match wins even when a more
+// popular same-titled book by someone else outranks it in search relevance.
+func TestEnrichPicksAuthorMatchBelowTopHit(t *testing.T) {
+	hc := &paramFake{key: "hardcover", fn: func(p SearchParams) []BookMeta {
+		if p.Title == "" {
+			return nil
+		}
+		return []BookMeta{
+			{Provider: "hardcover", Title: "The Current", Authors: []string{"Wade Merrell"}, HardcoverID: "1", RatingsCount: 2100},
+			{Provider: "hardcover", Title: "The Current", Authors: []string{"Nora Whitfield"}, HardcoverID: "2", Description: "The right one."},
+		}
+	}}
+	chain := NewChain(func() []string { return []string{"hardcover"} }, hc)
+
+	seed := BookMeta{Provider: "refresh", Title: "The Current", Authors: []string{"Nora Whitfield"}}
+	got := chain.Enrich(context.Background(), seed)
+	if got.HardcoverID != "2" || got.Description != "The right one." {
+		t.Fatalf("author-verified hit should win, got %+v", got)
+	}
+}
+
+// hcByIDFake stands in for the Hardcover provider's exact by-id fetch.
+type hcByIDFake struct {
+	paramFake
+	byID func(id string) *BookMeta
+}
+
+func (f *hcByIDFake) FetchByHardcoverID(ctx context.Context, id string) (*BookMeta, error) {
+	if f.byID == nil {
+		return nil, nil
+	}
+	return f.byID(id), nil
+}
+
+// Holding the canonical Hardcover ID, enrich fetches that exact book rather
+// than gambling on a title search that could land on a same-titled stranger.
+func TestEnrichUsesHardcoverByID(t *testing.T) {
+	titleSearches := 0
+	hc := &hcByIDFake{
+		paramFake: paramFake{key: "hardcover", fn: func(p SearchParams) []BookMeta {
+			if p.Title != "" {
+				titleSearches++
+			}
+			return []BookMeta{{Provider: "hardcover", Title: "The Current", Authors: []string{"Wade Merrell"}, HardcoverID: "999"}}
+		}},
+		byID: func(id string) *BookMeta {
+			if id != "42" {
+				return nil
+			}
+			return &BookMeta{Provider: "hardcover", Title: "The Current", Authors: []string{"Nora Whitfield"}, HardcoverID: "42", Description: "Exact record."}
+		},
+	}
+	chain := NewChain(func() []string { return []string{"hardcover"} }, hc)
+
+	seed := BookMeta{Provider: "refresh", Title: "The Current", Authors: []string{"Nora Whitfield"}, HardcoverID: "42"}
+	got := chain.Enrich(context.Background(), seed)
+	if got.Description != "Exact record." {
+		t.Fatalf("by-id fetch not used: %+v", got)
+	}
+	if titleSearches != 0 {
+		t.Errorf("title search ran %d times despite an exact by-id answer", titleSearches)
+	}
+}
+
 func TestEnrichStillUsesEnrichOnlyProvider(t *testing.T) {
 	// Hardcover is the seed; Goodreads (enrich-only) must still fill the gap
 	gr := &enrichOnlyFake{fakeProvider: fakeProvider{key: "goodreads",

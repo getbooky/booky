@@ -749,3 +749,61 @@ func TestEmptiedAuthorsAndSeriesLeaveTheirPages(t *testing.T) {
 		t.Fatalf("a hand-added author must stay: %+v", authors)
 	}
 }
+
+// The canonical Hardcover identity is hand-editable so a wrong adoption is
+// recoverable: a pasted id replaces the stored one, a cleared id stays
+// cleared while the (auto-)locked field blocks refresh refills, and
+// unlocking hands the blank back to the providers.
+func TestEditHardcoverIDReplaceClearLock(t *testing.T) {
+	s := testStore(t)
+	id, err := s.UpsertBook(metadata.BookMeta{
+		Provider: "hardcover", Title: "The Current", Authors: []string{"Nora Whitfield"},
+		HardcoverID: "1552814",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// paste a corrected id
+	if err := s.EditBook(id, map[string]string{"hardcoverId": "42"}, true); err != nil {
+		t.Fatalf("EditBook set: %v", err)
+	}
+	b, err := s.GetBook(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b.HardcoverID != "42" {
+		t.Fatalf("hardcover id = %q, want 42", b.HardcoverID)
+	}
+	if !b.FieldLocks["hardcoverId"] {
+		t.Fatal("edited hardcoverId should auto-lock")
+	}
+
+	// clear it — the locked blank must survive a refresh upsert
+	if err := s.EditBook(id, map[string]string{"hardcoverId": ""}, true); err != nil {
+		t.Fatalf("EditBook clear: %v", err)
+	}
+	if _, err := s.UpsertBook(metadata.BookMeta{
+		Provider: "refresh", Title: "The Current", Authors: []string{"Nora Whitfield"},
+		HardcoverID: "999",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ = s.GetBook(id); b.HardcoverID != "" {
+		t.Fatalf("locked blank was refilled to %q", b.HardcoverID)
+	}
+
+	// unlocked, the blank fills in again like any adoption
+	if err := s.SetFieldLock(id, "hardcoverId", false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.UpsertBook(metadata.BookMeta{
+		Provider: "refresh", Title: "The Current", Authors: []string{"Nora Whitfield"},
+		HardcoverID: "999",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ = s.GetBook(id); b.HardcoverID != "999" {
+		t.Fatalf("unlocked blank should fill, got %q", b.HardcoverID)
+	}
+}
