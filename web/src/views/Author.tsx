@@ -1,11 +1,10 @@
 import { useMemo, useState } from "react"
 import { api, canRead, coverUrl } from "@/api"
 import type { ApiAuthor, ApiBook, ApiLibrary } from "@/api"
-import { PickLibraryDialog } from "@/components/PickLibraryDialog"
+import { MonitorSwitch } from "@/components/AddToLibrary"
 import { useApi } from "@/hooks/use-api"
 import { MiniCover, hashColors } from "@/components/Cover"
 import { Tag, Fmt, Chips } from "@/components/bits"
-import { Switch } from "@/components/ui/switch"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs"
@@ -22,7 +21,14 @@ import { bookRibbon } from "@/views/Library"
 
 const tabCls = "rounded-none border-b-2 border-transparent px-0.5 pb-2.5 pt-0 text-sm font-semibold data-[state=active]:border-brass data-[state=active]:bg-transparent data-[state=active]:shadow-none"
 
-function BookRow({ book, onToggle, onOpen, onRead }: { book: ApiBook; onToggle: (b: ApiBook, v: boolean) => void; onOpen: (b: ApiBook) => void; onRead: (b: ApiBook) => void }) {
+function BookRow({ book, libraries, onToggle, onPick, onOpen, onRead }: {
+  book: ApiBook
+  libraries: ApiLibrary[]
+  onToggle: (b: ApiBook, v: boolean) => void
+  onPick: (b: ApiBook, library: ApiLibrary) => void
+  onOpen: (b: ApiBook) => void
+  onRead: (b: ApiBook) => void
+}) {
   const [c1, c2] = hashColors(book.title)
   // full date when known ("2025-09-29"), bare year for announced books
   const released = book.releaseDate || "—"
@@ -69,7 +75,7 @@ function BookRow({ book, onToggle, onOpen, onRead }: { book: ApiBook; onToggle: 
         {book.filePath
           ? <Tag kind="good" className="hidden sm:inline-block">On shelf</Tag>
           : <Tag kind={book.monitored ? "want" : "dim"} className="hidden sm:inline-block">{book.monitored ? "Missing" : book.libraryId ? "Not monitored" : "Not in library"}</Tag>}
-        <Switch checked={book.monitored} onCheckedChange={v => onToggle(book, v)} aria-label={`Monitor ${book.title}`} />
+        <MonitorSwitch book={book} libraries={libraries} onToggle={onToggle} onPick={onPick} />
       </div>
     </div>
   )
@@ -114,15 +120,13 @@ export function AuthorView({ author, onBack, onOpenBook, onRead, focusSeries }: 
   const libsQuery = useApi(() => api.libraries())
   const libraries = libsQuery.data?.libraries ?? []
 
-  // Monitoring a catalog-only book is what puts it in a library. One library
-  // needs no asking; several open the picker — silently taking the first
-  // dropped books onto somebody else's shelf.
-  const [pickFor, setPickFor] = useState<ApiBook | null>(null)
+  // Monitoring a catalog-only book is what puts it in a library. The switch
+  // itself asks which one when there are several (MonitorSwitch) — toggle
+  // only ever sees the direct cases.
   const monitorInto = async (b: ApiBook, library: ApiLibrary) => {
     try {
       await api.setBookMonitored(library.id, b.id, true)
       toast.success(`${b.title} added to ${library.name} — monitored`)
-      setPickFor(null)
       reload()
     } catch (e) {
       toast.error(`Couldn't update: ${e instanceof Error ? e.message : e}`)
@@ -133,10 +137,6 @@ export function AuthorView({ author, onBack, onOpenBook, onRead, focusSeries }: 
       if (!v) return // not shelved anywhere — nothing to unmonitor
       if (libraries.length === 0) {
         toast.error("Create a library first")
-        return
-      }
-      if (libraries.length > 1) {
-        setPickFor(b)
         return
       }
       await monitorInto(b, libraries[0])
@@ -293,7 +293,7 @@ export function AuthorView({ author, onBack, onOpenBook, onRead, focusSeries }: 
 
         <TabsContent value="books" className="mt-4">
           <div className="border-t">
-            {books.map(b => <BookRow key={`${b.id}-${b.libraryId}`} book={b} onToggle={toggle} onOpen={onOpenBook} onRead={onRead} />)}
+            {books.map(b => <BookRow key={`${b.id}-${b.libraryId}`} book={b} libraries={libraries} onToggle={toggle} onPick={monitorInto} onOpen={onOpenBook} onRead={onRead} />)}
           </div>
           {books.length === 0 && !loading && (
             <p className="py-6 text-[13px] text-muted-foreground">
@@ -315,7 +315,7 @@ export function AuthorView({ author, onBack, onOpenBook, onRead, focusSeries }: 
                 <span className="mono-label text-faint">{list.length} books · in order</span>
               </div>
               <div className="border-t">
-                {list.map(b => <BookRow key={`${b.id}-${b.libraryId}`} book={b} onToggle={toggle} onOpen={onOpenBook} onRead={onRead} />)}
+                {list.map(b => <BookRow key={`${b.id}-${b.libraryId}`} book={b} libraries={libraries} onToggle={toggle} onPick={monitorInto} onOpen={onOpenBook} onRead={onRead} />)}
               </div>
             </div>
           ))}
@@ -326,14 +326,12 @@ export function AuthorView({ author, onBack, onOpenBook, onRead, focusSeries }: 
                 <span className="mono-label text-faint">{standalone.length} books</span>
               </div>
               <div className="border-t">
-                {standalone.map(b => <BookRow key={`${b.id}-${b.libraryId}`} book={b} onToggle={toggle} onOpen={onOpenBook} onRead={onRead} />)}
+                {standalone.map(b => <BookRow key={`${b.id}-${b.libraryId}`} book={b} libraries={libraries} onToggle={toggle} onPick={monitorInto} onOpen={onOpenBook} onRead={onRead} />)}
               </div>
             </div>
           )}
         </TabsContent>
       </Tabs>
-      <PickLibraryDialog book={pickFor} libraries={libraries}
-        onPick={l => { if (pickFor) void monitorInto(pickFor, l) }} onClose={() => setPickFor(null)} />
     </section>
   )
 }
