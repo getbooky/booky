@@ -3,8 +3,25 @@ package settings
 
 import (
 	"database/sql"
+	"encoding/base64"
+	"log"
 	"strings"
+
+	"github.com/getbooky/booky/internal/secrets"
 )
+
+// SecretKeys are settings whose values are credentials. With a keeper wired
+// (production), they're sealed AES-256-GCM before touching the database — the
+// key lives outside booky.db, so a downloaded backup can't yield them. The
+// API additionally never echoes them (see the handlers' masking).
+var SecretKeys = map[string]bool{
+	"hardcover_token": true, "prowlarr_api_key": true, "sab_api_key": true,
+	"annas_key": true, "zlib_password": true,
+}
+
+// encPrefix marks a sealed value; anything without it is legacy plaintext,
+// re-sealed by the startup sweep.
+const encPrefix = "enc1:"
 
 // Defaults applied when a key has never been written.
 var defaults = map[string]string{
@@ -45,9 +62,31 @@ var defaults = map[string]string{
 
 type Store struct {
 	db *sql.DB
+	// keeper seals SecretKeys values at rest; nil (tests, tools) stores
+	// them as-is.
+	keeper *secrets.Keeper
 }
 
 func New(db *sql.DB) *Store { return &Store{db: db} }
+
+// UseKeeper turns on at-rest encryption for secret settings and re-seals any
+// legacy plaintext values already in the table (idempotent — sealed values
+// carry a marker prefix).
+func (s *Store) UseKeeper(k *secrets.Keeper) {
+	s.keeper = k
+	for key := range SecretKeys {
+		var v string
+		if err := s.db.QueryRow(`SELECT value FROM settings WHERE key = ?`, key).Scan(&v); err != nil {
+			continue
+		}
+		if v == "" || strings.HasPrefix(v, encPrefix) {
+			continue
+		}
+		if err := s.Set(key, v); err != nil {
+			log.Printf("settings: sealing %s: %v", key, err)
+		}
+	}
+}
 
 func (s *Store) Get(key string) string {
 	var v string
@@ -55,10 +94,34 @@ func (s *Store) Get(key string) string {
 	if err != nil {
 		return defaults[key]
 	}
+	if strings.HasPrefix(v, encPrefix) {
+		if s.keeper == nil {
+			log.Printf("settings: %s is sealed but no secret key is loaded", key)
+			return ""
+		}
+		ct, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(v, encPrefix))
+		if err != nil {
+			log.Printf("settings: %s: corrupt sealed value", key)
+			return ""
+		}
+		plain, err := s.keeper.Open(ct)
+		if err != nil {
+			log.Printf("settings: %s: %v", key, err)
+			return ""
+		}
+		return plain
+	}
 	return v
 }
 
 func (s *Store) Set(key, value string) error {
+	if SecretKeys[key] && s.keeper != nil && value != "" {
+		ct, err := s.keeper.Seal(value)
+		if err != nil {
+			return err
+		}
+		value = encPrefix + base64.StdEncoding.EncodeToString(ct)
+	}
 	_, err := s.db.Exec(`INSERT INTO settings (key, value) VALUES (?, ?)
 		ON CONFLICT(key) DO UPDATE SET value = excluded.value`, key, value)
 	return err

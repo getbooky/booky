@@ -129,6 +129,7 @@ func (im *Importer) Deliver(bookID, libraryID int64, srcPath string, ns NamingSe
 		return "", err
 	}
 	_ = im.Catalog.AddHistory(bookID, libraryID, "imported", dst)
+	im.notifyFileAdded(bookID, libraryID, dst, format)
 
 	// hardlink into every other library that wants this book and has no file
 	rows, err := im.DB.Query(`SELECT library_id FROM library_books
@@ -161,6 +162,7 @@ func (im *Importer) Deliver(bookID, libraryID int64, srcPath string, ns NamingSe
 			continue
 		}
 		_ = im.Catalog.AddHistory(bookID, other, "imported", link+" (hardlink)")
+		im.notifyFileAdded(bookID, other, link, format)
 	}
 	return dst, nil
 }

@@ -97,10 +97,10 @@ export default function App() {
       </>
     )
   }
-  return <BookyApp user={me.data?.user ?? null} onLoggedOut={me.reload} />
+  return <BookyApp user={me.data?.user ?? null} usersExist={me.data?.authRequired === true} onLoggedOut={me.reload} />
 }
 
-function BookyApp({ user, onLoggedOut }: { user: ApiUser | null; onLoggedOut: () => void }) {
+function BookyApp({ user, usersExist, onLoggedOut }: { user: ApiUser | null; usersExist: boolean; onLoggedOut: () => void }) {
   // Everything below renders against the signed-in account's role: admins get
   // the management controls, a plain user gets their libraries and nothing
   // that would come back 403.
@@ -162,20 +162,20 @@ function BookyApp({ user, onLoggedOut }: { user: ApiUser | null; onLoggedOut: ()
   const libraries = libs.data?.libraries ?? []
   const bumped = () => { setRefreshTick(t => t + 1); libs.reload() }
 
-  // First run: no libraries yet → greet with the setup wizard, once. Skipping
-  // is remembered so a deliberately-empty Booky doesn't nag on every load.
+  // First run: the wizard greets exactly while NO account exists — its first
+  // step (creating the admin) is the one mandatory piece of setup, and once
+  // any account is made it never auto-opens again, libraries or not. An
+  // explicit dismissal is remembered per-browser so it doesn't nag every
+  // load; admins can re-run it any time from Settings → About.
   const [wizardOpen, setWizardOpen] = useState(false)
   const wizardOffered = useRef(false)
   useEffect(() => {
-    if (wizardOffered.current || libs.loading || !libs.data) return
-    // "no libraries" now also describes a user whose admin hasn't assigned
-    // them any — the wizard creates libraries and configures sources, so
-    // offering it to them would be a tour of 403s
-    if (access.isAdmin && (libs.data.libraries ?? []).length === 0 && !localStorage.getItem("booky-setup-offered")) {
+    if (wizardOffered.current) return
+    if (!usersExist && !localStorage.getItem("booky-setup-offered")) {
       wizardOffered.current = true
       setWizardOpen(true)
     }
-  }, [libs.loading, libs.data, access.isAdmin])
+  }, [usersExist])
   const closeWizard = (v: boolean) => {
     setWizardOpen(v)
     if (!v) { localStorage.setItem("booky-setup-offered", "1"); bumped() }

@@ -29,18 +29,24 @@ root to them.
 
 ## First run
 
-Open `http://<server>:8787`. The wizard walks through libraries → metadata →
-quality profile → sources → SABnzbd → watched lists → your admin account →
-e-readers. Every step is skippable, per-step or entirely — wizard fields are
-ordinary settings and live in Settings afterwards.
+Open `http://<server>:8787`. The wizard opens with the one required step —
+creating your admin account — then walks through libraries → metadata →
+quality profile → sources → SABnzbd → watched lists → e-readers → Send to
+Kindle. Everything after the account is skippable, per-step or entirely —
+wizard fields are ordinary settings and live in Settings afterwards. The
+wizard only appears on its own while no account exists; admins can re-run it
+from Settings → About.
 
 ## Accounts
 
-Until the first user account exists, Booky is open — creating your admin (in
-the wizard or Settings → Users) is what turns on login. Passwords are hashed
-(bcrypt) and login is rate-limited. OPDS feeds and KoReader devices use their
-own per-library credentials, never your account — see
-[Reading and Devices](Reading-and-Devices.md).
+Creating the admin account is the wizard's first, mandatory step: the API is
+open only for that brief first-run window and locks the moment the account
+exists. Passwords are hashed (bcrypt) and login is rate-limited. Credentials
+Booky must present elsewhere — SMTP passwords for Send to Kindle, provider
+tokens and API keys — are stored write-only (never shown again in the UI or
+API) and encrypted at rest, under a key kept outside the database. OPDS feeds
+and KoReader devices use their own per-library credentials, never your
+account — see [Reading and Devices](Reading-and-Devices.md).
 
 Roles and per-library access are covered in
 [Libraries and Users](Libraries-and-Users.md).

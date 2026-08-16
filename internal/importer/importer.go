@@ -34,6 +34,17 @@ type Importer struct {
 	// AutoMatchThreshold: candidates scoring at or above are matched without
 	// review; below lands in the review queue.
 	AutoMatchThreshold float64
+	// OnFileAdded fires after Deliver records a file for a library (primary
+	// and hardlinks alike) — the Send-to-Kindle auto-send hook. Deliberately
+	// NOT fired from in-place scans: matching an existing shelf must not
+	// email a whole backlog to somebody's Kindle.
+	OnFileAdded func(bookID, libraryID int64, path, format string)
+}
+
+func (im *Importer) notifyFileAdded(bookID, libraryID int64, path, format string) {
+	if im.OnFileAdded != nil {
+		im.OnFileAdded(bookID, libraryID, path, format)
+	}
 }
 
 func New(db *sql.DB, cat *catalog.Store, chain *metadata.Chain) *Importer {

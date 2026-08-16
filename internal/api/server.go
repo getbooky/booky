@@ -15,6 +15,7 @@ import (
 	"github.com/getbooky/booky/internal/backup"
 	"github.com/getbooky/booky/internal/catalog"
 	"github.com/getbooky/booky/internal/importer"
+	"github.com/getbooky/booky/internal/kindle"
 	"github.com/getbooky/booky/internal/koreader"
 	"github.com/getbooky/booky/internal/metadata"
 	"github.com/getbooky/booky/internal/opds"
@@ -40,6 +41,7 @@ type Server struct {
 	Watcher      *watcher.Watcher
 	Auth         *auth.Store
 	KoReader     *koreader.Store
+	Kindle       *kindle.Store
 	Backups      *backup.Manager
 	OPDS         *opds.Handler
 	// mediaRoot is the media mount in the documented Docker deployment:
@@ -66,6 +68,7 @@ type Deps struct {
 	Watcher      *watcher.Watcher
 	Auth         *auth.Store
 	KoReader     *koreader.Store
+	Kindle       *kindle.Store
 	Backups      *backup.Manager
 	OPDS         *opds.Handler
 }
@@ -80,7 +83,7 @@ func New(d Deps) (*Server, error) {
 		Catalog: d.Catalog, Chain: d.Chain, Importer: d.Importer,
 		Covers: d.Covers, AuthorPhotos: d.AuthorPhotos, Settings: d.Settings, Logs: d.Logs,
 		Acquire: d.Acquire, Watcher: d.Watcher,
-		Auth: d.Auth, KoReader: d.KoReader, Backups: d.Backups, OPDS: d.OPDS,
+		Auth: d.Auth, KoReader: d.KoReader, Kindle: d.Kindle, Backups: d.Backups, OPDS: d.OPDS,
 		mediaRoot: "/data",
 	}, nil
 }
@@ -171,6 +174,15 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/v1/calendar", s.handleCalendar)
 	mux.HandleFunc("GET /api/v1/settings/{key}", s.handleGetSetting)
 	mux.HandleFunc("PUT /api/v1/settings/{key}", s.handlePutSetting)
+	mux.HandleFunc("GET /api/v1/kindle/smtp", s.handleKindleSMTPGet)
+	mux.HandleFunc("PUT /api/v1/kindle/smtp", s.handleKindleSMTPPut)
+	mux.HandleFunc("DELETE /api/v1/kindle/smtp", s.handleKindleSMTPDelete)
+	mux.HandleFunc("POST /api/v1/kindle/smtp/test", s.handleKindleSMTPTest)
+	mux.HandleFunc("GET /api/v1/kindle/devices", s.handleKindleDevices)
+	mux.HandleFunc("POST /api/v1/kindle/devices", s.handleKindleCreateDevice)
+	mux.HandleFunc("DELETE /api/v1/kindle/devices/{id}", s.handleKindleRemoveDevice)
+	mux.HandleFunc("POST /api/v1/kindle/devices/{id}/test", s.handleKindleDeviceTest)
+	mux.HandleFunc("POST /api/v1/books/{id}/send", s.handleBookSendToKindle)
 	s.OPDS.Register(mux)
 	mux.Handle("/", s.spaHandler())
 	return s.requireAuth(mux)
@@ -194,6 +206,13 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	if err := s.db.Ping(); err != nil {
 		status = "degraded"
 		code = http.StatusServiceUnavailable
+	}
+	// The endpoint stays open for health probes, but the version is for
+	// signed-in eyes: telling strangers the exact build tells them which
+	// bugs to try. Pre-auth (setup) still sees it.
+	if s.Auth.Enabled() && s.sessionUser(r) == nil {
+		writeJSON(w, code, map[string]string{"status": status})
+		return
 	}
 	writeJSON(w, code, map[string]string{"app": "booky", "version": s.version, "status": status})
 }

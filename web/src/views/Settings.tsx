@@ -13,11 +13,12 @@ import { DeleteLibraryDialog } from "@/components/DeleteLibraryDialog"
 import { SourcesPanel, ClientsPanel, ProfilesPanel } from "@/views/SettingsAcquire"
 import { ListsPanel } from "@/views/SettingsLists"
 import { UsersPanel, BackupsPanel, DevicesPanel } from "@/views/SettingsDelivery"
+import { KindlePanel } from "@/views/SettingsKindle"
 import { delivery } from "@/api"
 import { cn } from "@/lib/utils"
 import { useAccess } from "@/lib/access"
 
-type Panel = "libraries" | "profiles" | "metadata" | "sources" | "clients" | "lists" | "koreader" | "backups" | "users" | "about" | "health" | "logs"
+type Panel = "libraries" | "profiles" | "metadata" | "sources" | "clients" | "lists" | "koreader" | "kindle" | "backups" | "users" | "about" | "health" | "logs"
 
 const NAV: { id: Panel; label: string }[] = [
   { id: "libraries", label: "Libraries" },
@@ -27,6 +28,7 @@ const NAV: { id: Panel; label: string }[] = [
   { id: "clients", label: "Download Clients" },
   { id: "lists", label: "Watched Lists" },
   { id: "koreader", label: "KoReader Devices" },
+  { id: "kindle", label: "Send to Kindle" },
   { id: "backups", label: "Backups" },
   { id: "users", label: "Users" },
   { id: "health", label: "Health" },
@@ -690,7 +692,7 @@ function LogsPanel() {
 // wizard" button was the one that got through — harmless in the end, since
 // every step of the wizard is admin-only server-side, but it offered a user a
 // flow that could only fail.
-const USER_PANELS: Panel[] = ["koreader", "about"]
+const USER_PANELS: Panel[] = ["koreader", "kindle", "about"]
 
 export function SettingsView() {
   const { isAdmin } = useAccess()
@@ -737,6 +739,7 @@ export function SettingsView() {
           {panel === "clients" && <ClientsPanel />}
           {panel === "lists" && <ListsPanel />}
           {panel === "koreader" && <DevicesPanel />}
+          {panel === "kindle" && <KindlePanel />}
           {panel === "backups" && <BackupsPanel />}
           {panel === "users" && <UsersPanel />}
         </div>

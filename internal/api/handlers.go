@@ -12,6 +12,7 @@ import (
 
 	"github.com/getbooky/booky/internal/epub"
 	"github.com/getbooky/booky/internal/metadata"
+	"github.com/getbooky/booky/internal/settings"
 )
 
 // ---- metadata search ----
@@ -479,11 +480,9 @@ var userReadableKeys = map[string]bool{
 // "add scope" button for users.
 var userWritableKeys = map[string]bool{"user_scopes": true}
 
-// secretKeys are never echoed back — GET returns a mask instead.
-var secretKeys = map[string]bool{
-	"hardcover_token": true, "prowlarr_api_key": true, "sab_api_key": true,
-	"annas_key": true, "zlib_password": true,
-}
+// secretKeys are never echoed back — GET returns a mask instead. The list
+// lives with the settings store, which also seals these at rest.
+var secretKeys = settings.SecretKeys
 
 // settingKeyFor gives each account its own slot for the settings that are
 // really per-person UI state. Saved sidebar scopes are the only one: they live

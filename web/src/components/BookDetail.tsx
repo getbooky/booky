@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react"
-import { acquisition, api, canRead, coverUrl } from "@/api"
-import type { ApiBook, ApiLibrary } from "@/api"
+import { acquisition, api, canRead, coverUrl, kindle } from "@/api"
+import type { ApiBook, ApiKindleDevice, ApiLibrary } from "@/api"
 import { AddToLibraryButton } from "@/components/AddToLibrary"
 import { Cover, hashColors } from "@/components/Cover"
 import { Tag, Fmt } from "@/components/bits"
@@ -11,7 +11,7 @@ import { Input } from "@/components/ui/input"
 import { Textarea } from "@/components/ui/textarea"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu"
-import { ArrowLeft, BookOpenText, FolderInput, Lock, LockOpen, Pencil, RefreshCw, Search, Trash2, Upload, Zap } from "lucide-react"
+import { ArrowLeft, BookOpenText, FolderInput, Lock, LockOpen, Mail, Pencil, RefreshCw, Search, Trash2, Upload, Zap } from "lucide-react"
 import { toast } from "sonner"
 import { cn } from "@/lib/utils"
 import { useIsAdmin } from "@/lib/access"
@@ -381,6 +381,29 @@ export function BookDetail({ book: initial, onBack, onChanged, onRead, onOpenSer
     }
   }
 
+  // Send to Kindle: the button appears only when everything is ready — the
+  // caller has a device covering this library whose owner email is set, and
+  // the file is a format Amazon takes by email. Otherwise the action row
+  // looks exactly as it always did.
+  const { data: kindleData } = useApi(() => kindle.devices())
+  const [sending, setSending] = useState(false)
+  const bookLibraryId = book.libraryId ?? 0
+  const kindleTargets = (kindleData?.devices ?? []).filter(d =>
+    d.emailConfigured && bookLibraryId > 0 && d.libraryIds.includes(bookLibraryId))
+  const kindleSendable = !!book.filePath && ["epub", "pdf"].includes((book.fileFormat ?? "").toLowerCase())
+  const sendToKindle = async (d: ApiKindleDevice) => {
+    setSending(true)
+    toast(`Sending to ${d.name}…`)
+    try {
+      await kindle.sendBook(book.id, d.id)
+      toast.success(`${book.title} → ${d.name} — it lands in the Kindle's Docs`)
+    } catch (e) {
+      toast.error(`Send failed: ${e instanceof Error ? e.message : e}`)
+    } finally {
+      setSending(false)
+    }
+  }
+
   // Monitoring a catalog-only book is what puts it in a library (same as the
   // author/series pages) — so a book that isn't shelved yet gets a Monitor
   // button naming its destination instead of no control at all.
@@ -472,6 +495,38 @@ export function BookDetail({ book: initial, onBack, onChanged, onRead, onOpenSer
                 </TooltipTrigger>
                 <TooltipContent>Manual import — deliver a file you already have</TooltipContent>
               </Tooltip>
+            )}
+            {kindleSendable && kindleTargets.length === 1 && (
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Button variant="outline" size="icon" className="h-9 w-9" aria-label="Send to Kindle"
+                    disabled={sending} onClick={() => void sendToKindle(kindleTargets[0])}>
+                    <Mail className="h-4 w-4" />
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent>Send to Kindle — {kindleTargets[0].name}</TooltipContent>
+              </Tooltip>
+            )}
+            {kindleSendable && kindleTargets.length > 1 && (
+              <DropdownMenu>
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <DropdownMenuTrigger asChild>
+                      <Button variant="outline" size="icon" className="h-9 w-9" aria-label="Send to Kindle" disabled={sending}>
+                        <Mail className="h-4 w-4" />
+                      </Button>
+                    </DropdownMenuTrigger>
+                  </TooltipTrigger>
+                  <TooltipContent>Send to Kindle</TooltipContent>
+                </Tooltip>
+                <DropdownMenuContent align="end">
+                  {kindleTargets.map(d => (
+                    <DropdownMenuItem key={d.id} onClick={() => void sendToKindle(d)}>
+                      {d.name} <span className="font-label ml-2 text-[10.5px] text-muted-foreground">{d.email}</span>
+                    </DropdownMenuItem>
+                  ))}
+                </DropdownMenuContent>
+              </DropdownMenu>
             )}
             <Tooltip>
               <TooltipTrigger asChild>
