@@ -3,6 +3,7 @@ import { api, coverUrl } from "@/api"
 import type { ApiBook, ApiLibrary, ApiSeries } from "@/api"
 import { useApi } from "@/hooks/use-api"
 import { AddToLibraryButton } from "@/components/AddToLibrary"
+import { PickLibraryDialog } from "@/components/PickLibraryDialog"
 import { Cover, MiniCover, hashColors } from "@/components/Cover"
 import { Tag, Fmt } from "@/components/bits"
 import { Switch } from "@/components/ui/switch"
@@ -55,18 +56,34 @@ export function SeriesDetailView({ series, onBack, onOpenBook, onOpenAuthor }: {
   }
 
   // Monitoring a catalog-only book is what puts it in a library — same
-  // behavior as the author page's per-book toggle.
+  // behavior as the author page's per-book toggle. One library needs no
+  // asking; several open the picker rather than silently taking the first,
+  // which dropped books onto somebody else's shelf.
+  const [pickFor, setPickFor] = useState<ApiBook | null>(null)
+  const monitorInto = async (b: ApiBook, library: ApiLibrary) => {
+    try {
+      await api.setBookMonitored(library.id, b.id, true)
+      toast.success(`${b.title} added to ${library.name} — monitored`)
+      setPickFor(null)
+      reload()
+    } catch (e) { toast.error(`${e instanceof Error ? e.message : e}`) }
+  }
   const toggleBook = async (b: ApiBook, v: boolean) => {
-    const libId = b.libraryId || libraries[0]?.id
-    if (!libId) {
-      toast.error("Create a library first")
+    if (!b.libraryId) {
+      if (!v) return // not shelved anywhere — nothing to unmonitor
+      if (libraries.length === 0) {
+        toast.error("Create a library first")
+        return
+      }
+      if (libraries.length > 1) {
+        setPickFor(b)
+        return
+      }
+      await monitorInto(b, libraries[0])
       return
     }
     try {
-      await api.setBookMonitored(libId, b.id, v)
-      if (!b.libraryId && v) {
-        toast.success(`${b.title} added to ${libraries[0].name} — monitored`)
-      }
+      await api.setBookMonitored(b.libraryId, b.id, v)
       reload()
     } catch (e) { toast.error(`${e instanceof Error ? e.message : e}`) }
   }
@@ -173,6 +190,8 @@ export function SeriesDetailView({ series, onBack, onOpenBook, onOpenAuthor }: {
           </div>
         ))}
       </div>
+      <PickLibraryDialog book={pickFor} libraries={libraries}
+        onPick={l => { if (pickFor) void monitorInto(pickFor, l) }} onClose={() => setPickFor(null)} />
     </section>
   )
 }
