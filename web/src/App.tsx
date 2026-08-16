@@ -317,7 +317,11 @@ function BookyApp({ user, usersExist, onLoggedOut }: { user: ApiUser | null; use
                       if (author) go({ view: "author", author })
                     }} />
                 : <SeriesView key={refreshTick}
-                    onOpenSeries={s => go({ view: "series", series: s })} />)}
+                    onOpenSeries={s => go({ view: "series", series: s })}
+                    onOpenAuthor={async s => {
+                      const author = ((await api.authors()).authors ?? []).find(a => a.id === s.authorId)
+                      if (author) go({ view: "author", author })
+                    }} />)}
               {nav.view === "author" && (nav.author
                 ? <AuthorView key={nav.author.id + (nav.focusSeries ?? "")} author={nav.author} focusSeries={nav.focusSeries}
                     onBack={back} onRead={openReader}
