@@ -98,6 +98,10 @@ so the whole loop is: add a book to your list, it shows up on your e-reader minu
 - **KoReader devices** — build a preconfigured plugin zip per device; it syncs
   over wifi and auto-downloads new arrivals from the libraries you chose.
   Revoke a device and its token dies instantly.
+- **Send to Kindle** — email a book (EPUB/PDF) straight to a Kindle's
+  @kindle.com address, Calibre-style, with optional auto-send on import.
+  Every account pairs its own devices and sends from its own email; SMTP
+  passwords are write-only and encrypted at rest.
 - **Works great on your phone** — installable PWA with bottom navigation,
   denser grids, and safe-area-aware layout. Pair it with Tailscale and your
   whole library is a tap away from anywhere.
@@ -120,19 +124,27 @@ docker run -d --name booky \
 - **Keep downloads and library roots under the same `/data` mount** — that's
   what makes imports instant hardlinks instead of copies. Point SABnzbd's
   completed folder and Booky's library roots at paths inside it.
+- **Stored credentials are encrypted at rest** (SMTP passwords, provider
+  tokens). The key is auto-generated into `/config/secret.key` on first boot —
+  or supply your own with `-e BOOKY_SECRET_KEY=<64 hex chars>` (e.g.
+  `openssl rand -hex 32`), which keeps the key entirely out of `/config` so
+  even filesystem access to the volume can't decrypt them. The key is never
+  included in backups either way.
 - `--restart=unless-stopped` matters: the in-app Restart button and
   backup-restore work by exiting and letting Docker bring Booky back.
 - On unraid: Docker tab → Add Container → fill in the same repository, port,
   paths and variables. PUID 99 / PGID 100 are the unraid defaults.
 
-Then open `http://<server>:8787`. The first-run wizard walks through
-libraries → metadata → quality profile → sources → SABnzbd → watched lists →
-your admin account → e-readers. Every step is skippable and everything lives
-in Settings afterward.
+Then open `http://<server>:8787`. The first-run wizard opens with the one
+required step — creating your admin account — then walks through libraries →
+metadata → quality profile → sources → SABnzbd → watched lists → e-readers →
+Send to Kindle. Everything after the account is skippable and lives in
+Settings afterward.
 
-**Auth model**: until the first user account exists, Booky is open — create
-your admin (in the wizard or Settings → Users) to turn on login. OPDS feeds
-and KoReader devices use their own credentials, never your account.
+**Auth model**: creating the admin account is the wizard's first, mandatory
+step — the API is open only for that brief first-run window and locks the
+moment the account exists. OPDS feeds and KoReader devices use their own
+credentials, never your account.
 
 **Roles**: admins run the install. A `user` is given a specific set of
 libraries when you create them and only ever sees those: inside them they can

@@ -16,9 +16,11 @@ import (
 	"github.com/getbooky/booky/internal/catalog"
 	"github.com/getbooky/booky/internal/db"
 	"github.com/getbooky/booky/internal/importer"
+	"github.com/getbooky/booky/internal/kindle"
 	"github.com/getbooky/booky/internal/koreader"
 	"github.com/getbooky/booky/internal/metadata"
 	"github.com/getbooky/booky/internal/opds"
+	"github.com/getbooky/booky/internal/secrets"
 	"github.com/getbooky/booky/internal/settings"
 	"github.com/getbooky/booky/internal/watcher"
 )
@@ -35,6 +37,15 @@ func (s *stubProvider) Search(ctx context.Context, p metadata.SearchParams) ([]m
 
 func (s *stubProvider) AuthorWorks(ctx context.Context, name string, limit int) ([]metadata.BookMeta, error) {
 	return s.works, nil
+}
+
+func testKeeper(t *testing.T) *secrets.Keeper {
+	t.Helper()
+	k, err := secrets.Load(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return k
 }
 
 func testServer(t *testing.T) *Server {
@@ -79,6 +90,7 @@ func testServer(t *testing.T) *Server {
 		Watcher:  watcher.New(conn, cat, chain, cfg, engine, covers, hc),
 		Auth:     auth.New(conn),
 		KoReader: koreader.New(conn),
+		Kindle:   kindle.New(conn, testKeeper(t)),
 		Backups:  backup.New(conn, configDir),
 		OPDS:     opds.New(conn, cat, covers),
 	})

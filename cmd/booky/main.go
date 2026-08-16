@@ -19,9 +19,11 @@ import (
 	"github.com/getbooky/booky/internal/catalog"
 	"github.com/getbooky/booky/internal/db"
 	"github.com/getbooky/booky/internal/importer"
+	"github.com/getbooky/booky/internal/kindle"
 	"github.com/getbooky/booky/internal/koreader"
 	"github.com/getbooky/booky/internal/metadata"
 	"github.com/getbooky/booky/internal/opds"
+	"github.com/getbooky/booky/internal/secrets"
 	"github.com/getbooky/booky/internal/settings"
 	"github.com/getbooky/booky/internal/watcher"
 	"github.com/getbooky/booky/web"
@@ -53,6 +55,13 @@ func main() {
 	defer database.Close()
 
 	cfg := settings.New(database)
+	// credentials (SMTP passwords, provider tokens) are sealed at rest with a
+	// key kept OUTSIDE the database, so backups of booky.db can't yield them
+	keeper, err := secrets.Load(configDir)
+	if err != nil {
+		log.Fatalf("load secret key: %v", err)
+	}
+	cfg.UseKeeper(keeper)
 	cat := catalog.New(database)
 	covers := catalog.NewCoverCache(filepath.Join(configDir, "covers"))
 	// author portraits live beside book covers, keyed by author id
@@ -92,11 +101,16 @@ func main() {
 		DB: database, Version: version, Dist: web.Dist,
 		Catalog: cat, Chain: chain, Importer: imp, Covers: covers, AuthorPhotos: authorPhotos, Settings: cfg, Logs: logs,
 		Acquire: engine, Watcher: watch,
-		Auth: auth.New(database), KoReader: koreader.New(database), Backups: backups,
+		Auth: auth.New(database), KoReader: koreader.New(database), Kindle: kindle.New(database, keeper), Backups: backups,
 		OPDS: opds.New(database, cat, covers),
 	})
 	if err != nil {
 		log.Fatalf("init server: %v", err)
+	}
+	// new arrivals email themselves to auto-send Kindles; backgrounded so a
+	// slow mail server never stalls a delivery
+	imp.OnFileAdded = func(bookID, libraryID int64, path, format string) {
+		go server.KindleAutoSend(bookID, libraryID, path, format)
 	}
 
 	// background loops: list polling, release-day triggers, download tracking

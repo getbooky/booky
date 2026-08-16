@@ -1,11 +1,11 @@
-import { useState } from "react"
+import { useEffect, useState } from "react"
 import { Dialog, DialogContent } from "@/components/ui/dialog"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Switch } from "@/components/ui/switch"
 import { toast } from "sonner"
 import { cn } from "@/lib/utils"
-import { api, acquisition, delivery, watchers } from "@/api"
+import { api, acquisition, delivery, kindle, watchers } from "@/api"
 import { PathInput } from "@/components/PathInput"
 
 function Field({ label, children }: { label: string; children: React.ReactNode }) {
@@ -17,14 +17,26 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
   )
 }
 
-const STEPS = ["Welcome", "Libraries", "Metadata", "Quality profile", "Indexers", "SABnzbd", "Direct downloads", "Watched lists", "Users", "KoReader"] as const
+const STEPS = ["Welcome", "Your admin account", "Libraries", "Metadata", "Quality profile", "Indexers", "SABnzbd", "Direct downloads", "Watched lists", "KoReader", "Send to Kindle"] as const
 
-// Every field here is an ordinary setting: "Next" saves what's filled in and
-// moves on, "Skip" saves nothing, and anything can be revisited in Settings.
+// The admin account comes first and is the one mandatory step: creating it
+// locks the API, and the wizard signs in on the spot so everything after —
+// including the Kindle step, which needs an owner for its outgoing email —
+// runs as that admin. Every OTHER field is an ordinary setting: "Next" saves
+// what's filled in, "Skip" saves nothing, and anything can be revisited in
+// Settings.
 export function SetupWizard({ open, onOpenChange, onDone }: { open: boolean; onOpenChange: (v: boolean) => void; onDone?: () => void }) {
   const [step, setStep] = useState(0)
   const [busy, setBusy] = useState(false)
   const last = step === STEPS.length - 1
+
+  // an account may already exist (re-run from Settings → About) — then the
+  // mandatory step is already satisfied and shows as done
+  const [accountExists, setAccountExists] = useState(false)
+  useEffect(() => {
+    if (!open) return
+    delivery.me().then(r => setAccountExists(r.authRequired)).catch(() => setAccountExists(false))
+  }, [open])
 
   // step state
   const [libs, setLibs] = useState<{ name: string; path: string }[]>([{ name: "", path: "/data/books/" }])
@@ -66,12 +78,55 @@ export function SetupWizard({ open, onOpenChange, onDone }: { open: boolean; onO
   const [adminPass, setAdminPass] = useState("")
   const [serverUrl, setServerUrl] = useState("")
 
+  // Send to Kindle step: the signed-in admin's own outgoing email + first
+  // device. Libraries are fetched on entry — step 3 may have just made them.
+  const [kFrom, setKFrom] = useState("")
+  const [kHost, setKHost] = useState("")
+  const [kPort, setKPort] = useState("587")
+  const [kSecurity, setKSecurity] = useState("starttls")
+  const [kUser, setKUser] = useState("")
+  const [kPass, setKPass] = useState("")
+  const [kDevName, setKDevName] = useState("")
+  const [kDevEmail, setKDevEmail] = useState("")
+  const [kSel, setKSel] = useState<Set<number>>(new Set())
+  const [kAuto, setKAuto] = useState<Set<number>>(new Set())
+  const [kLibs, setKLibs] = useState<{ id: number; name: string }[]>([])
+  const [kTesting, setKTesting] = useState(false)
+  useEffect(() => {
+    if (!open || STEPS[step] !== "Send to Kindle") return
+    api.libraries().then(r => setKLibs((r.libraries ?? []).map(l => ({ id: l.id, name: l.name })))).catch(() => setKLibs([]))
+  }, [open, step])
+  const kToggle = (set: Set<number>, setter: (s: Set<number>) => void, id: number) => {
+    const next = new Set(set)
+    if (next.has(id)) next.delete(id)
+    else next.add(id)
+    setter(next)
+  }
+  const kSaveSmtp = async () => {
+    await kindle.putSmtp({
+      fromAddr: kFrom.trim(), host: kHost.trim(), port: Number(kPort) || 587,
+      security: kSecurity as "starttls" | "tls" | "none", username: kUser.trim(), password: kPass,
+    })
+  }
+  const kTest = async () => {
+    setKTesting(true)
+    try {
+      await kSaveSmtp()
+      await kindle.testSmtp(kDevEmail.trim() || kFrom.trim())
+      toast.success(`Test sent to ${kDevEmail.trim() || kFrom.trim()}`)
+    } catch (e) {
+      toast.error(`Test failed: ${e instanceof Error ? e.message : e}`)
+    } finally {
+      setKTesting(false)
+    }
+  }
+
   const close = () => { onOpenChange(false); setStep(0) }
 
   // apply saves the current step's non-empty fields; empty means "skip".
   const apply = async (): Promise<boolean> => {
     switch (step) {
-      case 1: {
+      case 2: {
         for (const l of libs) {
           if (l.name.trim() && l.path.trim() && l.path.trim() !== "/data/books/") {
             await api.createLibrary(l.name.trim(), l.path.trim())
@@ -80,13 +135,13 @@ export function SetupWizard({ open, onOpenChange, onDone }: { open: boolean; onO
         if (naming.trim()) await api.putSetting("naming_scheme", naming.trim())
         return true
       }
-      case 2: {
+      case 3: {
         if (hcToken.trim()) await api.putSetting("hardcover_token", hcToken.trim())
         await api.putSetting("write_on_import", writeOnImport ? "true" : "false")
         await api.putSetting("rewrite_on_refresh", rewriteOnRefresh ? "true" : "false")
         return true
       }
-      case 3: {
+      case 4: {
         if (formats.length > 0) {
           const profiles = (await acquisition.profiles()).profiles ?? []
           if (profiles.length > 0) {
@@ -99,19 +154,19 @@ export function SetupWizard({ open, onOpenChange, onDone }: { open: boolean; onO
         }
         return true
       }
-      case 4: {
+      case 5: {
         if (prowlarrUrl.trim()) await api.putSetting("prowlarr_url", prowlarrUrl.trim())
         if (prowlarrKey.trim()) await api.putSetting("prowlarr_api_key", prowlarrKey.trim())
         await api.putSetting("prowlarr_enabled", prowlarrOn ? "true" : "false")
         return true
       }
-      case 5: {
+      case 6: {
         if (sabUrl.trim()) await api.putSetting("sab_url", sabUrl.trim())
         if (sabKey.trim()) await api.putSetting("sab_api_key", sabKey.trim())
         if (sabCat.trim()) await api.putSetting("sab_category", sabCat.trim())
         return true
       }
-      case 6: {
+      case 7: {
         // Mirrors ship with working defaults, so only credentials/keys here.
         // left at the default = keep the setting empty, so the built-in
         // default keeps applying even if it ever changes
@@ -125,7 +180,7 @@ export function SetupWizard({ open, onOpenChange, onDone }: { open: boolean; onO
         await api.putSetting("annas_enabled", annasOn ? "true" : "false")
         return true
       }
-      case 7: {
+      case 8: {
         if (!grUrl.trim() && hcPicked.size === 0) {
           return true // nothing entered = skip
         }
@@ -135,7 +190,7 @@ export function SetupWizard({ open, onOpenChange, onDone }: { open: boolean; onO
         }
         const libs = (await api.libraries()).libraries ?? []
         if (libs.length === 0) {
-          toast.error("Create a library first (step 2) — lists route their books into one")
+          toast.error("Create a library first (step 3) — lists route their books into one")
           return false
         }
         const common = {
@@ -157,17 +212,32 @@ export function SetupWizard({ open, onOpenChange, onDone }: { open: boolean; onO
         }
         return true
       }
-      case 8: {
-        if (adminUser.trim() && adminPass) {
-          await delivery.createUser(adminUser.trim(), adminPass, "admin")
-          // the API locks the moment a user exists — sign in right away so
-          // the rest of the wizard (and the app) keeps working
-          await delivery.login(adminUser.trim(), adminPass)
+      case 1: {
+        // the one mandatory step — the Next button won't enable without
+        // credentials, and there's no Skip until an account exists
+        if (accountExists) {
+          return true
         }
+        await delivery.createUser(adminUser.trim(), adminPass, "admin")
+        // the API locks the moment a user exists — sign in right away so
+        // the rest of the wizard (and the app) keeps working as this admin
+        await delivery.login(adminUser.trim(), adminPass)
+        setAccountExists(true)
         return true
       }
       case 9: {
         if (serverUrl.trim()) await api.putSetting("server_url", serverUrl.trim())
+        return true
+      }
+      case 10: {
+        // both halves optional — filled-in outgoing email and/or a first
+        // device, owned by the admin from step 1
+        if (kFrom.trim() && kHost.trim()) {
+          await kSaveSmtp()
+        }
+        if (kDevName.trim() && kDevEmail.trim() && kSel.size > 0) {
+          await kindle.createDevice(kDevName.trim(), kDevEmail.trim(), [...kSel], [...kAuto].filter(id => kSel.has(id)))
+        }
         return true
       }
       default:
@@ -243,7 +313,7 @@ export function SetupWizard({ open, onOpenChange, onDone }: { open: boolean; onO
       setHcPicked(new Set())
       if (r.lists.length === 0) toast("No lists on this Hardcover account yet")
     } catch (e) {
-      toast.error(`Couldn't load lists — is the Hardcover token set (step 3)? ${e instanceof Error ? e.message : e}`)
+      toast.error(`Couldn't load lists — is the Hardcover token set (step 4)? ${e instanceof Error ? e.message : e}`)
     } finally {
       setHcFinding(false)
     }
@@ -269,12 +339,15 @@ export function SetupWizard({ open, onOpenChange, onDone }: { open: boolean; onO
         <div className="border-b px-6 py-5">
           <div className="flex items-baseline justify-between">
             <div className="mono-label text-faint">First-run setup · step {step + 1} of {STEPS.length}</div>
-            <button
-              className="mono-label text-faint hover:text-brass"
-              onClick={() => { toast("Setup skipped — everything here also lives in Settings"); close() }}
-            >
-              Skip setup
-            </button>
+            {/* whole-wizard escape hatch — only once the mandatory account exists */}
+            {accountExists && (
+              <button
+                className="mono-label text-faint hover:text-brass"
+                onClick={() => { toast("Setup skipped — everything here also lives in Settings"); close() }}
+              >
+                Skip setup
+              </button>
+            )}
           </div>
           <h2 className="font-book mt-1 text-[22px] font-bold">{STEPS[step]}</h2>
           <div className="mt-3 flex gap-1.5">
@@ -287,11 +360,31 @@ export function SetupWizard({ open, onOpenChange, onDone }: { open: boolean; onO
         <div className="max-h-[340px] min-h-[240px] overflow-y-auto px-6 py-5">
           {step === 0 && (
             <div className="text-[13.5px] leading-relaxed text-muted-foreground">
-              <p className="mb-3">Welcome to <span className="font-book font-bold italic text-foreground">Book<span className="text-brass">y</span></span>. This wizard walks through the whole setup, in order — libraries, metadata, quality, sources, downloads, lists, users, and your e-readers.</p>
-              <p>Every step can be skipped and finished later in Settings — "Next" saves what you've filled in.</p>
+              <p className="mb-3">Welcome to <span className="font-book font-bold italic text-foreground">Book<span className="text-brass">y</span></span>. This wizard walks through the whole setup, in order — your account first, then libraries, metadata, quality, sources, downloads, lists, and your e-readers.</p>
+              <p>Creating your admin account is the one required step. Everything after it can be skipped and finished later in Settings — "Next" saves what you've filled in.</p>
             </div>
           )}
           {step === 1 && (
+            <div className="grid gap-4">
+              {accountExists ? (
+                <p className="text-[13.5px] leading-relaxed text-muted-foreground">
+                  An admin account already exists and you're signed in — nothing to do here.
+                </p>
+              ) : (
+                <>
+                  <p className="text-[13px] text-muted-foreground">Booky locks itself the moment this account exists — everything else in setup is done signed in as you. E-readers never use these credentials.</p>
+                  <Field label="Admin username / password (min 8 chars)">
+                    <div className="flex gap-2">
+                      <Input value={adminUser} onChange={e => setAdminUser(e.target.value)} placeholder="username" className="max-w-[140px]" />
+                      <Input type="password" value={adminPass} onChange={e => setAdminPass(e.target.value)} placeholder="password" />
+                    </div>
+                  </Field>
+                  <p className="text-xs text-faint">More accounts (and per-library scopes) live in Settings → Users.</p>
+                </>
+              )}
+            </div>
+          )}
+          {step === 2 && (
             <div className="grid gap-4">
               <p className="text-[13px] text-muted-foreground">Add a root folder per library. Keep them on the same filesystem as your downloads for instant hardlink imports.</p>
               {libs.map((l, i) => (
@@ -319,7 +412,7 @@ export function SetupWizard({ open, onOpenChange, onDone }: { open: boolean; onO
               <Field label="File naming"><Input value={naming} onChange={e => setNaming(e.target.value)} className="max-w-[240px] font-label text-[11.5px]" /></Field>
             </div>
           )}
-          {step === 2 && (
+          {step === 3 && (
             <div className="grid gap-4">
               <p className="text-[13px] text-muted-foreground">Metadata comes from providers in priority order — first one with a value wins, the rest fill gaps. Goodreads and Open Library need no keys; add a Hardcover token for its clean series data.</p>
               <Field label="Hardcover API token (optional)">
@@ -336,7 +429,7 @@ export function SetupWizard({ open, onOpenChange, onDone }: { open: boolean; onO
               </label>
             </div>
           )}
-          {step === 3 && (
+          {step === 4 && (
             <div className="grid gap-4">
               <p className="text-[13px] text-muted-foreground">Pick the formats to grab — the order you pick them is the order of preference. The cutoff is where upgrading stops.</p>
               <Field label="Allowed formats · click in order of preference">
@@ -365,7 +458,7 @@ export function SetupWizard({ open, onOpenChange, onDone }: { open: boolean; onO
               <p className="text-xs text-faint">This updates the default profile, assigned to every library. Fine-tune in Settings → Quality profiles.</p>
             </div>
           )}
-          {step === 4 && (
+          {step === 5 && (
             <div className="grid gap-4">
               <p className="text-[13px] text-muted-foreground">Point Booky at Prowlarr and your indexers sync automatically. This is optional — the next steps set up SABnzbd and the direct-download providers too.</p>
               <label className="flex w-fit cursor-pointer items-center gap-2.5 text-[13px]">
@@ -376,7 +469,7 @@ export function SetupWizard({ open, onOpenChange, onDone }: { open: boolean; onO
               <Button variant="outline" className="h-8 w-fit" disabled={!prowlarrUrl.trim()} onClick={testProwlarr}>Test connection</Button>
             </div>
           )}
-          {step === 5 && (
+          {step === 6 && (
             <div className="grid gap-4">
               <p className="text-[13px] text-muted-foreground">Usenet downloads go through SABnzbd under a dedicated category. Its completed folder must live under /data for hardlink imports.</p>
               <Field label="SABnzbd URL"><Input value={sabUrl} onChange={e => setSabUrl(e.target.value)} placeholder="http://sabnzbd:8080" /></Field>
@@ -387,7 +480,7 @@ export function SetupWizard({ open, onOpenChange, onDone }: { open: boolean; onO
               <Button variant="outline" className="h-8 w-fit" disabled={!sabUrl.trim()} onClick={testSab}>Test connection</Button>
             </div>
           )}
-          {step === 6 && (
+          {step === 7 && (
             <div className="grid gap-4">
               <p className="text-[13px] text-muted-foreground">Direct-download providers grab books straight over HTTP — no indexer or download client needed. Both are optional and ship with working mirror lists (edit them in Settings → Sources). Turn off any you don't want searched — no Z-Library account, or Anna's free servers misbehaving.</p>
               <Field label="Downloads folder">
@@ -413,7 +506,7 @@ export function SetupWizard({ open, onOpenChange, onDone }: { open: boolean; onO
               <p className="text-xs text-faint">A key is always safe to add: fast downloads when your membership is active, the free path when it isn't.</p>
             </div>
           )}
-          {step === 7 && (
+          {step === 8 && (
             <div className="grid gap-4">
               <p className="text-[13px] text-muted-foreground">Watch your Goodreads shelves and Hardcover lists — new books on them are grabbed automatically, into your first library. More lists and options live in Settings → Watched lists.</p>
               <Field label="Goodreads profile URL or ID">
@@ -482,22 +575,10 @@ export function SetupWizard({ open, onOpenChange, onDone }: { open: boolean; onO
               )}
             </div>
           )}
-          {step === 8 && (
-            <div className="grid gap-4">
-              <p className="text-[13px] text-muted-foreground">Create the web UI login. Until an account exists, anyone who can reach Booky has full access; the first account is an admin and turns login on. E-readers never use these credentials.</p>
-              <Field label="Admin username / password (min 8 chars)">
-                <div className="flex gap-2">
-                  <Input value={adminUser} onChange={e => setAdminUser(e.target.value)} placeholder="username" className="max-w-[140px]" />
-                  <Input type="password" value={adminPass} onChange={e => setAdminPass(e.target.value)} placeholder="password" />
-                </div>
-              </Field>
-              <p className="text-xs text-faint">More users (and roles) live in Settings → Users.</p>
-            </div>
-          )}
           {step === 9 && (
             <div className="grid gap-4">
               <div className="text-[13.5px] leading-relaxed text-muted-foreground">
-                <p className="mb-3">Last step: put Booky on your e-readers. Build a preconfigured KoReader plugin per device under <b className="text-foreground">Settings → KoReader devices</b> — pick which libraries it can browse and which auto-download, drop the zip in <span className="font-label text-[11px]">plugins/</span>, done.</p>
+                <p className="mb-3">Put Booky on your e-readers. Build a preconfigured KoReader plugin per device under <b className="text-foreground">Settings → KoReader devices</b> — pick which libraries it can browse and which auto-download, drop the zip in <span className="font-label text-[11px]">plugins/</span>, done.</p>
               </div>
               <Field label="Server URL (baked into plugin zips — an address your devices can reach)">
                 <Input value={serverUrl} onChange={e => setServerUrl(e.target.value)} placeholder="http://192.168.1.10:8787" className="font-label text-[11.5px]" />
@@ -505,14 +586,73 @@ export function SetupWizard({ open, onOpenChange, onDone }: { open: boolean; onO
               <p className="text-xs text-faint">That's the whole loop: add a book to a list, it's on the device minutes later.</p>
             </div>
           )}
+          {step === 10 && (
+            <div className="grid gap-4">
+              <p className="text-[13px] text-muted-foreground">Booky can email books straight to a Kindle. This sets up <em>your</em> sending account and first device — everyone else adds theirs in Settings → Send to Kindle.</p>
+              <Field label="From address">
+                <Input value={kFrom} onChange={e => setKFrom(e.target.value)} placeholder="you@gmail.com" />
+                <p className="mt-1 text-xs text-faint">Each Kindle must have this address on its approved sender list (Amazon → Preferences → Personal Document Settings).</p>
+              </Field>
+              <div className="grid grid-cols-2 gap-3">
+                <Field label="SMTP server"><Input value={kHost} onChange={e => setKHost(e.target.value)} placeholder="smtp.gmail.com" /></Field>
+                <Field label="Port · security">
+                  <div className="flex gap-2">
+                    <Input value={kPort} onChange={e => setKPort(e.target.value)} inputMode="numeric" className="w-[70px]" />
+                    <select value={kSecurity} onChange={e => setKSecurity(e.target.value)}
+                      className="h-9 flex-1 rounded-md border border-input bg-transparent px-2 text-[12.5px]">
+                      <option value="starttls">STARTTLS</option>
+                      <option value="tls">TLS (465)</option>
+                      <option value="none">None</option>
+                    </select>
+                  </div>
+                </Field>
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <Field label="Username"><Input value={kUser} onChange={e => setKUser(e.target.value)} placeholder="you@gmail.com" /></Field>
+                <Field label="Password"><Input type="password" value={kPass} onChange={e => setKPass(e.target.value)} placeholder="app password" /></Field>
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <Field label="First Kindle — name"><Input value={kDevName} onChange={e => setKDevName(e.target.value)} placeholder="My Paperwhite" /></Field>
+                <Field label="Kindle email"><Input value={kDevEmail} onChange={e => setKDevEmail(e.target.value)} placeholder="name_xxxx@kindle.com" /></Field>
+              </div>
+              {kLibs.length > 0 && (
+                <Field label="Libraries (check auto-send to email new arrivals)">
+                  <div className="flex flex-col gap-1.5">
+                    {kLibs.map(l => (
+                      <div key={l.id} className="flex items-center gap-4 text-[13px]">
+                        <label className="flex w-[160px] cursor-pointer items-center gap-2">
+                          <input type="checkbox" className="h-4 w-4 accent-[hsl(var(--brass))]"
+                            checked={kSel.has(l.id)} onChange={() => kToggle(kSel, setKSel, l.id)} />
+                          <span className="font-medium">{l.name}</span>
+                        </label>
+                        <label className="flex cursor-pointer items-center gap-1.5 text-[12px] text-muted-foreground">
+                          <input type="checkbox" className="h-3.5 w-3.5 accent-[hsl(var(--brass))]" disabled={!kSel.has(l.id)}
+                            checked={kAuto.has(l.id) && kSel.has(l.id)} onChange={() => kToggle(kAuto, setKAuto, l.id)} />
+                          auto-send
+                        </label>
+                      </div>
+                    ))}
+                  </div>
+                </Field>
+              )}
+              <Button variant="outline" className="h-8 w-fit" disabled={kTesting || !kFrom.trim() || !kHost.trim()} onClick={kTest}>
+                {kTesting ? "Sending…" : "Send test email"}
+              </Button>
+            </div>
+          )}
         </div>
 
         <div className="flex items-center justify-between border-t px-6 py-4">
           <Button variant="outline" className="" disabled={step === 0 || busy} onClick={() => setStep(s => s - 1)}>Back</Button>
           <div className="flex gap-2">
-            {!last && <Button variant="outline" className="text-faint" disabled={busy} onClick={() => setStep(s => s + 1)}>Skip</Button>}
-            <Button className="" disabled={busy} onClick={next}>
-              {busy ? "Saving…" : last ? "Finish" : "Next"}
+            {/* the admin step is the one with no Skip — everything after has one */}
+            {!last && !(step === 1 && !accountExists) && (
+              <Button variant="outline" className="text-faint" disabled={busy} onClick={() => setStep(s => s + 1)}>Skip</Button>
+            )}
+            <Button className=""
+              disabled={busy || (step === 1 && !accountExists && (!adminUser.trim() || adminPass.length < 8))}
+              onClick={next}>
+              {busy ? "Saving…" : last ? "Finish" : step === 1 && !accountExists ? "Create account & continue" : "Next"}
             </Button>
           </div>
         </div>

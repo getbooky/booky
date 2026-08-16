@@ -110,7 +110,8 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 export const api = {
-  status: () => request<{ app: string; version: string; status: string }>("/api/v1/system/status"),
+  // version/app appear only for signed-in callers — strangers get the pulse
+  status: () => request<{ app?: string; version?: string; status: string }>("/api/v1/system/status"),
   health: () => request<{ ok: boolean; checks: { name: string; status: "ok" | "error" | "pending"; detail: string }[] }>("/api/v1/system/health"),
   logs: () => request<{ lines: string[] }>("/api/v1/system/logs"),
 
@@ -517,4 +518,54 @@ export const delivery = {
     request(`/api/v1/backups/${encodeURIComponent(name)}/restore`, { method: "POST" }),
 
   restart: () => request("/api/v1/system/restart", { method: "POST" }),
+}
+
+/* ---------- Send to Kindle ---------- */
+
+export interface ApiKindleDevice {
+  id: number
+  name: string
+  email: string
+  libraryIds: number[]
+  autoLibraryIds: number[]
+  createdAt: string
+  lastSent?: string
+  ownerId: number
+  // admin listings only
+  ownerName?: string
+  // whether the owner's outgoing email exists — a device without it can't
+  // receive anything
+  emailConfigured: boolean
+}
+
+export interface ApiSmtpConfig {
+  fromAddr: string
+  host: string
+  port: number
+  security: "starttls" | "tls" | "none"
+  username: string
+  passwordSet: boolean
+}
+
+export const kindle = {
+  smtp: () => request<{ configured: boolean; config: ApiSmtpConfig | null }>("/api/v1/kindle/smtp"),
+  // password is write-only: empty keeps the stored one
+  putSmtp: (cfg: Omit<ApiSmtpConfig, "passwordSet"> & { password: string }) =>
+    request<{ configured: boolean; config: ApiSmtpConfig }>("/api/v1/kindle/smtp", {
+      method: "PUT", body: JSON.stringify(cfg),
+    }),
+  clearSmtp: () => request("/api/v1/kindle/smtp", { method: "DELETE" }),
+  testSmtp: (to: string) =>
+    request("/api/v1/kindle/smtp/test", { method: "POST", body: JSON.stringify({ to }) }),
+
+  devices: () => request<{ devices: ApiKindleDevice[] | null }>("/api/v1/kindle/devices"),
+  createDevice: (name: string, email: string, libraryIds: number[], autoLibraryIds: number[]) =>
+    request<ApiKindleDevice>("/api/v1/kindle/devices", {
+      method: "POST", body: JSON.stringify({ name, email, libraryIds, autoLibraryIds }),
+    }),
+  removeDevice: (id: number) => request(`/api/v1/kindle/devices/${id}`, { method: "DELETE" }),
+  testDevice: (id: number) => request(`/api/v1/kindle/devices/${id}/test`, { method: "POST", body: "{}" }),
+
+  sendBook: (bookId: number, deviceId: number) =>
+    request(`/api/v1/books/${bookId}/send`, { method: "POST", body: JSON.stringify({ deviceId }) }),
 }
