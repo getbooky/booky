@@ -1,6 +1,6 @@
 import { useMemo, useState } from "react"
-import { api, acquisition, canRead, coverUrl } from "@/api"
-import type { ApiBook, ApiLibrary } from "@/api"
+import { api, acquisition, canRead, coverUrl, kindle } from "@/api"
+import type { ApiBook, ApiKindleDevice, ApiLibrary } from "@/api"
 import { useApi } from "@/hooks/use-api"
 import { Cover, hashColors } from "@/components/Cover"
 import type { RibbonKind } from "@/components/Cover"
@@ -19,7 +19,7 @@ import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { FilterRows, fuzzyMatch } from "@/components/FilterRows"
 import type { ScopeFilter } from "@/components/FilterRows"
-import { ArrowDown, ArrowDownWideNarrow, ArrowUp, ArrowUpNarrowWide, BookDashed, BookOpen, BookOpenText, Filter, FolderInput, Image, Layers, MoreVertical, Pencil, RefreshCw, Search, Trash2, Zap } from "lucide-react"
+import { ArrowDown, ArrowDownWideNarrow, ArrowUp, ArrowUpNarrowWide, BookDashed, BookOpen, BookOpenText, Filter, FolderInput, Image, Layers, Mail, MoreVertical, Pencil, RefreshCw, Search, Trash2, Zap } from "lucide-react"
 import { ReleasesDialog } from "@/components/ReleasesDialog"
 import { ImportBookDialog } from "@/components/ImportBookDialog"
 import { toast } from "sonner"
@@ -63,9 +63,10 @@ const SORT_CMP: Record<SortKey, (a: ApiBook, b: ApiBook) => number> = {
   release: (a, b) => (a.releaseDate ?? "").localeCompare(b.releaseDate ?? ""),
 }
 
-function BookCell({ book, libraries, seriesTag, bust, selected, selectionActive, onToggleSelect, onOpen, onOpenAuthor, onOpenSeries, onRead, onEdit, onSearch, onChanged }: {
+function BookCell({ book, libraries, kindleDevices, seriesTag, bust, selected, selectionActive, onToggleSelect, onOpen, onOpenAuthor, onOpenSeries, onRead, onEdit, onSearch, onChanged }: {
   book: ApiBook
   libraries: ApiLibrary[]
+  kindleDevices: ApiKindleDevice[]
   seriesTag?: boolean
   bust?: number
   selected: boolean
@@ -82,6 +83,20 @@ function BookCell({ book, libraries, seriesTag, bust, selected, selectionActive,
   const [c1, c2] = hashColors(book.title)
   const isAdmin = useIsAdmin()
   const otherLibs = libraries.filter(l => l.id !== book.libraryId)
+
+  // Send to Kindle, same gate as the book page: a device covering this
+  // library with its owner's email set, and a file Amazon takes by email.
+  // One device sends straight away; several open a picker submenu.
+  const kindleTargets = kindleDevices.filter(d =>
+    d.emailConfigured && !!book.libraryId && d.libraryIds.includes(book.libraryId))
+  const kindleSendable = !!book.filePath && ["epub", "pdf"].includes((book.fileFormat ?? "").toLowerCase())
+  const sendToKindle = async (d: ApiKindleDevice) => {
+    toast(`Sending to ${d.name}…`)
+    try {
+      await kindle.sendBook(book.id, d.id)
+      toast.success(`${book.title} → ${d.name} — it lands in the Kindle's Docs`)
+    } catch (e) { toast.error(`Send failed: ${e instanceof Error ? e.message : e}`) }
+  }
 
   const refreshMeta = async () => {
     toast(`Refreshing ${book.title}…`)
@@ -140,7 +155,9 @@ function BookCell({ book, libraries, seriesTag, bust, selected, selectionActive,
         <button aria-label={selected ? `Deselect ${book.title}` : `Select ${book.title}`}
           onClick={e => { e.stopPropagation(); onToggleSelect(book) }}
           className={cn(
-            "absolute right-1.5 top-9 z-10 flex h-6 w-6 items-center justify-center rounded-md border transition-opacity",
+            // top-left corner: the ribbon owns top-right and the format badge
+            // bottom-right, so the overlays keep to the left edge
+            "absolute left-1.5 top-1.5 z-10 flex h-6 w-6 items-center justify-center rounded-md border transition-opacity",
             selected
               ? "border-brass bg-brass text-brass-ink opacity-100"
               // touch has no hover to reveal it — stay visible there, or
@@ -153,7 +170,7 @@ function BookCell({ book, libraries, seriesTag, bust, selected, selectionActive,
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
             <button aria-label={`${book.title} options`} onClick={e => e.stopPropagation()}
-              className="absolute left-1.5 top-1.5 z-10 flex h-7 w-7 items-center justify-center rounded-lg bg-black/60 text-white/90 opacity-0 backdrop-blur-xs transition-opacity hover:bg-black/80 focus-visible:opacity-100 group-hover/cell:opacity-100 data-[state=open]:opacity-100 [@media(hover:none)]:opacity-100">
+              className="absolute bottom-1.5 left-1.5 z-10 flex h-7 w-7 items-center justify-center rounded-lg bg-black/60 text-white/90 opacity-0 backdrop-blur-xs transition-opacity hover:bg-black/80 focus-visible:opacity-100 group-hover/cell:opacity-100 data-[state=open]:opacity-100 [@media(hover:none)]:opacity-100">
               <MoreVertical className="h-4 w-4" />
             </button>
           </DropdownMenuTrigger>
@@ -166,6 +183,25 @@ function BookCell({ book, libraries, seriesTag, bust, selected, selectionActive,
             <DropdownMenuItem onClick={() => onOpen(book)}>
               <BookOpen className="mr-2 h-3.5 w-3.5 text-muted-foreground" /> Book details
             </DropdownMenuItem>
+            {kindleSendable && kindleTargets.length === 1 && (
+              <DropdownMenuItem onClick={() => void sendToKindle(kindleTargets[0])}>
+                <Mail className="mr-2 h-3.5 w-3.5 text-muted-foreground" /> Send to Kindle
+              </DropdownMenuItem>
+            )}
+            {kindleSendable && kindleTargets.length > 1 && (
+              <DropdownMenuSub>
+                <DropdownMenuSubTrigger>
+                  <Mail className="mr-2 h-3.5 w-3.5 text-muted-foreground" /> Send to Kindle
+                </DropdownMenuSubTrigger>
+                <DropdownMenuSubContent className="rounded-xl">
+                  {kindleTargets.map(d => (
+                    <DropdownMenuItem key={d.id} onClick={() => void sendToKindle(d)}>
+                      {d.name} <span className="font-label ml-2 text-[10.5px] text-muted-foreground">{d.email}</span>
+                    </DropdownMenuItem>
+                  ))}
+                </DropdownMenuSubContent>
+              </DropdownMenuSub>
+            )}
             <DropdownMenuSeparator />
             <DropdownMenuItem onClick={autoGrab} disabled={!book.libraryId}>
               <Zap className="mr-2 h-3.5 w-3.5 text-muted-foreground" /> Auto-grab best release
@@ -324,6 +360,9 @@ export function LibraryView({ library, scope, libraries, initialFilters, scopeTi
   onSelectLibrary?: (l: ApiLibrary | null) => void
 }) {
   const booksQuery = useApi(() => api.books(library ? { libraryId: library.id } : {}), 5_000)
+  // fetched once for the whole grid — every cell's ⋯ menu shares the list
+  const kindleQuery = useApi(() => kindle.devices())
+  const kindleDevices = kindleQuery.data?.devices ?? []
   // The Library is only what the user curated: catalog-only bibliography
   // books (no library membership) live on author/series pages, not here.
   const allBooks = useMemo(() => (booksQuery.data?.books ?? []).filter(b => b.libraryId), [booksQuery.data])
@@ -649,7 +688,7 @@ export function LibraryView({ library, scope, libraries, initialFilters, scopeTi
               onOpenAuthor={() => onOpenAuthor(cell.books[0])} />
           ) : (
             <BookCell key={`${cell.book.id}-${cell.book.libraryId}`} book={cell.book}
-              libraries={libraries} bust={bust}
+              libraries={libraries} kindleDevices={kindleDevices} bust={bust}
               seriesTag={!!cell.book.seriesId}
               onOpenAuthor={onOpenAuthor}
               onOpenSeries={onOpenSeries}
