@@ -296,6 +296,15 @@ function BookyApp({ user, usersExist, onLoggedOut }: { user: ApiUser | null; use
                     initialFilters={nav.customScope?.filters as ScopeFilter[] | undefined}
                     scopeTitle={nav.customScope?.name}
                     onOpenBook={b => go({ view: "library", book: b })}
+                    onOpenAuthor={async b => {
+                      const author = ((await api.authors()).authors ?? []).find(a => a.id === b.authorId)
+                      if (author) go({ view: "author", author })
+                    }}
+                    onOpenSeries={async b => {
+                      if (!b.seriesId) return
+                      const series = ((await api.series()).series ?? []).find(s => s.id === b.seriesId)
+                      if (series) go({ view: "series", series })
+                    }}
                     onRead={openReader}
                     onSelectLibrary={l => go({ view: "library", library: l })} />)}
               {nav.view === "series" && (nav.series
