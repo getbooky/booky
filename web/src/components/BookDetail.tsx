@@ -519,7 +519,7 @@ export function BookDetail({ book: initial, onBack, onChanged, onRead, onOpenSer
                   </TooltipTrigger>
                   <TooltipContent>Send to Kindle</TooltipContent>
                 </Tooltip>
-                <DropdownMenuContent align="end">
+                <DropdownMenuContent align="end" className="rounded-xl">
                   {kindleTargets.map(d => (
                     <DropdownMenuItem key={d.id} onClick={() => void sendToKindle(d)}>
                       {d.name} <span className="font-label ml-2 text-[10.5px] text-muted-foreground">{d.email}</span>

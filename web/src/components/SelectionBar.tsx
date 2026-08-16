@@ -1,6 +1,7 @@
 import { useState } from "react"
-import { api } from "@/api"
-import type { ApiBook, ApiLibrary } from "@/api"
+import { api, kindle } from "@/api"
+import type { ApiBook, ApiKindleDevice, ApiLibrary } from "@/api"
+import { useApi } from "@/hooks/use-api"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog"
@@ -9,7 +10,7 @@ import { Label } from "@/components/ui/label"
 import {
   DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
-import { FolderInput, Pencil, RefreshCw, Trash2, X } from "lucide-react"
+import { FolderInput, Mail, Pencil, RefreshCw, Trash2, X } from "lucide-react"
 import { removeModesFor } from "@/lib/removeModes"
 import type { RemoveMode } from "@/lib/removeModes"
 import { toast } from "sonner"
@@ -106,6 +107,8 @@ export function SelectionBar({ books, libraries, onClear, onChanged }: {
   const [delOpen, setDelOpen] = useState(false)
   const [editOpen, setEditOpen] = useState(false)
   const [busy, setBusy] = useState(false)
+  const { data: kindleData } = useApi(() => kindle.devices())
+  const kindleDevices = (kindleData?.devices ?? []).filter(d => d.emailConfigured)
   if (books.length === 0) return null
 
   const guard = (fn: () => Promise<void>) => async () => {
@@ -121,6 +124,24 @@ export function SelectionBar({ books, libraries, onClear, onChanged }: {
     guard(() => runBulk(books, "Edited", b => api.editBook(b.id, fields, true)))()
   const doMove = (to: ApiLibrary) =>
     guard(() => runBulk(books, `Moved to ${to.name}`, b => api.moveBook(b.id, b.libraryId ?? 0, to.id)))()
+
+  // Bulk Send to Kindle mails what qualifies and says what didn't: only
+  // EPUB/PDF files from libraries the device covers go out. A selection with
+  // nothing sendable stays selected — clearing it would just eat the picks.
+  const doSend = (d: ApiKindleDevice) => {
+    const sendable = books.filter(b =>
+      !!b.filePath && ["epub", "pdf"].includes((b.fileFormat ?? "").toLowerCase()) &&
+      !!b.libraryId && d.libraryIds.includes(b.libraryId))
+    if (sendable.length === 0) {
+      toast.warning("Nothing to send — Kindle takes EPUB or PDF files from the device's libraries")
+      return
+    }
+    const skipped = books.length - sendable.length
+    void guard(async () => {
+      await runBulk(sendable, `Sent to ${d.name}`, b => kindle.sendBook(b.id, d.id))
+      if (skipped > 0) toast(`${skipped} book${skipped === 1 ? "" : "s"} skipped — no EPUB/PDF file, or outside ${d.name}'s libraries`)
+    })()
+  }
 
   return (
     <>
@@ -147,6 +168,28 @@ export function SelectionBar({ books, libraries, onClear, onChanged }: {
             <DropdownMenuContent side="top" align="center" className="rounded-xl">
               {libraries.map(l => (
                 <DropdownMenuItem key={l.id} onClick={() => doMove(l)}>{l.name}</DropdownMenuItem>
+              ))}
+            </DropdownMenuContent>
+          </DropdownMenu>
+        )}
+        {kindleDevices.length === 1 && (
+          <Button variant="ghost" size="icon" className="h-9 w-9 rounded-[10px]" title={`Send to Kindle — ${kindleDevices[0].name}`}
+            disabled={busy} onClick={() => doSend(kindleDevices[0])}>
+            <Mail className="h-4 w-4" />
+          </Button>
+        )}
+        {kindleDevices.length > 1 && (
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button variant="ghost" size="icon" className="h-9 w-9 rounded-[10px]" title="Send to Kindle" disabled={busy}>
+                <Mail className="h-4 w-4" />
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent side="top" align="center" className="rounded-xl">
+              {kindleDevices.map(d => (
+                <DropdownMenuItem key={d.id} onClick={() => doSend(d)}>
+                  {d.name} <span className="font-label ml-2 text-[10.5px] text-muted-foreground">{d.email}</span>
+                </DropdownMenuItem>
               ))}
             </DropdownMenuContent>
           </DropdownMenu>
