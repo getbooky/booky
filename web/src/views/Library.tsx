@@ -63,7 +63,7 @@ const SORT_CMP: Record<SortKey, (a: ApiBook, b: ApiBook) => number> = {
   release: (a, b) => (a.releaseDate ?? "").localeCompare(b.releaseDate ?? ""),
 }
 
-function BookCell({ book, libraries, seriesTag, bust, selected, selectionActive, onToggleSelect, onOpen, onRead, onEdit, onSearch, onChanged }: {
+function BookCell({ book, libraries, seriesTag, bust, selected, selectionActive, onToggleSelect, onOpen, onOpenAuthor, onOpenSeries, onRead, onEdit, onSearch, onChanged }: {
   book: ApiBook
   libraries: ApiLibrary[]
   seriesTag?: boolean
@@ -72,6 +72,8 @@ function BookCell({ book, libraries, seriesTag, bust, selected, selectionActive,
   selectionActive: boolean
   onToggleSelect: (b: ApiBook) => void
   onOpen: (b: ApiBook) => void
+  onOpenAuthor: (b: ApiBook) => void
+  onOpenSeries: (b: ApiBook) => void
   onRead: (b: ApiBook) => void
   onEdit: (b: ApiBook) => void
   onSearch: (b: ApiBook) => void
@@ -215,11 +217,26 @@ function BookCell({ book, libraries, seriesTag, bust, selected, selectionActive,
           </DropdownMenuContent>
         </DropdownMenu>
       </div>
+      {/* the text under the cover navigates piecewise: title → the book,
+          author → their page, series → its page. While a selection is
+          active, everything falls back to toggling — same as the cover. */}
       <div>
-        <div className="text-[12.5px] font-semibold leading-tight">{book.title}</div>
-        <div className="mt-0.5 text-[11.5px] text-muted-foreground">{book.author}</div>
+        <button type="button"
+          className="block text-left text-[12.5px] font-semibold leading-tight hover:text-brass hover:underline"
+          onClick={() => (selectionActive ? onToggleSelect(book) : onOpen(book))}>
+          {book.title}
+        </button>
+        <button type="button"
+          className="mt-0.5 block text-left text-[11.5px] text-muted-foreground hover:text-brass hover:underline"
+          onClick={() => (selectionActive ? onToggleSelect(book) : onOpenAuthor(book))}>
+          {book.author}
+        </button>
         {seriesTag && book.seriesName && (
-          <div className="mt-1"><Tag kind="dim">{book.seriesName}{book.seriesNum ? ` #${book.seriesNum}` : ""}</Tag></div>
+          <button type="button" className="mt-1 block text-left transition-opacity hover:opacity-75"
+            aria-label={`Open series ${book.seriesName}`}
+            onClick={() => (selectionActive ? onToggleSelect(book) : onOpenSeries(book))}>
+            <Tag kind="dim">{book.seriesName}{book.seriesNum ? ` #${book.seriesNum}` : ""}</Tag>
+          </button>
         )}
       </div>
     </div>
@@ -248,7 +265,12 @@ function StackLayer({ book, offset }: { book: ApiBook; offset: number }) {
 
 // A deck of cards: the next books peek out clearly behind the lead cover,
 // stepped up-and-right, real covers at full strength.
-function SeriesStack({ books, onExpand }: { books: ApiBook[]; onExpand: () => void }) {
+function SeriesStack({ books, onExpand, onOpenSeries, onOpenAuthor }: {
+  books: ApiBook[]
+  onExpand: () => void
+  onOpenSeries: () => void
+  onOpenAuthor: () => void
+}) {
   const lead = books[0]
   const [c1, c2] = hashColors(lead.title)
   return (
@@ -265,9 +287,21 @@ function SeriesStack({ books, onExpand }: { books: ApiBook[]; onExpand: () => vo
           </span>
         </div>
       </div>
+      {/* the cover expands the deck in place; the series name goes to the
+          series page and the author to theirs */}
       <div>
-        <div className="text-[12.5px] font-semibold leading-tight">{lead.seriesName}</div>
-        <div className="mt-0.5 text-[11.5px] text-muted-foreground">{lead.author} · {books.length} books</div>
+        <button type="button"
+          className="block text-left text-[12.5px] font-semibold leading-tight hover:text-brass hover:underline"
+          onClick={e => { e.stopPropagation(); onOpenSeries() }}>
+          {lead.seriesName}
+        </button>
+        <div className="mt-0.5 text-[11.5px] text-muted-foreground">
+          <button type="button" className="hover:text-brass hover:underline"
+            onClick={e => { e.stopPropagation(); onOpenAuthor() }}>
+            {lead.author}
+          </button>
+          {" · "}{books.length} books
+        </div>
       </div>
     </div>
   )
@@ -275,13 +309,15 @@ function SeriesStack({ books, onExpand }: { books: ApiBook[]; onExpand: () => vo
 
 export type { ScopeFilter } from "@/components/FilterRows"
 
-export function LibraryView({ library, scope, libraries, initialFilters, scopeTitle, onOpenBook, onRead, onSelectLibrary }: {
+export function LibraryView({ library, scope, libraries, initialFilters, scopeTitle, onOpenBook, onOpenAuthor, onOpenSeries, onRead, onSelectLibrary }: {
   library: ApiLibrary | null
   scope: Scope
   libraries: ApiLibrary[]
   initialFilters?: ScopeFilter[]
   scopeTitle?: string
   onOpenBook: (b: ApiBook) => void
+  onOpenAuthor: (b: ApiBook) => void
+  onOpenSeries: (b: ApiBook) => void
   onRead: (b: ApiBook) => void
   onSelectLibrary?: (l: ApiLibrary | null) => void
 }) {
@@ -606,11 +642,15 @@ export function LibraryView({ library, scope, libraries, initialFilters, scopeTi
         {cells.map(cell =>
           cell.kind === "stack" ? (
             <SeriesStack key={`s${cell.seriesId}`} books={cell.books}
-              onExpand={() => setExpanded(prev => new Set(prev).add(cell.seriesId))} />
+              onExpand={() => setExpanded(prev => new Set(prev).add(cell.seriesId))}
+              onOpenSeries={() => onOpenSeries(cell.books[0])}
+              onOpenAuthor={() => onOpenAuthor(cell.books[0])} />
           ) : (
             <BookCell key={`${cell.book.id}-${cell.book.libraryId}`} book={cell.book}
               libraries={libraries} bust={bust}
               seriesTag={!!cell.book.seriesId}
+              onOpenAuthor={onOpenAuthor}
+              onOpenSeries={onOpenSeries}
               selected={selection.has(`${cell.book.id}-${cell.book.libraryId}`)}
               selectionActive={selection.size > 0}
               onToggleSelect={b => setSelection(prev => {
