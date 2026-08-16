@@ -143,7 +143,9 @@ function BookCell({ book, libraries, seriesTag, bust, selected, selectionActive,
             "absolute right-1.5 top-9 z-10 flex h-6 w-6 items-center justify-center rounded-md border transition-opacity",
             selected
               ? "border-brass bg-brass text-brass-ink opacity-100"
-              : "border-white/50 bg-black/45 text-transparent opacity-0 backdrop-blur-xs hover:border-white focus-visible:opacity-100 group-hover/cell:opacity-100",
+              // touch has no hover to reveal it — stay visible there, or
+              // multi-select is unreachable from a phone
+              : "border-white/50 bg-black/45 text-transparent opacity-0 backdrop-blur-xs hover:border-white focus-visible:opacity-100 group-hover/cell:opacity-100 [@media(hover:none)]:opacity-100",
             selectionActive && "opacity-100"
           )}>
           <svg viewBox="0 0 24 24" width="13" height="13" style={{ stroke: "currentColor", fill: "none", strokeWidth: 3 }}><path d="M5 13l4 4 10-11" /></svg>
@@ -151,7 +153,7 @@ function BookCell({ book, libraries, seriesTag, bust, selected, selectionActive,
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
             <button aria-label={`${book.title} options`} onClick={e => e.stopPropagation()}
-              className="absolute left-1.5 top-1.5 z-10 flex h-7 w-7 items-center justify-center rounded-lg bg-black/60 text-white/90 opacity-0 backdrop-blur-xs transition-opacity hover:bg-black/80 focus-visible:opacity-100 group-hover/cell:opacity-100 data-[state=open]:opacity-100">
+              className="absolute left-1.5 top-1.5 z-10 flex h-7 w-7 items-center justify-center rounded-lg bg-black/60 text-white/90 opacity-0 backdrop-blur-xs transition-opacity hover:bg-black/80 focus-visible:opacity-100 group-hover/cell:opacity-100 data-[state=open]:opacity-100 [@media(hover:none)]:opacity-100">
               <MoreVertical className="h-4 w-4" />
             </button>
           </DropdownMenuTrigger>

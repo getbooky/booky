@@ -1,6 +1,7 @@
 import { useMemo, useState } from "react"
 import { api, canRead, coverUrl } from "@/api"
-import type { ApiAuthor, ApiBook } from "@/api"
+import type { ApiAuthor, ApiBook, ApiLibrary } from "@/api"
+import { PickLibraryDialog } from "@/components/PickLibraryDialog"
 import { useApi } from "@/hooks/use-api"
 import { MiniCover, hashColors } from "@/components/Cover"
 import { Tag, Fmt, Chips } from "@/components/bits"
@@ -113,18 +114,36 @@ export function AuthorView({ author, onBack, onOpenBook, onRead, focusSeries }: 
   const libsQuery = useApi(() => api.libraries())
   const libraries = libsQuery.data?.libraries ?? []
 
-  // Monitoring a catalog-only book is what puts it in a library.
+  // Monitoring a catalog-only book is what puts it in a library. One library
+  // needs no asking; several open the picker — silently taking the first
+  // dropped books onto somebody else's shelf.
+  const [pickFor, setPickFor] = useState<ApiBook | null>(null)
+  const monitorInto = async (b: ApiBook, library: ApiLibrary) => {
+    try {
+      await api.setBookMonitored(library.id, b.id, true)
+      toast.success(`${b.title} added to ${library.name} — monitored`)
+      setPickFor(null)
+      reload()
+    } catch (e) {
+      toast.error(`Couldn't update: ${e instanceof Error ? e.message : e}`)
+    }
+  }
   const toggle = async (b: ApiBook, v: boolean) => {
-    const libId = b.libraryId || libraries[0]?.id
-    if (!libId) {
-      toast.error("Create a library first")
+    if (!b.libraryId) {
+      if (!v) return // not shelved anywhere — nothing to unmonitor
+      if (libraries.length === 0) {
+        toast.error("Create a library first")
+        return
+      }
+      if (libraries.length > 1) {
+        setPickFor(b)
+        return
+      }
+      await monitorInto(b, libraries[0])
       return
     }
     try {
-      await api.setBookMonitored(libId, b.id, v)
-      if (!b.libraryId && v) {
-        toast.success(`${b.title} added to ${libraries[0].name} — monitored`)
-      }
+      await api.setBookMonitored(b.libraryId, b.id, v)
       reload()
     } catch (e) {
       toast.error(`Couldn't update: ${e instanceof Error ? e.message : e}`)
@@ -313,6 +332,8 @@ export function AuthorView({ author, onBack, onOpenBook, onRead, focusSeries }: 
           )}
         </TabsContent>
       </Tabs>
+      <PickLibraryDialog book={pickFor} libraries={libraries}
+        onPick={l => { if (pickFor) void monitorInto(pickFor, l) }} onClose={() => setPickFor(null)} />
     </section>
   )
 }
