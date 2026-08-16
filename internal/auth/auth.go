@@ -6,6 +6,7 @@ package auth
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
 	"fmt"
@@ -280,15 +281,17 @@ func (s *Store) Login(username, password, ip string) (token string, user *User, 
 
 	token = randomToken()
 	expires := time.Now().UTC().Add(sessionTTL).Format(time.RFC3339)
+	// only the hash touches the database — the cookie carries the raw token,
+	// so a stolen booky.db can't ride anyone's session
 	if _, err := s.db.Exec(`INSERT INTO sessions (token, user_id, expires_at) VALUES (?, ?, ?)`,
-		token, u.ID, expires); err != nil {
+		HashToken(token), u.ID, expires); err != nil {
 		return "", nil, err
 	}
 	return token, &u, nil
 }
 
 func (s *Store) Logout(token string) {
-	_, _ = s.db.Exec(`DELETE FROM sessions WHERE token = ?`, token)
+	_, _ = s.db.Exec(`DELETE FROM sessions WHERE token = ?`, HashToken(token))
 }
 
 // SessionUser resolves a session token to its user; expired sessions are
@@ -302,7 +305,7 @@ func (s *Store) SessionUser(token string) *User {
 	err := s.db.QueryRow(`
 		SELECT u.id, u.username, u.role, u.created_at, se.expires_at
 		FROM sessions se JOIN users u ON u.id = se.user_id
-		WHERE se.token = ?`, token).Scan(&u.ID, &u.Username, &u.Role, &u.CreatedAt, &expires)
+		WHERE se.token = ?`, HashToken(token)).Scan(&u.ID, &u.Username, &u.Role, &u.CreatedAt, &expires)
 	if err != nil {
 		return nil
 	}
@@ -329,6 +332,17 @@ func randomToken() string {
 		panic(fmt.Sprintf("crypto/rand unavailable: %v", err)) // never in practice
 	}
 	return hex.EncodeToString(b)
+}
+
+// HashToken is the storage form of every server-generated bearer token
+// (sessions, KoReader devices): a plain SHA-256. Deliberately NOT bcrypt —
+// these are 256-bit crypto/rand values, so there is no guessable space for a
+// slow hash to defend, and session validation runs on every request where
+// bcrypt's ~100ms cost would be a self-inflicted denial of service. Slow
+// hashes are for human-chosen passwords; those stay bcrypt below.
+func HashToken(token string) string {
+	sum := sha256.Sum256([]byte(token))
+	return hex.EncodeToString(sum[:])
 }
 
 // HashPassword is bcrypt for other per-credential stores (library OPDS).

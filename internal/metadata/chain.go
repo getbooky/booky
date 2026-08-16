@@ -407,7 +407,11 @@ func complete(m BookMeta) bool {
 
 func (c *Chain) dropExcluded(metas []BookMeta) []BookMeta {
 	patterns := c.userExclusions()
-	out := metas[:0]
+	// [:0:0], not [:0]: the input belongs to the provider, and compacting it
+	// in place raced when two bibliography syncs ran at once against a
+	// provider that hands out a shared slice — both goroutines rewrote the
+	// same backing array. Full capacity zero forces a fresh allocation.
+	out := metas[:0:0]
 	for _, m := range metas {
 		if m.Compilation || Excluded(m.Title, patterns) {
 			continue

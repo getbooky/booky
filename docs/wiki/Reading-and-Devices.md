@@ -33,7 +33,10 @@ Settings → KoReader Devices builds a preconfigured plugin zip per device:
 The plugin checks in over wifi and pulls new arrivals from the auto-download
 libraries onto the device. Devices are listed with their last sync time, and
 revoking one kills its token instantly — including devices paired by a user
-whose library access was later revoked.
+whose library access was later revoked. Tokens are stored hashed: only the
+plugin zip carries the real one, so a copy of the database can't impersonate
+a device. Updating to the version that introduced this signs everyone out of
+the web UI once; paired e-readers keep syncing untouched.
 
 ## Send to Kindle
 

@@ -8,16 +8,23 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"log"
 
 	"github.com/getbooky/booky/internal/auth"
 	"github.com/getbooky/booky/internal/db"
+	"github.com/getbooky/booky/internal/secrets"
 )
 
 type Store struct {
 	db *sql.DB
+	// keeper seals the raw token so plugin zips can be rebuilt later; the
+	// token column itself holds only a SHA-256 lookup hash.
+	keeper *secrets.Keeper
 }
 
-func New(db *sql.DB) *Store { return &Store{db: db} }
+func New(database *sql.DB, keeper *secrets.Keeper) *Store {
+	return &Store{db: database, keeper: keeper}
+}
 
 type Device struct {
 	ID        int64   `json:"id"`
@@ -30,7 +37,9 @@ type Device struct {
 	// own devices and nobody else's; 0 means it was paired before accounts
 	// existed, which only an admin can still see.
 	OwnerID int64 `json:"ownerId"`
-	// Token is only exposed internally (zip builder, auth) — never in JSON.
+	// Token is only exposed internally (zip builder) — never in JSON. Rows
+	// scan it as the SHA-256 lookup hash; the zip handler swaps in the raw
+	// token via RawToken before building.
 	Token string `json:"-"`
 }
 
@@ -52,9 +61,15 @@ func (s *Store) Create(name string, libraries, autoIDs []int64, ownerID int64) (
 			return nil, fmt.Errorf("auto-download library %d is not in the device's library list", id)
 		}
 	}
-	token := auth.RandomToken()
-	res, err := s.db.Exec(`INSERT INTO devices (name, token, library_ids, auto_ids, owner_user_id) VALUES (?, ?, ?, ?, ?)`,
-		name, token, idsJSON(libraries), idsJSON(autoIDs), ownerID)
+	// the database gets the hash (lookup) and a sealed copy (zip rebuilds) —
+	// never the raw token, so a stolen booky.db can't sync anyone's shelf
+	raw := auth.RandomToken()
+	ct, err := s.keeper.Seal(raw)
+	if err != nil {
+		return nil, err
+	}
+	res, err := s.db.Exec(`INSERT INTO devices (name, token, token_ct, library_ids, auto_ids, owner_user_id) VALUES (?, ?, ?, ?, ?, ?)`,
+		name, auth.HashToken(raw), ct, idsJSON(libraries), idsJSON(autoIDs), ownerID)
 	if err != nil {
 		return nil, err
 	}
@@ -62,16 +77,68 @@ func (s *Store) Create(name string, libraries, autoIDs []int64, ownerID int64) (
 	return s.Get(id)
 }
 
+// RawToken recovers a device's raw bearer token for the plugin-zip builder.
+func (s *Store) RawToken(id int64) (string, error) {
+	var ct []byte
+	if err := s.db.QueryRow(`SELECT token_ct FROM devices WHERE id = ?`, id).Scan(&ct); err != nil {
+		return "", err
+	}
+	if len(ct) == 0 {
+		return "", fmt.Errorf("device %d has no sealed token — re-pair it", id)
+	}
+	return s.keeper.Open(ct)
+}
+
+// SealLegacyTokens converts rows from before token hardening: their token
+// column still holds the raw value and token_ct is NULL. Each gets a sealed
+// copy and its column rewritten to the lookup hash — in place, so paired
+// devices keep syncing without a re-pair. Idempotent: converted rows carry a
+// ct and are never touched again.
+func (s *Store) SealLegacyTokens() (int, error) {
+	rows, err := s.db.Query(`SELECT id, token FROM devices WHERE token_ct IS NULL`)
+	if err != nil {
+		return 0, err
+	}
+	type legacy struct {
+		id  int64
+		raw string
+	}
+	var pending []legacy
+	for rows.Next() {
+		var l legacy
+		if err := rows.Scan(&l.id, &l.raw); err == nil {
+			pending = append(pending, l)
+		}
+	}
+	rows.Close()
+	converted := 0
+	for _, l := range pending {
+		ct, err := s.keeper.Seal(l.raw)
+		if err != nil {
+			log.Printf("koreader: sealing device %d token: %v", l.id, err)
+			continue
+		}
+		if _, err := s.db.Exec(`UPDATE devices SET token = ?, token_ct = ? WHERE id = ?`,
+			auth.HashToken(l.raw), ct, l.id); err != nil {
+			log.Printf("koreader: rewriting device %d token: %v", l.id, err)
+			continue
+		}
+		converted++
+	}
+	return converted, rows.Err()
+}
+
 func (s *Store) Get(id int64) (*Device, error) {
 	return s.scanOne(s.db.QueryRow(`SELECT `+deviceColumns+` FROM devices WHERE id = ?`, id))
 }
 
-// ByToken resolves a device from its bearer token (plugin check-ins).
+// ByToken resolves a device from its raw bearer token (plugin check-ins) —
+// the lookup hashes it, so only hashes are ever compared or stored.
 func (s *Store) ByToken(token string) (*Device, error) {
 	if token == "" {
 		return nil, fmt.Errorf("no token")
 	}
-	return s.scanOne(s.db.QueryRow(`SELECT `+deviceColumns+` FROM devices WHERE token = ?`, token))
+	return s.scanOne(s.db.QueryRow(`SELECT `+deviceColumns+` FROM devices WHERE token = ?`, auth.HashToken(token)))
 }
 
 func (s *Store) scanOne(row *sql.Row) (*Device, error) {

@@ -423,6 +423,13 @@ func (s *Server) handlePluginZip(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusNotFound, errors.New("device not found"))
 		return
 	}
+	// rows carry only the token's hash — recover the raw one for the zip
+	raw, err := s.KoReader.RawToken(device.ID)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+	device.Token = raw
 	serverURL := s.Settings.Get("server_url")
 	w.Header().Set("Content-Type", "application/zip")
 	// the filename doubles as the folder name desktop extractors create, so

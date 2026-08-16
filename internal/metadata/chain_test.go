@@ -3,6 +3,7 @@ package metadata
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 )
@@ -513,4 +514,34 @@ func TestEnrichStillUsesEnrichOnlyProvider(t *testing.T) {
 	if gr.searchCalls == 0 {
 		t.Error("enrich-only provider should be queried during Enrich")
 	}
+}
+
+// Two bibliography syncs at once, against a provider that returns the SAME
+// slice every call (as caches do): dropExcluded once compacted that shared
+// slice in place, and the race detector caught the two goroutines rewriting
+// one backing array. Run with -race, this is the regression guard.
+func TestAuthorWorksConcurrentSharedSlice(t *testing.T) {
+	shared := []BookMeta{
+		{Title: "Loom"},
+		{Title: "Vault Box Set 1-3"}, // excluded → forces the compaction path
+		{Title: "Drift"},
+		{Title: "Haze Special Edition"},
+		{Title: "Ember"},
+	}
+	lister := &fakeWorksProvider{fakeProvider: fakeProvider{key: "hc"}, works: shared}
+	c := NewChain(func() []string { return []string{"hc"} }, lister)
+	c.Exclude = func() []string { return []string{"special edition", "box set"} }
+
+	var wg sync.WaitGroup
+	for range 8 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			got, err := c.AuthorWorks(context.Background(), "Tess Arden", 50)
+			if err != nil || len(got) != 3 {
+				t.Errorf("AuthorWorks = %d books, %v", len(got), err)
+			}
+		}()
+	}
+	wg.Wait()
 }
