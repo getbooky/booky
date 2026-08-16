@@ -373,6 +373,48 @@ func (s *Server) handleCreateDevice(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, device)
 }
 
+// handleUpdateDevice edits a KoReader device in place: name, libraries,
+// auto-download flags. The token survives, so the plugin already on the
+// device keeps syncing against the NEW lists immediately (sync responses are
+// computed server-side) — only the zip's own baked lists go stale, fixed by
+// re-downloading it.
+func (s *Server) handleUpdateDevice(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, errors.New("bad id"))
+		return
+	}
+	a := s.access(r)
+	device, err := s.KoReader.Get(id)
+	if err != nil || !s.ownsDevice(a, device) {
+		writeErr(w, http.StatusNotFound, errors.New("device not found"))
+		return
+	}
+	var req struct {
+		Name      string  `json:"name"`
+		Libraries []int64 `json:"libraryIds"`
+		AutoIDs   []int64 `json:"autoLibraryIds"`
+	}
+	if err := decodeJSON(r, &req); err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	// same rule as pairing, capped by the device's OWNER: its token bypasses
+	// session auth, so it must never reach past the account it belongs to
+	for _, libID := range append(append([]int64{}, req.Libraries...), req.AutoIDs...) {
+		if !s.deviceOwnerMayLibrary(device.OwnerID, a, libID) {
+			writeErr(w, http.StatusForbidden, errForbidden)
+			return
+		}
+	}
+	updated, err := s.KoReader.Update(id, strings.TrimSpace(req.Name), req.Libraries, req.AutoIDs)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, updated)
+}
+
 func (s *Server) handleRevokeDevice(w http.ResponseWriter, r *http.Request) {
 	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	if err != nil {

@@ -41,6 +41,18 @@ func (s *Server) ownsKindleDevice(a access, d *kindle.Device) bool {
 	return a.user != nil && a.user.ID == d.OwnerID
 }
 
+// deviceOwnerMayLibrary caps a device's libraries by its OWNER's grants. An
+// admin may edit anyone's device, but the device must never reach past the
+// account it belongs to — its sends always run as that owner. Owner 0 (a
+// device paired pre-auth, which only admins can touch) falls back to the
+// caller's own access.
+func (s *Server) deviceOwnerMayLibrary(ownerID int64, a access, libraryID int64) bool {
+	if ownerID == 0 {
+		return a.mayLibrary(libraryID)
+	}
+	return s.Auth.UserByID(ownerID).MayAccess(libraryID)
+}
+
 // ---- outgoing email (per-account) ----
 
 func (s *Server) handleKindleSMTPGet(w http.ResponseWriter, r *http.Request) {
@@ -201,6 +213,47 @@ func (s *Server) handleKindleCreateDevice(w http.ResponseWriter, r *http.Request
 		return
 	}
 	writeJSON(w, http.StatusCreated, device)
+}
+
+// handleKindleUpdateDevice edits a device in place — add a library, flip
+// auto-send, fix a typo'd address — without re-pairing.
+func (s *Server) handleKindleUpdateDevice(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.kindleOwner(w, r); !ok {
+		return
+	}
+	id, err := pathID(r, "id")
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, errors.New("bad id"))
+		return
+	}
+	a := s.access(r)
+	device, err := s.Kindle.GetDevice(id)
+	if err != nil || !s.ownsKindleDevice(a, device) {
+		writeErr(w, http.StatusNotFound, errors.New("device not found"))
+		return
+	}
+	var req struct {
+		Name           string  `json:"name"`
+		Email          string  `json:"email"`
+		LibraryIDs     []int64 `json:"libraryIds"`
+		AutoLibraryIDs []int64 `json:"autoLibraryIds"`
+	}
+	if err := decodeJSON(r, &req); err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	for _, libID := range req.LibraryIDs {
+		if !s.deviceOwnerMayLibrary(device.OwnerID, a, libID) {
+			writeErr(w, http.StatusForbidden, errForbidden)
+			return
+		}
+	}
+	updated, err := s.Kindle.UpdateDevice(id, req.Name, req.Email, req.LibraryIDs, req.AutoLibraryIDs)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, updated)
 }
 
 func (s *Server) handleKindleRemoveDevice(w http.ResponseWriter, r *http.Request) {

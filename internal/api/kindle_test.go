@@ -319,3 +319,71 @@ func TestKindleAutoSend(t *testing.T) {
 	}
 	_ = out
 }
+
+// Devices are editable in place: libraries and auto-send flip without
+// re-pairing — capped by the OWNER's grants even when an admin edits, and
+// never across owners for non-admins.
+func TestKindleUpdateDevice(t *testing.T) {
+	f := newScopedFixture(t)
+
+	rec, out := f.do(t, f.userCookie, "POST", "/api/v1/kindle/devices", map[string]any{
+		"name": "Sam's PW", "email": "sam_x1@kindle.com", "libraryIds": []int64{f.mine},
+	})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create: %d %s", rec.Code, rec.Body)
+	}
+	id := int64(out["id"].(float64))
+
+	// sam flips auto-send on and fixes the name
+	rec, out = f.do(t, f.userCookie, "PUT", fmt.Sprintf("/api/v1/kindle/devices/%d", id), map[string]any{
+		"name": "Paperwhite", "email": "sam_x1@kindle.com",
+		"libraryIds": []int64{f.mine}, "autoLibraryIds": []int64{f.mine},
+	})
+	if rec.Code != http.StatusOK || out["name"] != "Paperwhite" {
+		t.Fatalf("update: %d %s", rec.Code, rec.Body)
+	}
+	if autos := list(out, "autoLibraryIds"); len(autos) != 1 {
+		t.Fatalf("auto-send not enabled: %s", rec.Body)
+	}
+
+	// sam can't reach past their scope...
+	rec, _ = f.do(t, f.userCookie, "PUT", fmt.Sprintf("/api/v1/kindle/devices/%d", id), map[string]any{
+		"name": "Paperwhite", "email": "sam_x1@kindle.com", "libraryIds": []int64{f.mine, f.off},
+	})
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("out-of-scope edit = %d", rec.Code)
+	}
+	// ...and neither can an admin ON SAM'S BEHALF — the device sends as its
+	// owner, so it stays capped by the owner's grants
+	rec, _ = f.do(t, f.adminCooke, "PUT", fmt.Sprintf("/api/v1/kindle/devices/%d", id), map[string]any{
+		"name": "Paperwhite", "email": "sam_x1@kindle.com", "libraryIds": []int64{f.off},
+	})
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("admin edit past owner scope = %d %s", rec.Code, rec.Body)
+	}
+
+	// auto outside the library list stays rejected
+	rec, _ = f.do(t, f.userCookie, "PUT", fmt.Sprintf("/api/v1/kindle/devices/%d", id), map[string]any{
+		"name": "Paperwhite", "email": "sam_x1@kindle.com",
+		"libraryIds": []int64{f.mine}, "autoLibraryIds": []int64{f.mine, f.off},
+	})
+	if rec.Code != http.StatusForbidden && rec.Code != http.StatusBadRequest {
+		t.Fatalf("bad auto list = %d", rec.Code)
+	}
+
+	// another user's device is not sam's to edit — and reads as absent.
+	// (create one as admin, try to edit as sam)
+	rec, out = f.do(t, f.adminCooke, "POST", "/api/v1/kindle/devices", map[string]any{
+		"name": "Root's Oasis", "email": "root_z9@kindle.com", "libraryIds": []int64{f.off},
+	})
+	if rec.Code != http.StatusCreated {
+		t.Fatal(rec.Body.String())
+	}
+	rootDevice := int64(out["id"].(float64))
+	rec, _ = f.do(t, f.userCookie, "PUT", fmt.Sprintf("/api/v1/kindle/devices/%d", rootDevice), map[string]any{
+		"name": "Hijacked", "email": "sam_x1@kindle.com", "libraryIds": []int64{f.mine},
+	})
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("cross-owner edit = %d", rec.Code)
+	}
+}

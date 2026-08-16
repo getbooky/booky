@@ -8,7 +8,7 @@ import { useAccess } from "@/lib/access"
 import { formatFull, formatWhen } from "@/lib/time"
 import { useApi } from "@/hooks/use-api"
 import { toast } from "sonner"
-import { Plus, X } from "lucide-react"
+import { Pencil, Plus, X } from "lucide-react"
 
 function Card({ title, desc, action, children }: { title: string; desc?: string; action?: React.ReactNode; children: React.ReactNode }) {
   return (
@@ -32,6 +32,34 @@ function Label({ children }: { children: React.ReactNode }) {
 function KindleDeviceRow({ device, libraries, onChanged }: { device: ApiKindleDevice; libraries: ApiLibrary[]; onChanged: () => void }) {
   const libName = (id: number) => libraries.find(l => l.id === id)?.name ?? `#${id}`
   const [testing, setTesting] = useState(false)
+  // in-place editing: add a library, flip auto-send, fix the address — no
+  // re-pairing
+  const [editing, setEditing] = useState(false)
+  const [name, setName] = useState(device.name)
+  const [email, setEmail] = useState(device.email)
+  const [sel, setSel] = useState<Set<number>>(new Set(device.libraryIds))
+  const [auto, setAuto] = useState<Set<number>>(new Set(device.autoLibraryIds))
+  const startEdit = () => {
+    setName(device.name); setEmail(device.email)
+    setSel(new Set(device.libraryIds)); setAuto(new Set(device.autoLibraryIds))
+    setEditing(true)
+  }
+  const toggle = (set: Set<number>, setter: (s: Set<number>) => void, id: number) => {
+    const next = new Set(set)
+    if (next.has(id)) next.delete(id)
+    else next.add(id)
+    setter(next)
+  }
+  const save = async () => {
+    try {
+      await kindle.updateDevice(device.id, name.trim(), email.trim(), [...sel], [...auto].filter(id => sel.has(id)))
+      toast.success(`"${name.trim()}" updated`)
+      setEditing(false)
+      onChanged()
+    } catch (e) {
+      toast.error(`Couldn't save: ${e instanceof Error ? e.message : e}`)
+    }
+  }
   const remove = async () => {
     if (!window.confirm(`Remove "${device.name}"? Nothing more is sent to it.`)) return
     try {
@@ -77,10 +105,51 @@ function KindleDeviceRow({ device, libraries, onChanged }: { device: ApiKindleDe
         <Button variant="outline" className="h-8" disabled={testing || !device.emailConfigured} onClick={test}>
           Send test
         </Button>
+        <Button variant="outline" size="icon" className="h-8 w-8" aria-label={`Edit ${device.name}`}
+          onClick={() => (editing ? setEditing(false) : startEdit())}>
+          <Pencil className="h-3.5 w-3.5" />
+        </Button>
         <Button variant="outline" size="icon" className="h-8 w-8 text-faint" aria-label={`Remove ${device.name}`} onClick={remove}>
           <X className="h-3.5 w-3.5" />
         </Button>
       </div>
+      {editing && (
+        <div className="w-full rounded-lg border border-dashed border-linesoft px-4 py-3">
+          <div className="flex flex-wrap items-end gap-3">
+            <div>
+              <Label>Device name</Label>
+              <Input value={name} onChange={e => setName(e.target.value)} className="h-9 w-[180px]" />
+            </div>
+            <div>
+              <Label>Kindle email</Label>
+              <Input value={email} onChange={e => setEmail(e.target.value)} className="h-9 w-[240px]" />
+            </div>
+          </div>
+          <div className="mt-3">
+            <Label>Libraries (check "auto-send" to email new arrivals)</Label>
+            <div className="flex flex-col gap-1.5">
+              {libraries.map(l => (
+                <div key={l.id} className="flex items-center gap-4 text-[13px]">
+                  <label className="flex w-[160px] cursor-pointer items-center gap-2">
+                    <input type="checkbox" className="h-4 w-4 accent-[hsl(var(--brass))]"
+                      checked={sel.has(l.id)} onChange={() => toggle(sel, setSel, l.id)} />
+                    <span className="font-medium">{l.name}</span>
+                  </label>
+                  <label className="flex cursor-pointer items-center gap-1.5 text-[12px] text-muted-foreground">
+                    <input type="checkbox" className="h-3.5 w-3.5 accent-[hsl(var(--brass))]" disabled={!sel.has(l.id)}
+                      checked={auto.has(l.id) && sel.has(l.id)} onChange={() => toggle(auto, setAuto, l.id)} />
+                    auto-send
+                  </label>
+                </div>
+              ))}
+            </div>
+          </div>
+          <div className="mt-3 flex gap-2">
+            <Button className="h-9" disabled={!name.trim() || !email.trim() || sel.size === 0} onClick={save}>Save</Button>
+            <Button variant="outline" className="h-9" onClick={() => setEditing(false)}>Cancel</Button>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

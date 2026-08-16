@@ -70,6 +70,38 @@ func (s *Store) CreateDevice(ownerID int64, name, email string, libraries, autoI
 	return s.GetDevice(id)
 }
 
+// UpdateDevice rewrites a device's name, email, and library lists in place —
+// owner, creation time, and send history stay put. Same validation as
+// CreateDevice; the caller has already verified the OWNER may reach every
+// library listed.
+func (s *Store) UpdateDevice(id int64, name, email string, libraries, autoIDs []int64) (*Device, error) {
+	name, email = strings.TrimSpace(name), strings.TrimSpace(email)
+	if name == "" || email == "" || len(libraries) == 0 {
+		return nil, fmt.Errorf("name, kindle email, and at least one library required")
+	}
+	if !strings.Contains(email, "@") {
+		return nil, fmt.Errorf("%q doesn't look like an email address", email)
+	}
+	allowed := map[int64]bool{}
+	for _, lid := range libraries {
+		allowed[lid] = true
+	}
+	for _, lid := range autoIDs {
+		if !allowed[lid] {
+			return nil, fmt.Errorf("auto-send library %d is not in the device's library list", lid)
+		}
+	}
+	res, err := s.db.Exec(`UPDATE kindle_devices SET name = ?, email = ?, library_ids = ?, auto_ids = ? WHERE id = ?`,
+		name, email, idsJSON(libraries), idsJSON(autoIDs), id)
+	if err != nil {
+		return nil, err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return nil, fmt.Errorf("device %d not found", id)
+	}
+	return s.GetDevice(id)
+}
+
 func (s *Store) GetDevice(id int64) (*Device, error) {
 	return s.scanDevice(s.db.QueryRow(`SELECT `+deviceColumns+` FROM kindle_devices WHERE id = ?`, id))
 }
