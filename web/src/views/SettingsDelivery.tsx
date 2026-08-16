@@ -9,7 +9,7 @@ import { useAccess } from "@/lib/access"
 import { formatFull, formatWhen } from "@/lib/time"
 import { useApi } from "@/hooks/use-api"
 import { toast } from "sonner"
-import { Download, Plus, X } from "lucide-react"
+import { Download, Pencil, Plus, X } from "lucide-react"
 import { SettingField } from "@/views/Settings"
 
 function Card({ title, desc, action, children }: { title: string; desc?: string; action?: React.ReactNode; children: React.ReactNode }) {
@@ -308,6 +308,33 @@ function ScheduleToggle() {
 
 function DeviceRow({ device, libraries, onChanged }: { device: ApiDevice; libraries: ApiLibrary[]; onChanged: () => void }) {
   const libName = (id: number) => libraries.find(l => l.id === id)?.name ?? `#${id}`
+  // in-place editing: the token survives, so the device keeps syncing against
+  // the new lists immediately — only the zip's own baked lists go stale
+  const [editing, setEditing] = useState(false)
+  const [name, setName] = useState(device.name)
+  const [sel, setSel] = useState<Set<number>>(new Set(device.libraryIds))
+  const [auto, setAuto] = useState<Set<number>>(new Set(device.autoLibraryIds))
+  const startEdit = () => {
+    setName(device.name)
+    setSel(new Set(device.libraryIds)); setAuto(new Set(device.autoLibraryIds))
+    setEditing(true)
+  }
+  const toggle = (set: Set<number>, setter: (s: Set<number>) => void, id: number) => {
+    const next = new Set(set)
+    if (next.has(id)) next.delete(id)
+    else next.add(id)
+    setter(next)
+  }
+  const save = async () => {
+    try {
+      await delivery.updateDevice(device.id, name.trim(), [...sel], [...auto].filter(id => sel.has(id)))
+      toast.success(`"${name.trim()}" updated — syncing follows the new libraries right away`)
+      setEditing(false)
+      onChanged()
+    } catch (e) {
+      toast.error(`Couldn't save: ${e instanceof Error ? e.message : e}`)
+    }
+  }
   const revoke = async () => {
     if (!window.confirm(`Revoke "${device.name}"? Its plugin stops syncing immediately.`)) return
     try {
@@ -340,10 +367,46 @@ function DeviceRow({ device, libraries, onChanged }: { device: ApiDevice; librar
             <Download className="mr-1.5 h-3.5 w-3.5" /> Plugin zip
           </a>
         </Button>
+        <Button variant="outline" size="icon" className="h-8 w-8" aria-label={`Edit ${device.name}`}
+          onClick={() => (editing ? setEditing(false) : startEdit())}>
+          <Pencil className="h-3.5 w-3.5" />
+        </Button>
         <Button variant="outline" size="icon" className="h-8 w-8 text-faint" aria-label={`Revoke ${device.name}`} onClick={revoke}>
           <X className="h-3.5 w-3.5" />
         </Button>
       </div>
+      {editing && (
+        <div className="w-full rounded-lg border border-dashed border-linesoft px-4 py-3">
+          <div>
+            <Label>Device name</Label>
+            <Input value={name} onChange={e => setName(e.target.value)} className="h-9 w-[180px]" />
+          </div>
+          <div className="mt-3">
+            <Label>Libraries (check "auto-download" to push new arrivals)</Label>
+            <div className="flex flex-col gap-1.5">
+              {libraries.map(l => (
+                <div key={l.id} className="flex items-center gap-4 text-[13px]">
+                  <label className="flex w-[160px] cursor-pointer items-center gap-2">
+                    <input type="checkbox" className="h-4 w-4 accent-[hsl(var(--brass))]"
+                      checked={sel.has(l.id)} onChange={() => toggle(sel, setSel, l.id)} />
+                    <span className="font-medium">{l.name}</span>
+                  </label>
+                  <label className="flex cursor-pointer items-center gap-1.5 text-[12px] text-muted-foreground">
+                    <input type="checkbox" className="h-3.5 w-3.5 accent-[hsl(var(--brass))]" disabled={!sel.has(l.id)}
+                      checked={auto.has(l.id) && sel.has(l.id)} onChange={() => toggle(auto, setAuto, l.id)} />
+                    auto-download
+                  </label>
+                </div>
+              ))}
+            </div>
+          </div>
+          <p className="mt-2 text-xs text-faint">Syncing follows the new libraries immediately — the token doesn't change. Download a fresh plugin zip when convenient so the device's own list matches.</p>
+          <div className="mt-3 flex gap-2">
+            <Button className="h-9" disabled={!name.trim() || sel.size === 0} onClick={save}>Save</Button>
+            <Button variant="outline" className="h-9" onClick={() => setEditing(false)}>Cancel</Button>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

@@ -77,6 +77,34 @@ func (s *Store) Create(name string, libraries, autoIDs []int64, ownerID int64) (
 	return s.Get(id)
 }
 
+// Update rewrites a device's name and library lists in place. The token (and
+// its sealed copy) survive untouched, so the plugin already on the device
+// keeps syncing — the server computes sync responses from the STORED lists,
+// while the zip's own baked lists go stale until it's re-downloaded.
+func (s *Store) Update(id int64, name string, libraries, autoIDs []int64) (*Device, error) {
+	if name == "" || len(libraries) == 0 {
+		return nil, fmt.Errorf("name and at least one library required")
+	}
+	allowed := map[int64]bool{}
+	for _, lid := range libraries {
+		allowed[lid] = true
+	}
+	for _, lid := range autoIDs {
+		if !allowed[lid] {
+			return nil, fmt.Errorf("auto-download library %d is not in the device's library list", lid)
+		}
+	}
+	res, err := s.db.Exec(`UPDATE devices SET name = ?, library_ids = ?, auto_ids = ? WHERE id = ?`,
+		name, idsJSON(libraries), idsJSON(autoIDs), id)
+	if err != nil {
+		return nil, err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return nil, fmt.Errorf("device %d not found", id)
+	}
+	return s.Get(id)
+}
+
 // RawToken recovers a device's raw bearer token for the plugin-zip builder.
 func (s *Store) RawToken(id int64) (string, error) {
 	var ct []byte

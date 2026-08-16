@@ -509,6 +509,10 @@ export const delivery = {
     request<ApiDevice>("/api/v1/devices", {
       method: "POST", body: JSON.stringify({ name, libraryIds, autoLibraryIds }),
     }),
+  updateDevice: (id: number, name: string, libraryIds: number[], autoLibraryIds: number[]) =>
+    request<ApiDevice>(`/api/v1/devices/${id}`, {
+      method: "PUT", body: JSON.stringify({ name, libraryIds, autoLibraryIds }),
+    }),
   revokeDevice: (id: number) => request(`/api/v1/devices/${id}`, { method: "DELETE" }),
   pluginZipUrl: (id: number) => `/api/v1/devices/${id}/plugin.zip`,
 
@@ -562,6 +566,10 @@ export const kindle = {
   createDevice: (name: string, email: string, libraryIds: number[], autoLibraryIds: number[]) =>
     request<ApiKindleDevice>("/api/v1/kindle/devices", {
       method: "POST", body: JSON.stringify({ name, email, libraryIds, autoLibraryIds }),
+    }),
+  updateDevice: (id: number, name: string, email: string, libraryIds: number[], autoLibraryIds: number[]) =>
+    request<ApiKindleDevice>(`/api/v1/kindle/devices/${id}`, {
+      method: "PUT", body: JSON.stringify({ name, email, libraryIds, autoLibraryIds }),
     }),
   removeDevice: (id: number) => request(`/api/v1/kindle/devices/${id}`, { method: "DELETE" }),
   testDevice: (id: number) => request(`/api/v1/kindle/devices/${id}/test`, { method: "POST", body: "{}" }),
