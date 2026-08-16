@@ -41,12 +41,14 @@ from Settings → About.
 
 Creating the admin account is the wizard's first, mandatory step: the API is
 open only for that brief first-run window and locks the moment the account
-exists. Passwords are hashed (bcrypt) and login is rate-limited. Credentials
-Booky must present elsewhere — SMTP passwords for Send to Kindle, provider
-tokens and API keys — are stored write-only (never shown again in the UI or
-API) and encrypted at rest, under a key kept outside the database. OPDS feeds
-and KoReader devices use their own per-library credentials, never your
-account — see [Reading and Devices](Reading-and-Devices.md).
+exists. Login is rate-limited, and nothing usable is ever stored raw:
+passwords are bcrypt-hashed, session and device tokens are stored as hashes,
+and credentials Booky must present elsewhere — SMTP passwords for Send to
+Kindle, provider tokens and API keys — are write-only (never shown again in
+the UI or API) and encrypted under a key kept outside the database. A stolen
+database or backup yields none of them. OPDS feeds and KoReader devices use
+their own per-library credentials, never your account — see
+[Reading and Devices](Reading-and-Devices.md).
 
 Roles and per-library access are covered in
 [Libraries and Users](Libraries-and-Users.md).

@@ -155,3 +155,38 @@ func mustLogin(t *testing.T, s *Store, username, password string) string {
 	}
 	return token
 }
+
+// Sessions are stored hashed: the cookie's raw token must never appear in
+// the database, while login/lookup/logout all keep working through it.
+func TestSessionTokensStoredHashed(t *testing.T) {
+	conn, err := db.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { conn.Close() })
+	s := New(conn)
+	if _, err := s.CreateUser("root", "correct horse battery", "admin", nil); err != nil {
+		t.Fatal(err)
+	}
+	token, _, lerr := s.Login("root", "correct horse battery", "127.0.0.1")
+	if lerr != nil {
+		t.Fatal(lerr)
+	}
+	var stored string
+	if err := conn.QueryRow(`SELECT token FROM sessions`).Scan(&stored); err != nil {
+		t.Fatal(err)
+	}
+	if stored == token {
+		t.Fatal("raw session token stored in the database")
+	}
+	if stored != HashToken(token) {
+		t.Fatalf("stored token is not the hash: %q", stored)
+	}
+	if s.SessionUser(token) == nil {
+		t.Fatal("raw token must still resolve the session")
+	}
+	s.Logout(token)
+	if s.SessionUser(token) != nil {
+		t.Fatal("logout by raw token must kill the session")
+	}
+}

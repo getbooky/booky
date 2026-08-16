@@ -96,12 +96,20 @@ func main() {
 	backups := backup.New(database, configDir)
 	watch := watcher.New(database, cat, chain, cfg, engine, covers, hardcover)
 	watch.Backups = backups
+	// devices paired before token hardening still hold raw tokens — hash and
+	// seal them in place so they keep syncing without a re-pair
+	koDevices := koreader.New(database, keeper)
+	if n, err := koDevices.SealLegacyTokens(); err != nil {
+		log.Printf("koreader: token sweep: %v", err)
+	} else if n > 0 {
+		log.Printf("koreader: sealed %d legacy device token(s)", n)
+	}
 
 	server, err := api.New(api.Deps{
 		DB: database, Version: version, Dist: web.Dist,
 		Catalog: cat, Chain: chain, Importer: imp, Covers: covers, AuthorPhotos: authorPhotos, Settings: cfg, Logs: logs,
 		Acquire: engine, Watcher: watch,
-		Auth: auth.New(database), KoReader: koreader.New(database), Kindle: kindle.New(database, keeper), Backups: backups,
+		Auth: auth.New(database), KoReader: koDevices, Kindle: kindle.New(database, keeper), Backups: backups,
 		OPDS: opds.New(database, cat, covers),
 	})
 	if err != nil {

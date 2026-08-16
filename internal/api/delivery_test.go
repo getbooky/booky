@@ -198,6 +198,18 @@ func TestKoReaderDeviceFlow(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// the zip carries the RAW token; the database row only ever holds its
+	// hash — the two must differ, and the raw one must resolve on check-in
+	rawToken, err := srv.KoReader.RawToken(deviceID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rawToken == device.Token {
+		t.Fatal("stored token must be a hash, not the raw bearer token")
+	}
+	if d, err := srv.KoReader.ByToken(rawToken); err != nil || d.ID != deviceID {
+		t.Fatalf("raw token must resolve the device: %v", err)
+	}
 	// entries live at the zip root so an extractor's wrapper folder (named
 	// after booky.koplugin.zip) becomes the plugin folder itself
 	var sawConfig bool
@@ -215,8 +227,11 @@ func TestKoReaderDeviceFlow(t *testing.T) {
 			t.Fatal(err)
 		}
 		rc.Close()
-		if !strings.Contains(body.String(), device.Token) || !strings.Contains(body.String(), "http://booky.local:8787") {
+		if !strings.Contains(body.String(), rawToken) || !strings.Contains(body.String(), "http://booky.local:8787") {
 			t.Fatalf("config.lua missing token or server url:\n%s", body.String())
+		}
+		if strings.Contains(body.String(), device.Token) {
+			t.Fatal("config.lua must carry the raw token, never the stored hash")
 		}
 	}
 	if !sawConfig {
@@ -225,7 +240,7 @@ func TestKoReaderDeviceFlow(t *testing.T) {
 
 	// sync with the bearer token sees the book; download works; revoke kills it
 	req := httptest.NewRequest("GET", "/api/koreader/v1/sync", nil)
-	req.Header.Set("Authorization", "Bearer "+device.Token)
+	req.Header.Set("Authorization", "Bearer "+rawToken)
 	rec2 := httptest.NewRecorder()
 	h.ServeHTTP(rec2, req)
 	if rec2.Code != http.StatusOK || !strings.Contains(rec2.Body.String(), `"Burrow"`) {
@@ -237,7 +252,7 @@ func TestKoReaderDeviceFlow(t *testing.T) {
 	}
 
 	req = httptest.NewRequest("GET", "/api/koreader/v1/download/"+intToStr(libID)+"/"+intToStr(bookID), nil)
-	req.Header.Set("Authorization", "Bearer "+device.Token)
+	req.Header.Set("Authorization", "Bearer "+rawToken)
 	rec2 = httptest.NewRecorder()
 	h.ServeHTTP(rec2, req)
 	if rec2.Code != http.StatusOK || rec2.Body.String() != "epub-bytes" {
@@ -249,7 +264,7 @@ func TestKoReaderDeviceFlow(t *testing.T) {
 		t.Fatal(err)
 	}
 	req = httptest.NewRequest("GET", "/api/koreader/v1/cover/"+intToStr(libID)+"/"+intToStr(bookID), nil)
-	req.Header.Set("Authorization", "Bearer "+device.Token)
+	req.Header.Set("Authorization", "Bearer "+rawToken)
 	rec2 = httptest.NewRecorder()
 	h.ServeHTTP(rec2, req)
 	if rec2.Code != http.StatusOK || rec2.Body.String() != "jpeg-bytes" {
@@ -263,7 +278,7 @@ func TestKoReaderDeviceFlow(t *testing.T) {
 		t.Fatalf("cover without token must refuse: %d", rec2.Code)
 	}
 	req = httptest.NewRequest("GET", "/api/koreader/v1/cover/"+intToStr(libID)+"/999999", nil)
-	req.Header.Set("Authorization", "Bearer "+device.Token)
+	req.Header.Set("Authorization", "Bearer "+rawToken)
 	rec2 = httptest.NewRecorder()
 	h.ServeHTTP(rec2, req)
 	if rec2.Code != http.StatusNotFound {
@@ -275,7 +290,7 @@ func TestKoReaderDeviceFlow(t *testing.T) {
 		t.Fatalf("revoke: %d", rec.Code)
 	}
 	req = httptest.NewRequest("GET", "/api/koreader/v1/sync", nil)
-	req.Header.Set("Authorization", "Bearer "+device.Token)
+	req.Header.Set("Authorization", "Bearer "+rawToken)
 	rec2 = httptest.NewRecorder()
 	h.ServeHTTP(rec2, req)
 	if rec2.Code != http.StatusUnauthorized {

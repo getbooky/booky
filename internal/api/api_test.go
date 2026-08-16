@@ -89,7 +89,7 @@ func testServer(t *testing.T) *Server {
 		Acquire:  engine,
 		Watcher:  watcher.New(conn, cat, chain, cfg, engine, covers, hc),
 		Auth:     auth.New(conn),
-		KoReader: koreader.New(conn),
+		KoReader: koreader.New(conn, testKeeper(t)),
 		Kindle:   kindle.New(conn, testKeeper(t)),
 		Backups:  backup.New(conn, configDir),
 		OPDS:     opds.New(conn, cat, covers),

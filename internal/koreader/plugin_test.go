@@ -11,6 +11,7 @@ import (
 	lua "github.com/yuin/gopher-lua"
 
 	"github.com/getbooky/booky/internal/db"
+	"github.com/getbooky/booky/internal/secrets"
 )
 
 // The plugin ships as Lua source generated from Go strings, and nothing else
@@ -180,7 +181,11 @@ func TestDeviceTimesCarryTheirZone(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer conn.Close()
-	s := New(conn)
+	keeper, kerr := secrets.Load(t.TempDir())
+	if kerr != nil {
+		t.Fatal(kerr)
+	}
+	s := New(conn, keeper)
 	created, err := s.Create("Kobo", []int64{1}, []int64{1}, 0)
 	if err != nil {
 		t.Fatal(err)
