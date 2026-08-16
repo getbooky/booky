@@ -63,8 +63,9 @@ function Progress({ s }: { s: ApiSeries }) {
   )
 }
 
-export function SeriesView({ onOpenSeries }: {
+export function SeriesView({ onOpenSeries, onOpenAuthor }: {
   onOpenSeries: (s: ApiSeries) => void
+  onOpenAuthor: (s: ApiSeries) => void
 }) {
   const [filter, setFilter] = useState<"all" | "monitored" | "incomplete">("all")
   const [sort, setSort] = useState("name")
@@ -144,7 +145,12 @@ export function SeriesView({ onOpenSeries }: {
                   <CoverFan s={s} />
                 </div>
                 <div className="font-book mt-2 truncate text-[16.5px] font-bold group-hover:text-brass">{s.name}</div>
-                <div className="truncate text-xs text-muted-foreground">{s.author}</div>
+              </button>
+              {/* its own link, not nested in the card button: the author line
+                  goes to the author page */}
+              <button className="block max-w-full truncate text-left text-xs text-muted-foreground hover:text-brass hover:underline"
+                onClick={() => onOpenAuthor(s)} aria-label={`Open author ${s.author}`}>
+                {s.author}
               </button>
               <div className="mt-3">
                 <Progress s={s} />
