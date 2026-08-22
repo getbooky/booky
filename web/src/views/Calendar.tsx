@@ -12,7 +12,10 @@ const MONTH_NAMES = ["January", "February", "March", "April", "May", "June",
 // Monitored books with release dates, grouped by month — dates are refreshed
 // weekly in the background (they slip), and each book is searched on release
 // day with a short taper after.
-export function CalendarView({ libraries }: { libraries: ApiLibrary[] }) {
+export function CalendarView({ libraries, onOpenBook }: {
+  libraries: ApiLibrary[]
+  onOpenBook?: (b: ApiBook) => void
+}) {
   const { data, loading } = useApi(() => watchers.calendar(), 30_000)
   const books = useMemo(() => data?.books ?? [], [data])
   const libName = (id?: number) => libraries.find(l => l.id === id)?.name ?? ""
@@ -46,7 +49,10 @@ export function CalendarView({ libraries }: { libraries: ApiLibrary[] }) {
               const [c1, c2] = hashColors(b.title)
               const date = new Date(b.releaseDate + "T00:00:00Z")
               return (
-                <div key={`${b.id}-${b.libraryId}`} className="grid grid-cols-[60px_40px_1fr_auto] items-center gap-4 border-b border-linesoft px-1 py-3">
+                <div key={`${b.id}-${b.libraryId}`} role="button" tabIndex={0}
+                  onClick={() => onOpenBook?.(b)}
+                  onKeyDown={e => { if (e.key === "Enter") onOpenBook?.(b) }}
+                  className="grid cursor-pointer grid-cols-[60px_40px_1fr_auto] items-center gap-4 border-b border-linesoft px-1 py-3 hover:bg-surface">
                   <div className="text-center">
                     <div className="font-book text-2xl font-bold leading-none">{date.getUTCDate()}</div>
                     <div className="font-label mt-1 text-[9.5px] uppercase tracking-[0.12em] text-faint">{WEEKDAYS[date.getUTCDay()]}</div>

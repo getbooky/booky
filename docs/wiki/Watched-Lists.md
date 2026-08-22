@@ -7,8 +7,11 @@ keep, and it shows up on your e-reader minutes later.
 
 - **Goodreads shelves** — via the public RSS feed. Paste your profile URL (the
   shelf must be public); Booky discovers your shelves with per-shelf book
-  counts and you pick which to watch. The feed exposes the last 100 adds,
-  which is plenty — Booky diffs for new entries. No scraping, no login.
+  counts and you pick which to watch. The feed pages at 100 books, and Booky
+  walks every page whenever the shelf changes — a 500-book shelf imports
+  whole on the first sync, and books past the newest hundred are never
+  mistaken for list removals. Unchanged shelves still cost one conditional
+  request per poll. No scraping, no login.
 - **Hardcover lists** — via the Hardcover API with your account token. Paste
   any profile URL or @username and pick from that user's public lists.
 

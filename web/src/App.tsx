@@ -327,7 +327,8 @@ function BookyApp({ user, usersExist, onLoggedOut }: { user: ApiUser | null; use
                     onBack={back} onRead={openReader}
                     onOpenBook={b => go({ view: "library", book: b })} />
                 : <AuthorsIndexView key={refreshTick} onOpenAuthor={a => go({ view: "author", author: a })} />)}
-              {nav.view === "calendar" && <CalendarView libraries={libraries} />}
+              {nav.view === "calendar" && <CalendarView libraries={libraries}
+                onOpenBook={b => go({ view: "library", book: b })} />}
               {nav.view === "wanted" && <WantedView libraries={libraries} />}
               {nav.view === "activity" && <ActivityView />}
               {nav.view === "settings" && <SettingsView />}

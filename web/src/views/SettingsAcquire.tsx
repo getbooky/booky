@@ -267,6 +267,8 @@ export function SourcesPanel() {
           <Button className="h-9 w-fit" onClick={() => saveSettings([["annas_key", annasKey]], "Anna's Archive")}>Save</Button>
         </div>
       </Card>
+
+      <BacklogCard />
       </div>
 
       <div className="lg:sticky lg:top-24">
@@ -290,6 +292,36 @@ export function SourcesPanel() {
         </Card>
       </div>
     </div>
+  )
+}
+
+// BacklogCard is the opt-in backlog pass. It lives with the sources
+// because it is about finding downloads: Booky normally searches only on
+// add, on release day, or by hand — this adds a scheduled sweep.
+function BacklogCard() {
+  const [backlog, setBacklog] = useState<boolean | null>(null)
+  useEffect(() => {
+    api.getSetting("backlog_enabled").then(r => setBacklog(r.value === "true")).catch(() => setBacklog(false))
+  }, [])
+  const toggleBacklog = async (v: boolean) => {
+    setBacklog(v)
+    try {
+      await api.putSetting("backlog_enabled", v ? "true" : "false")
+      toast.success(v ? "Backlog pass enabled — runs weekly" : "Backlog pass disabled")
+    } catch (e) {
+      toast.error(`Couldn't save: ${e instanceof Error ? e.message : e}`)
+    }
+  }
+  return (
+    <Card title="Backlog Search"
+      desc="Booky normally searches for a book only when it's added, on its release day (with a short taper after), or when you click search. The backlog pass adds a weekly, rate-limited sweep that re-searches every monitored book that's still missing and every file below its profile's quality cutoff, in case a release has shown up since.">
+      <label className="flex w-fit cursor-pointer items-center gap-2.5 text-[13.5px] font-medium">
+        <input type="checkbox" className="h-4 w-4 accent-[hsl(var(--brass))]" checked={backlog ?? false}
+          disabled={backlog === null} onChange={e => toggleBacklog(e.target.checked)} />
+        Weekly backlog pass
+      </label>
+      <p className="mt-2 text-xs text-faint">Off by default — leave it off if your library is complete or you prefer searching by hand.</p>
+    </Card>
   )
 }
 
