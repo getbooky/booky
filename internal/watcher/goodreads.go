@@ -45,11 +45,26 @@ type Entry struct {
 	CoverURL    string
 }
 
-// Fetch loads a shelf feed. etag is the value from the previous poll ("" for
-// none); when the server answers 304 Not Modified, notModified is true and
-// entries is nil.
+// goodreadsPageSize is the feed's fixed page length. A page shorter than
+// this is the shelf's end; a full one means there may be more behind it.
+const goodreadsPageSize = 100
+
+// Fetch loads the first page of a shelf feed. etag is the value from the
+// previous poll ("" for none); when the server answers 304 Not Modified,
+// notModified is true and entries is nil.
 func (g *GoodreadsRSS) Fetch(ctx context.Context, userID, shelf, etag string) (entries []Entry, newEtag string, notModified bool, err error) {
+	return g.FetchPage(ctx, userID, shelf, 1, etag)
+}
+
+// FetchPage loads one page of a shelf feed — the feed is the shelf's
+// newest-first review list, paged at goodreadsPageSize. Page 1 keeps the
+// conditional-request behavior; deeper pages are only ever asked for when
+// page 1 changed, so they skip the etag.
+func (g *GoodreadsRSS) FetchPage(ctx context.Context, userID, shelf string, page int, etag string) (entries []Entry, newEtag string, notModified bool, err error) {
 	u := fmt.Sprintf("%s/review/list_rss/%s?shelf=%s", g.BaseURL, url.PathEscape(userID), url.QueryEscape(shelf))
+	if page > 1 {
+		u += fmt.Sprintf("&page=%d", page)
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 	if err != nil {
 		return nil, "", false, err

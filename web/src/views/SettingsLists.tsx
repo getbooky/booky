@@ -312,10 +312,8 @@ function ListRow({ list, onChanged }: { list: ApiWatchedList; onChanged: () => v
 
 function PollSettings() {
   const [interval, setIntervalV] = useState<string | null>(null)
-  const [backlog, setBacklog] = useState<boolean | null>(null)
   useEffect(() => {
     api.getSetting("list_poll_seconds").then(r => setIntervalV(r.value)).catch(() => setIntervalV("60"))
-    api.getSetting("backlog_enabled").then(r => setBacklog(r.value === "true")).catch(() => setBacklog(false))
   }, [])
 
   const saveInterval = async () => {
@@ -328,16 +326,6 @@ function PollSettings() {
       toast.error(`Couldn't save: ${e instanceof Error ? e.message : e}`)
     }
   }
-  const toggleBacklog = async (v: boolean) => {
-    setBacklog(v)
-    try {
-      await api.putSetting("backlog_enabled", v ? "true" : "false")
-      toast.success(v ? "Backlog pass enabled — runs weekly" : "Backlog pass disabled")
-    } catch (e) {
-      toast.error(`Couldn't save: ${e instanceof Error ? e.message : e}`)
-    }
-  }
-
   return (
     <>
       <Card title="List Polling"
@@ -350,15 +338,6 @@ function PollSettings() {
         </div>
       </Card>
 
-      <Card title="Backlog Search"
-        desc="Nothing to do with list polling — this is about finding downloads. Booky normally searches for a book only when it's added, on its release day, or when you click search. The backlog pass adds a weekly, rate-limited sweep that re-searches every monitored book that's still missing and every file below its profile's quality cutoff, in case a release has shown up since.">
-        <label className="flex w-fit cursor-pointer items-center gap-2.5 text-[13.5px] font-medium">
-          <input type="checkbox" className="h-4 w-4 accent-[hsl(var(--brass))]" checked={backlog ?? false}
-            disabled={backlog === null} onChange={e => toggleBacklog(e.target.checked)} />
-          Weekly backlog pass
-        </label>
-        <p className="mt-2 text-xs text-faint">Off by default — leave it off if your library is complete or you prefer searching by hand.</p>
-      </Card>
     </>
   )
 }

@@ -38,6 +38,9 @@ type Watcher struct {
 	// Pace spaces consecutive automatic searches (release-day taper, backlog)
 	// so providers never see a burst. Zeroed in tests.
 	Pace time.Duration
+	// pageDelay spaces the requests of a multi-page shelf walk — gentler
+	// than Pace, since the walk happens inside one poll. Zeroed in tests.
+	pageDelay time.Duration
 	// syncFail backs off authors whose last bibliography attempt errored, so
 	// one flaky author can't wedge the sync queue while everyone else waits.
 	// In-memory on purpose: a restart forgets it, which is exactly the retry
@@ -51,9 +54,10 @@ func New(db *sql.DB, cat *catalog.Store, chain *metadata.Chain, cfg *settings.St
 		db: db, catalog: cat, chain: chain, settings: cfg,
 		engine: engine, covers: covers,
 		goodreads: NewGoodreadsRSS(), hardcover: hc,
-		GRSeries: metadata.NewGoodreads(),
-		Pace:     4 * time.Second,
-		syncFail: map[int64]time.Time{},
+		GRSeries:  metadata.NewGoodreads(),
+		Pace:      4 * time.Second,
+		pageDelay: time.Second,
+		syncFail:  map[int64]time.Time{},
 	}
 }
 
@@ -222,6 +226,19 @@ func (w *Watcher) PollList(ctx context.Context, listID int64) (added int, err er
 			w.markChecked(listID, etag, "")
 			return 0, nil
 		}
+		// The feed pages at 100, newest adds first. A full first page means
+		// the shelf continues behind it — walk the rest, so a big shelf
+		// imports whole on the first sync and, just as important, so the
+		// diff below sees the entire shelf: entries missing from `current`
+		// get the on-remove behavior, and without the walk every book past
+		// the newest hundred would read as removed from the list. The etag
+		// keeps the steady state cheap — an unchanged shelf is one request.
+		if entries, err = w.walkShelf(ctx, userID, shelf, entries); err != nil {
+			// a partial walk must not reach the diff: the missing tail
+			// would read as removals
+			w.markChecked(listID, etag, err.Error())
+			return 0, err
+		}
 	case "hardcover":
 		metas, hcErr := w.hardcover.ListBooks(ctx, l.SourceRef)
 		if hcErr != nil {
@@ -239,6 +256,49 @@ func (w *Watcher) PollList(ctx context.Context, listID int64) (added int, err er
 		return 0, fmt.Errorf("unknown list kind %q", l.Kind)
 	}
 	return w.applyEntries(ctx, l, entries, nil, newEtag)
+}
+
+// maxShelfPages caps the walk at a hundred pages — ten thousand books. A
+// shelf still going past that can't be represented completely, and an
+// incomplete shelf must never reach the removal diff.
+const maxShelfPages = 100
+
+// walkShelf follows a shelf feed past its first page until a short page
+// marks the end. Pages are deduped by book id, and a page that brings
+// nothing new ends the walk — a server that ignores the page parameter
+// just repeats page one forever.
+func (w *Watcher) walkShelf(ctx context.Context, userID, shelf string, first []Entry) ([]Entry, error) {
+	entries := first
+	if len(first) < goodreadsPageSize {
+		return entries, nil // one short page: the whole shelf
+	}
+	seen := make(map[string]bool, len(first))
+	for _, e := range first {
+		seen[e.GoodreadsID] = true
+	}
+	for page := 2; ; page++ {
+		if page > maxShelfPages {
+			return nil, fmt.Errorf("shelf runs past %d books — not fully synced", maxShelfPages*goodreadsPageSize)
+		}
+		if !w.pause(ctx, w.pageDelay) {
+			return nil, ctx.Err()
+		}
+		more, _, _, err := w.goodreads.FetchPage(ctx, userID, shelf, page, "")
+		if err != nil {
+			return nil, fmt.Errorf("shelf page %d: %w", page, err)
+		}
+		fresh := 0
+		for _, e := range more {
+			if !seen[e.GoodreadsID] {
+				seen[e.GoodreadsID] = true
+				entries = append(entries, e)
+				fresh++
+			}
+		}
+		if fresh == 0 || len(more) < goodreadsPageSize {
+			return entries, nil
+		}
+	}
 }
 
 // metasToEntries derives diff entries for a hardcover list, index-aligned

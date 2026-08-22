@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -46,6 +47,7 @@ func testWatcher(t *testing.T) (*Watcher, *catalog.Store, *settings.Store, int64
 	hc := metadata.NewHardcover(func() string { return "" })
 	w := New(conn, cat, chain, cfg, engine, covers, hc)
 	w.Pace = 0
+	w.pageDelay = 0
 	// the Goodreads series overlay is exercised against a fixture server in
 	// series_overlay_test.go; everywhere else it must never touch the network
 	w.GRSeries = nil
@@ -859,5 +861,178 @@ func TestBibliographySyncRetriesAfterProviderError(t *testing.T) {
 	w.syncBibliographies(context.Background())
 	if err := w.db.QueryRow(`SELECT works_synced_at FROM authors WHERE id = ?`, b.AuthorID).Scan(&stamped); err != nil || stamped.Valid {
 		t.Fatalf("backoff tick altered sync state: %v %v", stamped, err)
+	}
+}
+
+// pagedShelfServer serves a shelf across real pages, like Goodreads does:
+// ?page=N picks the slice, pages run goodreadsPageSize long, and the last
+// one comes up short. failPage, when set, answers that page with a 500.
+type pagedShelfServer struct {
+	items    []string // one feedItem per book, newest first
+	etag     string
+	failPage int
+}
+
+func (s *pagedShelfServer) handler() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		page := 1
+		if p := r.URL.Query().Get("page"); p != "" {
+			if n, err := strconv.Atoi(p); err == nil {
+				page = n
+			}
+		}
+		if s.failPage != 0 && page == s.failPage {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		if page == 1 && s.etag != "" {
+			if r.Header.Get("If-None-Match") == s.etag {
+				w.WriteHeader(http.StatusNotModified)
+				return
+			}
+			w.Header().Set("ETag", s.etag)
+		}
+		lo := (page - 1) * goodreadsPageSize
+		hi := min(lo+goodreadsPageSize, len(s.items))
+		if lo > len(s.items) {
+			lo, hi = 0, 0
+		}
+		_, _ = fmt.Fprintf(w, shelfRSS, strings.Join(s.items[lo:hi], "\n"))
+	}
+}
+
+func bigShelf(n int) []string {
+	items := make([]string, 0, n)
+	for i := 0; i < n; i++ {
+		items = append(items, feedItem(fmt.Sprintf("%d", 1000+i), fmt.Sprintf("Book %d", i), "Mara Voss", ""))
+	}
+	return items
+}
+
+// A shelf bigger than one feed page imports whole: the poll walks every
+// page instead of seeing only the newest hundred adds.
+func TestPollListWalksLargeShelf(t *testing.T) {
+	w, cat, _, libID := testWatcher(t)
+	shelf := &pagedShelfServer{items: bigShelf(205), etag: `"v1"`}
+	ts := httptest.NewServer(shelf.handler())
+	defer ts.Close()
+	w.goodreads.BaseURL = ts.URL
+
+	listID, err := w.CreateList(WatchedList{
+		Name: "big", Kind: "goodreads_rss", SourceRef: "1/to-read", LibraryID: libID,
+		MonitorScope: "book", OnRemove: "unmonitor", Enabled: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	added, err := w.PollList(context.Background(), listID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if added != 205 {
+		t.Fatalf("added = %d, want the whole 205-book shelf", added)
+	}
+
+	// steady state: nothing changed, one conditional request answers it
+	if n, err := w.PollList(context.Background(), listID); err != nil || n != 0 {
+		t.Fatalf("re-poll: added=%d err=%v", n, err)
+	}
+
+	// a new add changes page one; the walk still sees the whole shelf, so
+	// the hundred-plus books past the first page must NOT read as list
+	// removals — before the walk existed, on-remove would have hit them all
+	shelf.items = append([]string{feedItem("999", "Newest Book", "Mara Voss", "")}, shelf.items...)
+	shelf.etag = `"v2"`
+	if n, err := w.PollList(context.Background(), listID); err != nil || n != 1 {
+		t.Fatalf("add poll: added=%d err=%v", n, err)
+	}
+	books, _ := cat.ListBooks(0, libID, 0)
+	for _, b := range books {
+		if !b.Monitored {
+			t.Fatalf("%q was unmonitored by a false removal", b.Title)
+		}
+	}
+
+	// a book vanishing from a deep page is a real removal, and the walk
+	// lets the diff notice it
+	shelf.items = append(shelf.items[:150], shelf.items[151:]...)
+	shelf.etag = `"v3"`
+	if _, err := w.PollList(context.Background(), listID); err != nil {
+		t.Fatal(err)
+	}
+	known, err := w.knownItems(listID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(known) != 205 {
+		t.Fatalf("known = %d, want 205 after one add and one deep removal", len(known))
+	}
+	unmonitored := 0
+	books, _ = cat.ListBooks(0, libID, 0)
+	for _, b := range books {
+		if !b.Monitored {
+			unmonitored++
+		}
+	}
+	if unmonitored != 1 {
+		t.Fatalf("unmonitored = %d, want exactly the removed book", unmonitored)
+	}
+}
+
+// A walk that fails partway must not reach the diff: the missing tail
+// would read as two hundred removals.
+func TestPollListPartialWalkRunsNoRemovals(t *testing.T) {
+	w, _, _, libID := testWatcher(t)
+	shelf := &pagedShelfServer{items: bigShelf(205), etag: `"v1"`}
+	ts := httptest.NewServer(shelf.handler())
+	defer ts.Close()
+	w.goodreads.BaseURL = ts.URL
+
+	listID, err := w.CreateList(WatchedList{
+		Name: "big", Kind: "goodreads_rss", SourceRef: "1/to-read", LibraryID: libID, Enabled: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.PollList(context.Background(), listID); err != nil {
+		t.Fatal(err)
+	}
+
+	shelf.etag = `"v2"` // page 1 changed…
+	shelf.failPage = 3  // …but the walk dies before the shelf's end
+	if _, err := w.PollList(context.Background(), listID); err == nil {
+		t.Fatal("partial walk did not report an error")
+	}
+	known, err := w.knownItems(listID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(known) != 205 {
+		t.Fatalf("known = %d, want 205 untouched after a partial walk", len(known))
+	}
+}
+
+// A server that ignores the page parameter answers every page with page
+// one — the walk notices nothing new arrived and stops.
+func TestWalkShelfStopsWhenPagingIgnored(t *testing.T) {
+	w, _, _, _ := testWatcher(t)
+	shelf := &shelfServer{items: strings.Join(bigShelf(goodreadsPageSize), "\n")}
+	ts := httptest.NewServer(shelf.handler())
+	defer ts.Close()
+	w.goodreads.BaseURL = ts.URL
+
+	first, _, _, err := w.goodreads.Fetch(context.Background(), "1", "to-read", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	entries, err := w.walkShelf(context.Background(), "1", "to-read", first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != goodreadsPageSize {
+		t.Fatalf("entries = %d, want the one real page", len(entries))
+	}
+	if shelf.hits != 2 {
+		t.Fatalf("made %d requests, want 2 (the repeat page ends the walk)", shelf.hits)
 	}
 }
