@@ -153,6 +153,30 @@ func (c *Client) History(ctx context.Context) ([]HistoryItem, error) {
 // Delete removes a job from SAB's history; delFiles also deletes whatever
 // remains of its completed folder on disk. Called after a successful import
 // so finished downloads don't pile up in SAB forever.
+// DeleteQueue removes a job still in SAB's download queue — the call for
+// cancelling an active download. A job that already finished lives in the
+// history instead; Delete handles that side.
+func (c *Client) DeleteQueue(ctx context.Context, nzoID string, delFiles bool) error {
+	q := url.Values{
+		"mode":  {"queue"},
+		"name":  {"delete"},
+		"value": {nzoID},
+	}
+	if delFiles {
+		q.Set("del_files", "1")
+	}
+	var out struct {
+		Status bool `json:"status"`
+	}
+	if err := c.call(ctx, q, &out); err != nil {
+		return err
+	}
+	if !out.Status {
+		return fmt.Errorf("sabnzbd: queue delete of %s not acknowledged", nzoID)
+	}
+	return nil
+}
+
 func (c *Client) Delete(ctx context.Context, nzoID string, delFiles bool) error {
 	q := url.Values{
 		"mode":  {"history"},

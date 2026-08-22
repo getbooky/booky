@@ -12,6 +12,7 @@ import (
 	"log"
 	"os"
 	"strings"
+	"sync"
 
 	"github.com/getbooky/booky/internal/catalog"
 	"github.com/getbooky/booky/internal/db"
@@ -31,6 +32,11 @@ type Engine struct {
 	importer *importer.Importer
 	covers   *catalog.CoverCache
 	annas    *directdl.Client
+
+	// running holds a cancel func per queue row whose direct download is in
+	// flight in this process — SAB jobs are cancelled at SAB instead.
+	mu      sync.Mutex
+	running map[int64]context.CancelFunc
 }
 
 // The stock mirror lists live in the settings defaults (internal/settings),
@@ -294,6 +300,22 @@ func (e *Engine) Grab(ctx context.Context, bookID, libraryID int64, rel release.
 
 	case "direct":
 		e.setQueue(queueID, "downloading", "fetching from "+rel.Source)
+		// registered so Cancel can cut this fetch mid-flight; the deferred
+		// unregister also runs before fail(), so a cancelled row that was
+		// already deleted is never re-marked
+		ctx, cancelRun := context.WithCancel(ctx)
+		defer cancelRun()
+		e.mu.Lock()
+		if e.running == nil {
+			e.running = map[int64]context.CancelFunc{}
+		}
+		e.running[queueID] = cancelRun
+		e.mu.Unlock()
+		defer func() {
+			e.mu.Lock()
+			delete(e.running, queueID)
+			e.mu.Unlock()
+		}()
 		dir := e.settings.Get("downloads_dir")
 		if dir == "" {
 			dir = "/data/downloads/booky"
@@ -412,6 +434,68 @@ func (e *Engine) PendingImports() ([]QueueItem, error) {
 		}
 	}
 	return keep, nil
+}
+
+// Cancel aborts a queue row and cleans up after it: a SAB job is deleted at
+// SAB with its files, an in-flight direct fetch is cut, a downloaded file
+// waiting for import is removed from disk, and the row disappears with a
+// history entry. Deliberately NO blocklist and NO cascade — cancelling is a
+// choice about this download, not a verdict on the release, so nothing else
+// gets grabbed in its place and the release stays available for a re-grab.
+func (e *Engine) Cancel(ctx context.Context, id int64) error {
+	var it QueueItem
+	err := e.db.QueryRow(`SELECT q.book_id, q.library_id, q.release_title, q.protocol,
+			q.status, COALESCE(q.external_id, '')
+		FROM queue q WHERE q.id = ?`, id).
+		Scan(&it.BookID, &it.LibraryID, &it.ReleaseTitle, &it.Protocol, &it.Status, &it.ExternalID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("queue item not found")
+	}
+	if err != nil {
+		return err
+	}
+
+	switch {
+	case it.Protocol == "usenet" && it.ExternalID != "" &&
+		(it.Status == "downloading" || it.Status == "import_failed"):
+		// the job (and any partial or finished files) lives at SAB; if SAB
+		// can't be reached the row stays, so the cancel can be retried
+		// rather than orphaning a live job
+		sab := e.Sab()
+		if !sab.Configured() {
+			return fmt.Errorf("SABnzbd is not configured — can't remove the job")
+		}
+		// a still-running job is in SAB's queue; one that just finished has
+		// already moved to its history — try both homes before giving up
+		if err := sab.DeleteQueue(ctx, it.ExternalID, true); err != nil {
+			if err2 := sab.Delete(ctx, it.ExternalID, true); err2 != nil {
+				return fmt.Errorf("removing the SABnzbd job: %w", err)
+			}
+		}
+	case it.Protocol == "direct" && it.Status == "downloading":
+		// in flight in this process: cutting the context makes the fetch
+		// return context.Canceled, which Grab treats as transient — no
+		// blocklist — and its queue update lands on a row already gone
+		e.mu.Lock()
+		if cancelRun, ok := e.running[id]; ok {
+			cancelRun()
+		}
+		e.mu.Unlock()
+	case it.Protocol == "direct" && it.ExternalID != "" &&
+		(it.Status == "importing" || it.Status == "import_failed"):
+		// the downloaded file sits on disk waiting for an import that will
+		// now never happen
+		if err := os.Remove(it.ExternalID); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("removing %s: %w", it.ExternalID, err)
+		}
+	}
+	// queued and failed rows have nothing external to clean up
+
+	if _, err := e.db.Exec(`DELETE FROM queue WHERE id = ?`, id); err != nil {
+		return err
+	}
+	_ = e.catalog.AddHistory(it.BookID, it.LibraryID, "cancelled", it.ReleaseTitle)
+	return nil
 }
 
 // RetryImport re-attempts delivery of a failed queue row after the user

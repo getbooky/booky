@@ -370,6 +370,7 @@ export const acquisition = {
     request<{ grabbed: boolean }>(`/api/v1/books/${bookId}/autograb?libraryId=${libraryId}`, { method: "POST", body: "{}" }),
   queue: () => request<{ queue: ApiQueueItem[] | null }>("/api/v1/queue"),
   retryImport: (queueId: number) => request(`/api/v1/queue/${queueId}/retry`, { method: "POST" }),
+  cancelQueue: (queueId: number) => request(`/api/v1/queue/${queueId}/cancel`, { method: "POST" }),
   wanted: () => request<{ books: ApiBook[] | null; cutoffUnmet: ApiBook[] | null }>("/api/v1/wanted"),
   history: () => request<{ history: ApiHistoryItem[] | null }>("/api/v1/history"),
   profiles: () => request<{ profiles: ApiProfile[] | null }>("/api/v1/profiles"),
