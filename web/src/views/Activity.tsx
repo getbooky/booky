@@ -6,7 +6,7 @@ import { acquisition } from "@/api"
 import type { ApiQueueItem } from "@/api"
 import { useApi } from "@/hooks/use-api"
 import { ManualImportDialog } from "@/components/BookDetail"
-import { FolderInput, RefreshCw } from "lucide-react"
+import { FolderInput, RefreshCw, X } from "lucide-react"
 import { toast } from "sonner"
 import { cn } from "@/lib/utils"
 import { formatAge, formatFull, formatWhen } from "@/lib/time"
@@ -96,6 +96,23 @@ export function ActivityView() {
                         </>
                       )}
                       <Tag kind={tag.kind}>{tag.text}</Tag>
+                      {/* cancel stops the download where it lives (SAB job
+                          with its files, in-flight direct fetch, or a file
+                          waiting for import) — no blocklist, no cascade, so
+                          the release can still be grabbed again by hand */}
+                      <Button variant="ghost" className="h-7 w-7 p-0 text-faint hover:text-want"
+                        title={q.status === "failed" ? "Dismiss this row"
+                          : q.status === "import_failed" ? "Give up on this download — deletes the downloaded file"
+                          : "Cancel this download — removes its files"}
+                        onClick={async () => {
+                          try {
+                            await acquisition.cancelQueue(q.id)
+                            toast.success(q.status === "failed" ? "Dismissed" : "Cancelled")
+                            queueQuery.reload(); historyQuery.reload()
+                          } catch (e) { toast.error(`${e instanceof Error ? e.message : e}`) }
+                        }}>
+                        <X className="h-3.5 w-3.5" />
+                      </Button>
                     </span>
                     {/* when this row last moved, and how long it's been sitting
                         there — the two things a stuck queue gets asked */}

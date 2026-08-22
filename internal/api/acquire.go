@@ -112,6 +112,33 @@ func (s *Server) handleQueue(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"queue": items})
 }
 
+// handleQueueCancel aborts a queue row — the download is stopped where it
+// lives and its files cleaned up, with no blocklist and no cascade.
+func (s *Server) handleQueueCancel(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, errors.New("bad id"))
+		return
+	}
+	var libID int64
+	switch err := s.db.QueryRow(`SELECT library_id FROM queue WHERE id = ?`, id).Scan(&libID); {
+	case errors.Is(err, sql.ErrNoRows):
+		writeErr(w, http.StatusNotFound, errors.New("queue item not found"))
+		return
+	case err != nil:
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+	if !s.requireLibrary(w, r, libID) {
+		return
+	}
+	if err := s.Acquire.Cancel(r.Context(), id); err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
 // handleQueueRetry re-attempts a failed import after the user fixed the
 // underlying problem — the already-downloaded file is delivered again, no
 // re-download.

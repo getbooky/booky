@@ -48,6 +48,12 @@ out. The blocklist is visible (and un-blockable) in Activity; import failures
 show their reason on the Activity row with **Retry import** and **Manual
 import** actions right there.
 
+Every queue row also carries a **cancel**: the download is stopped where it
+lives (the SABnzbd job deleted with its files, an in-flight direct fetch cut,
+a file waiting for import removed) and the row disappears. Cancelling is a
+choice, not a verdict — the release is **not** blocklisted and nothing
+cascades in its place, so it stays available for a manual re-grab.
+
 ## Download clients
 
 - **SABnzbd** — URL, API key, category (default `booky`); history is polled

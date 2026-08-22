@@ -136,6 +136,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/v1/books/{id}/autograb", s.handleAutoGrab)
 	mux.HandleFunc("GET /api/v1/queue", s.handleQueue)
 	mux.HandleFunc("POST /api/v1/queue/{id}/retry", s.handleQueueRetry)
+	mux.HandleFunc("POST /api/v1/queue/{id}/cancel", s.handleQueueCancel)
 	mux.HandleFunc("GET /api/v1/wanted", s.handleWanted)
 	mux.HandleFunc("GET /api/v1/history", s.handleHistory)
 	mux.HandleFunc("GET /api/v1/profiles", s.handleProfiles)
