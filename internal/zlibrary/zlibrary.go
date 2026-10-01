@@ -11,7 +11,9 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/http/cookiejar"
 	"net/url"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -32,12 +34,59 @@ type Client struct {
 }
 
 func New(domains func() []string, email, password string) *Client {
+	// The mirrors sit behind a cookie wall (DiamWall): the first hit is a 307
+	// back to the same URL that sets a cookie, and a client without a jar
+	// follows that redirect forever ("stopped after 10 redirects").
+	jar, _ := cookiejar.New(nil)
 	return &Client{
 		domains:  domains,
 		email:    email,
 		password: password,
-		http:     &http.Client{Timeout: 45 * time.Second},
+		http: &http.Client{
+			Timeout:   45 * time.Second,
+			Jar:       jar,
+			Transport: &wallTransport{base: http.DefaultTransport, jar: jar},
+		},
 	}
+}
+
+// dwidRe matches the cookie DiamWall's challenge page sets from JavaScript.
+var dwidRe = regexp.MustCompile(`document\.cookie="dwid=([0-9a-fA-F]+)`)
+
+// wallTransport answers DiamWall's second step: a block page whose script
+// sets a dwid cookie and reloads. We set that cookie and replay the request
+// once — a browser does the same thing without the user noticing.
+type wallTransport struct {
+	base http.RoundTripper
+	jar  http.CookieJar
+}
+
+func (t *wallTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	res, err := t.base.RoundTrip(req)
+	if err != nil || res.StatusCode < 400 ||
+		!strings.HasPrefix(res.Header.Get("Content-Type"), "text/html") {
+		return res, err
+	}
+	if req.Body != nil && req.GetBody == nil {
+		return res, nil // can't replay
+	}
+	page, rerr := io.ReadAll(io.LimitReader(res.Body, 64<<10))
+	res.Body.Close()
+	m := dwidRe.FindSubmatch(page)
+	if rerr != nil || m == nil {
+		res.Body = io.NopCloser(strings.NewReader(string(page)))
+		return res, nil
+	}
+	cookie := &http.Cookie{Name: "dwid", Value: string(m[1]), Path: "/"}
+	t.jar.SetCookies(req.URL, []*http.Cookie{cookie})
+	retry := req.Clone(req.Context())
+	if req.GetBody != nil {
+		if retry.Body, err = req.GetBody(); err != nil {
+			return nil, err
+		}
+	}
+	retry.AddCookie(cookie)
+	return t.base.RoundTrip(retry)
 }
 
 func (c *Client) Configured() bool {
@@ -77,6 +126,9 @@ func (c *Client) login(ctx context.Context) error {
 		res.Body.Close()
 		if err != nil {
 			lastErr = fmt.Errorf("z-library: bad login response from %s", base)
+			if strings.HasPrefix(res.Header.Get("Content-Type"), "text/html") {
+				lastErr = fmt.Errorf("z-library: %s blocked the request (HTTP %d, bot wall page)", base, res.StatusCode)
+			}
 			continue
 		}
 		if out.Error != "" || out.User.RemixKey == "" {

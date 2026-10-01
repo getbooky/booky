@@ -2,6 +2,7 @@ package zlibrary
 
 import (
 	"context"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -99,5 +100,44 @@ func TestConfigured(t *testing.T) {
 	}
 	if !New(domains("x"), "a@b.c", "pw").Configured() {
 		t.Error("creds should be configured")
+	}
+}
+
+// TestCookieWall mimics DiamWall in front of the mirrors: a 307 to the same
+// URL that sets a cookie, then a block page whose script sets dwid. Without
+// a jar the client loops ("stopped after 10 redirects").
+func TestCookieWall(t *testing.T) {
+	inner := fakeZlib(t)
+	wall := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if c, _ := r.Cookie("__diamwall"); c == nil {
+			http.SetCookie(w, &http.Cookie{Name: "__diamwall", Value: "0x1", Path: "/"})
+			http.Redirect(w, r, r.URL.String(), http.StatusTemporaryRedirect)
+			return
+		}
+		if c, _ := r.Cookie("dwid"); c == nil || c.Value != "a3410d96" {
+			w.Header().Set("Content-Type", "text/html")
+			w.WriteHeader(517)
+			_, _ = w.Write([]byte(`<html><script>document.cookie="dwid=a3410d96; path=/";location.reload()</script></html>`))
+			return
+		}
+		r.Host = ""
+		proxyURL := inner.URL + r.URL.RequestURI()
+		req, _ := http.NewRequest(r.Method, proxyURL, r.Body)
+		req.Header = r.Header.Clone()
+		res, err := http.DefaultClient.Do(req)
+		if err != nil {
+			w.WriteHeader(http.StatusBadGateway)
+			return
+		}
+		defer res.Body.Close()
+		w.WriteHeader(res.StatusCode)
+		_, _ = io.Copy(w, res.Body)
+	}))
+	t.Cleanup(wall.Close)
+
+	c := New(domains(wall.URL), "reader@example.com", "hunter2")
+	left, limit, err := c.Test(context.Background())
+	if err != nil || left != 7 || limit != 10 {
+		t.Fatalf("Test through wall: %v left=%d limit=%d", err, left, limit)
 	}
 }
