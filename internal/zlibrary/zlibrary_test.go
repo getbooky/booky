@@ -141,3 +141,16 @@ func TestCookieWall(t *testing.T) {
 		t.Fatalf("Test through wall: %v left=%d limit=%d", err, left, limit)
 	}
 }
+
+func TestBrowserUserAgent(t *testing.T) {
+	var got string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = r.UserAgent()
+		_, _ = w.Write([]byte(`{"error":"Incorrect email or password"}`))
+	}))
+	t.Cleanup(srv.Close)
+	_, _, _ = New(domains(srv.URL), "a@b.c", "pw").Test(context.Background())
+	if got != browserUA {
+		t.Fatalf("User-Agent = %q, want browser UA", got)
+	}
+}
