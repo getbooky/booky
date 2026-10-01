@@ -61,7 +61,15 @@ type wallTransport struct {
 	jar  http.CookieJar
 }
 
+// browserUA is sent on every Z-Library request in place of Go's default
+// "Go-http-client/1.1", which generic bot filters reject on sight.
+const browserUA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Safari/605.1.15"
+
 func (t *wallTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	if req.Header.Get("User-Agent") == "" {
+		req = req.Clone(req.Context()) // a RoundTripper must not mutate its input
+		req.Header.Set("User-Agent", browserUA)
+	}
 	res, err := t.base.RoundTrip(req)
 	if err != nil || res.StatusCode < 400 ||
 		!strings.HasPrefix(res.Header.Get("Content-Type"), "text/html") {
