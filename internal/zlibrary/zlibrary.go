@@ -77,7 +77,7 @@ func (t *wallTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 		res.Body = io.NopCloser(strings.NewReader(string(page)))
 		return res, nil
 	}
-	cookie := &http.Cookie{Name: "dwid", Value: string(m[1]), Path: "/"}
+	cookie := &http.Cookie{Name: "dwid", Value: string(m[1]), Path: "/"} //nolint:gosec // G124: outbound cookie; Secure/HttpOnly are Set-Cookie attributes
 	t.jar.SetCookies(req.URL, []*http.Cookie{cookie})
 	retry := req.Clone(req.Context())
 	if req.GetBody != nil {

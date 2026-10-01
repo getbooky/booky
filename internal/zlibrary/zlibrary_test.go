@@ -110,8 +110,8 @@ func TestCookieWall(t *testing.T) {
 	inner := fakeZlib(t)
 	wall := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if c, _ := r.Cookie("__diamwall"); c == nil {
-			http.SetCookie(w, &http.Cookie{Name: "__diamwall", Value: "0x1", Path: "/"})
-			http.Redirect(w, r, r.URL.String(), http.StatusTemporaryRedirect)
+			http.SetCookie(w, &http.Cookie{Name: "__diamwall", Value: "0x1", Path: "/"}) //nolint:gosec // test server
+			http.Redirect(w, r, r.URL.String(), http.StatusTemporaryRedirect)            //nolint:gosec // test server redirects to itself
 			return
 		}
 		if c, _ := r.Cookie("dwid"); c == nil || c.Value != "a3410d96" {
@@ -122,9 +122,9 @@ func TestCookieWall(t *testing.T) {
 		}
 		r.Host = ""
 		proxyURL := inner.URL + r.URL.RequestURI()
-		req, _ := http.NewRequest(r.Method, proxyURL, r.Body)
+		req, _ := http.NewRequest(r.Method, proxyURL, r.Body) //nolint:gosec // test proxy to a local httptest server
 		req.Header = r.Header.Clone()
-		res, err := http.DefaultClient.Do(req)
+		res, err := http.DefaultClient.Do(req) //nolint:gosec // test proxy to a local httptest server
 		if err != nil {
 			w.WriteHeader(http.StatusBadGateway)
 			return
