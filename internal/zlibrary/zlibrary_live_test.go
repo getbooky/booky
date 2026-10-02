@@ -34,7 +34,7 @@ func liveZlib(t *testing.T) *Client {
 	}
 	domainsCfg := os.Getenv("ZLIB_DOMAINS")
 	if domainsCfg == "" {
-		domainsCfg = "https://z-lib.sk\nhttps://z-library.sk\nhttps://1lib.sk"
+		domainsCfg = "https://z-lib.gd\nhttps://z-lib.gl\nhttps://z-library.ec"
 	}
 	var domains []string
 	for _, d := range strings.FieldsFunc(domainsCfg, func(r rune) bool { return r == '\n' || r == ',' }) {

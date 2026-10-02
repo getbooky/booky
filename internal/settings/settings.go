@@ -57,7 +57,7 @@ var defaults = map[string]string{
 	// removable pills; an emptied list genuinely means "no mirrors" (the
 	// source drops out) rather than silently restoring defaults.
 	"annas_mirrors": "https://annas-archive.gl\nhttps://annas-archive.pk\nhttps://annas-archive.gd",
-	"zlib_domains":  "https://z-lib.sk\nhttps://z-library.sk\nhttps://1lib.sk",
+	"zlib_domains":  "https://z-lib.gd\nhttps://z-lib.gl\nhttps://z-library.ec",
 }
 
 type Store struct {
