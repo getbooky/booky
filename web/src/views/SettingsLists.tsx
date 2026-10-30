@@ -3,7 +3,8 @@ import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Tag } from "@/components/bits"
 import { api, acquisition, watchers } from "@/api"
-import type { ApiWatchedList, ListPayload } from "@/api"
+import type { ApiTag, ApiWatchedList, ListPayload } from "@/api"
+import { TagPicker, TagPill, useTags } from "@/components/TagPills"
 import { useApi } from "@/hooks/use-api"
 import { toast } from "sonner"
 import { Plus, RefreshCw, X } from "lucide-react"
@@ -36,10 +37,10 @@ const SCOPES = [
 const REMOVES = [
   { v: "nothing", label: "Do nothing (default)" },
   { v: "unmonitor", label: "Unmonitor the book" },
-  { v: "delete", label: "Remove from library (deletes this library's file)" },
+  { v: "delete", label: "Remove from library (deletes the file)" },
 ]
 
-function AddListForm({ kind, onDone, onCancel }: { kind: "goodreads_rss" | "hardcover"; onDone: () => void; onCancel: () => void }) {
+function AddListForm({ kind, tags, onDone, onCancel }: { kind: "goodreads_rss" | "hardcover"; tags: ApiTag[]; onDone: () => void; onCancel: () => void }) {
   const { data: libData } = useApi(() => api.libraries())
   const { data: profData } = useApi(() => acquisition.profiles())
   const libraries = libData?.libraries ?? []
@@ -47,7 +48,7 @@ function AddListForm({ kind, onDone, onCancel }: { kind: "goodreads_rss" | "hard
 
   const [sourceRef, setSourceRef] = useState("")
   const [hcUser, setHcUser] = useState("")
-  const [libraryId, setLibraryId] = useState(0)
+  const [tagIds, setTagIds] = useState<number[]>([])
   const [scope, setScope] = useState("book")
   const [onRemove, setOnRemove] = useState("nothing")
   const [searchOnAdd, setSearchOnAdd] = useState(true)
@@ -102,7 +103,7 @@ function AddListForm({ kind, onDone, onCancel }: { kind: "goodreads_rss" | "hard
     setSaving(true)
     try {
       const common = {
-        libraryId: libraryId || libraries[0]?.id || 0,
+        libraryId: libraries[0]?.id || 0, tagIds,
         monitorScope: scope, onRemove, searchOnAdd, enabled: true,
         qualityProfileId: profileId || undefined,
       }
@@ -195,13 +196,14 @@ function AddListForm({ kind, onDone, onCancel }: { kind: "goodreads_rss" | "hard
           )}
         </>
       )}
+      <div className="mt-3">
+        <Label>Books from this list are for</Label>
+        <TagPicker tags={tags} value={tagIds} onChange={setTagIds} />
+        <p className="mt-1.5 max-w-[62ch] text-xs text-faint">
+          Every book the list adds gets these tags, so it reaches whoever holds them — and their Kindles that auto-send them. Leave it empty and the books are admin-only until you tag them.
+        </p>
+      </div>
       <div className="mt-3 flex flex-wrap items-end gap-3">
-        <div>
-          <Label>Into library</Label>
-          <select className={selectCls} value={libraryId || libraries[0]?.id || 0} onChange={e => setLibraryId(Number(e.target.value))}>
-            {libraries.map(l => <option key={l.id} value={l.id}>{l.name}</option>)}
-          </select>
-        </div>
         <div>
           <Label>Monitor</Label>
           <select className={selectCls} value={scope} onChange={e => setScope(e.target.value)}>
@@ -217,7 +219,7 @@ function AddListForm({ kind, onDone, onCancel }: { kind: "goodreads_rss" | "hard
         <div>
           <Label>Quality profile</Label>
           <select className={selectCls} value={profileId} onChange={e => setProfileId(Number(e.target.value))}>
-            <option value={0}>Library default</option>
+            <option value={0}>Default profile</option>
             {profiles.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
           </select>
         </div>
@@ -235,12 +237,28 @@ function AddListForm({ kind, onDone, onCancel }: { kind: "goodreads_rss" | "hard
           <Button variant="outline" className="h-9" onClick={onCancel}>Cancel</Button>
         </div>
       </div>
-      {libraries.length === 0 && <p className="mt-2 text-xs text-want">Create a library first — lists route their books into one.</p>}
+      {libraries.length === 0 && <p className="mt-2 text-xs text-want">Set up the library first (Settings → Library) — lists route their books into it.</p>}
     </div>
   )
 }
 
-function ListRow({ list, onChanged }: { list: ApiWatchedList; onChanged: () => void }) {
+function ListRow({ list, tags, onChanged }: { list: ApiWatchedList; tags: ApiTag[]; onChanged: () => void }) {
+  const byId = new Map(tags.map(t => [t.id, t]))
+  const audience = (list.tagIds ?? []).map(id => byId.get(id)).filter((t): t is ApiTag => !!t)
+  // changing the audience applies to books the list adds from now on; books
+  // it already added keep their tags (retag them from the library)
+  const [editingTags, setEditingTags] = useState(false)
+  const [draftTags, setDraftTags] = useState<number[]>(list.tagIds ?? [])
+  const saveTags = async () => {
+    try {
+      await watchers.updateList(list.id, { tagIds: draftTags })
+      toast.success(`"${list.name}" — new books go to the chosen tags`)
+      setEditingTags(false)
+      onChanged()
+    } catch (e) {
+      toast.error(`Couldn't save: ${e instanceof Error ? e.message : e}`)
+    }
+  }
   const [polling, setPolling] = useState(false)
   const scopeLabel = SCOPES.find(s => s.v === list.monitorScope)?.label ?? list.monitorScope
 
@@ -285,7 +303,9 @@ function ListRow({ list, onChanged }: { list: ApiWatchedList; onChanged: () => v
           </div>
         </div>
         <Tag kind="brand">{list.itemCount} book{list.itemCount === 1 ? "" : "s"}</Tag>
-        <Tag kind="dim">→ {list.libraryName}</Tag>
+        {audience.length === 0
+          ? <Tag kind="dim">admin-only</Tag>
+          : audience.map(t => <TagPill key={t.id} tag={t} on size="sm" />)}
         <Tag kind="dim">{scopeLabel}</Tag>
         {list.searchOnAdd && <Tag kind="info">search on add</Tag>}
         <div className="ml-auto flex items-center gap-2">
@@ -293,6 +313,12 @@ function ListRow({ list, onChanged }: { list: ApiWatchedList; onChanged: () => v
             <input type="checkbox" className="h-4 w-4 accent-[hsl(var(--brass))]" checked={list.enabled} onChange={toggle} />
             enabled
           </label>
+          <Button variant="outline" className="h-8" onClick={() => {
+            setDraftTags(list.tagIds ?? [])
+            setEditingTags(e => !e)
+          }}>
+            {editingTags ? "Cancel" : "Tags"}
+          </Button>
           <Button variant="outline" className="h-8" disabled={polling} onClick={poll}>
             <RefreshCw className={cn("mr-1.5 h-3.5 w-3.5", polling && "animate-spin")} /> Check now
           </Button>
@@ -306,6 +332,14 @@ function ListRow({ list, onChanged }: { list: ApiWatchedList; onChanged: () => v
           ? <span className="text-want">last check failed: {list.lastError}</span>
           : <span className="text-faint">{list.lastChecked ? `last checked ${list.lastChecked} UTC` : "not checked yet"}</span>}
       </div>
+      {editingTags && (
+        <div className="mt-3 border-t border-linesoft pt-3">
+          <Label>Books from this list are for</Label>
+          <TagPicker tags={tags} value={draftTags} onChange={setDraftTags} />
+          <p className="mt-1.5 text-xs text-faint">Applies to books the list adds from now on — books it already added keep their tags.</p>
+          <Button className="mt-3 h-9" onClick={saveTags}>Save</Button>
+        </div>
+      )}
     </div>
   )
 }
@@ -352,6 +386,7 @@ function ListSection({ title, desc, kind, lists, loading, empty, onChanged }: {
   onChanged: () => void
 }) {
   const [adding, setAdding] = useState(false)
+  const { tags } = useTags()
   return (
     <Card title={title}
       action={
@@ -365,8 +400,8 @@ function ListSection({ title, desc, kind, lists, loading, empty, onChanged }: {
         {!loading && lists.length === 0 && !adding && (
           <p className="text-[13px] text-muted-foreground">{empty}</p>
         )}
-        {lists.map(l => <ListRow key={l.id} list={l} onChanged={onChanged} />)}
-        {adding && <AddListForm kind={kind} onDone={() => { setAdding(false); onChanged() }} onCancel={() => setAdding(false)} />}
+        {lists.map(l => <ListRow key={l.id} list={l} tags={tags} onChanged={onChanged} />)}
+        {adding && <AddListForm kind={kind} tags={tags} onDone={() => { setAdding(false); onChanged() }} onCancel={() => setAdding(false)} />}
       </div>
     </Card>
   )
@@ -379,7 +414,7 @@ export function ListsPanel() {
   return (
     <>
       <ListSection title="Goodreads Shelves" kind="goodreads_rss"
-        desc="Public shelves polled through their RSS feeds — no Goodreads login needed. New books route into a library the moment they appear."
+        desc="Public shelves polled through their RSS feeds — no Goodreads login needed. New books land in the library, tagged for whoever the list is for, the moment they appear."
         lists={lists.filter(l => l.kind === "goodreads_rss")} loading={loading}
         empty="No shelves watched yet — add a public Goodreads profile."
         onChanged={reload} />

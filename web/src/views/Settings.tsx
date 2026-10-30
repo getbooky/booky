@@ -3,25 +3,27 @@ import { Folio, Tag, SectionLabel } from "@/components/bits"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { toast } from "sonner"
-import { Plus, RefreshCw, Trash2 } from "lucide-react"
+import { RefreshCw } from "lucide-react"
 import { api, acquisition } from "@/api"
 import type { ApiLibrary, ApiProfile, ReviewFile, SearchResult } from "@/api"
 import { PathInput } from "@/components/PathInput"
 import { useApi } from "@/hooks/use-api"
 import { SetupWizard } from "@/components/SetupWizard"
-import { DeleteLibraryDialog } from "@/components/DeleteLibraryDialog"
 import { SourcesPanel, ClientsPanel, ProfilesPanel } from "@/views/SettingsAcquire"
 import { ListsPanel } from "@/views/SettingsLists"
 import { UsersPanel, BackupsPanel, DevicesPanel } from "@/views/SettingsDelivery"
 import { KindlePanel } from "@/views/SettingsKindle"
+import { TagsPanel } from "@/views/SettingsTags"
+import { AccountPanel } from "@/views/SettingsAccount"
 import { delivery } from "@/api"
 import { cn } from "@/lib/utils"
 import { useAccess } from "@/lib/access"
 
-type Panel = "libraries" | "profiles" | "metadata" | "sources" | "clients" | "lists" | "koreader" | "kindle" | "backups" | "users" | "about" | "health" | "logs"
+type Panel = "libraries" | "tags" | "account" | "profiles" | "metadata" | "sources" | "clients" | "lists" | "koreader" | "kindle" | "backups" | "users" | "about" | "health" | "logs"
 
 const NAV: { id: Panel; label: string }[] = [
-  { id: "libraries", label: "Libraries" },
+  { id: "libraries", label: "Library" },
+  { id: "tags", label: "Tags" },
   { id: "profiles", label: "Quality Profiles" },
   { id: "metadata", label: "Metadata" },
   { id: "sources", label: "Sources" },
@@ -31,6 +33,7 @@ const NAV: { id: Panel; label: string }[] = [
   { id: "kindle", label: "Send to Kindle" },
   { id: "backups", label: "Backups" },
   { id: "users", label: "Users" },
+  { id: "account", label: "Account" },
   { id: "health", label: "Health" },
   { id: "logs", label: "Logs" },
   { id: "about", label: "About" },
@@ -94,7 +97,7 @@ function NamingCard({ libraries }: { libraries: ApiLibrary[] }) {
   const rel = renderScheme(scheme)
 
   return (
-    <Card title="File Naming" desc="One scheme for every library. It's the path built under each library's own root folder — the extension is always added for you, so there's no {Format} token.">
+    <Card title="File Naming" desc="The path built under the library's root folder — the extension is always added for you, so there's no {Format} token.">
       <FieldLabel>Naming scheme</FieldLabel>
       <div className="flex items-center gap-2">
         <Input value={scheme} disabled={!loaded} onChange={e => setScheme(e.target.value)}
@@ -202,7 +205,7 @@ export function ReviewScreen({ library, onBack }: { library: ApiLibrary; onBack:
   return (
     <div className="mb-5 rounded-lg border bg-surface p-6">
       <button onClick={onBack} className="mono-label mb-4 flex items-center gap-1.5 text-muted-foreground hover:text-brass">
-        ← Libraries
+        ← Library
       </button>
       <h2 className="font-book mb-1 text-xl font-bold">Import failed — {library.name}</h2>
       <p className="mb-5 max-w-[62ch] text-[13px] text-muted-foreground">
@@ -238,42 +241,6 @@ export function ReviewScreen({ library, onBack }: { library: ApiLibrary; onBack:
   )
 }
 
-// OPDSCreds: per-library feed credentials — set them to switch the feed on.
-function OPDSCreds({ library, onSaved }: { library: ApiLibrary; onSaved: () => void }) {
-  const [open, setOpen] = useState(false)
-  const [username, setUsername] = useState(library.opdsUsername)
-  const [password, setPassword] = useState("")
-
-  const save = async () => {
-    try {
-      const r = await delivery.setOPDS(library.id, username.trim(), password)
-      toast.success(`OPDS feed live at ${r.feedUrl}`)
-      setOpen(false); setPassword("")
-      onSaved()
-    } catch (e) {
-      toast.error(`Couldn't save: ${e instanceof Error ? e.message : e}`)
-    }
-  }
-
-  if (!open) {
-    return (
-      <button className="mono-label text-muted-foreground hover:text-brass" onClick={() => setOpen(true)}>
-        {library.opdsConfigured
-          ? <>opds: /opds/{library.id} · <span className="text-good">{library.opdsUsername} ✓</span> · change credentials</>
-          : <>opds: /opds/{library.id} · set credentials</>}
-      </button>
-    )
-  }
-  return (
-    <span className="flex flex-wrap items-center gap-2">
-      <Input value={username} onChange={e => setUsername(e.target.value)} placeholder="feed username" className="h-8 w-[130px] text-[12px]" />
-      <Input type="password" value={password} onChange={e => setPassword(e.target.value)} placeholder="password (8+ chars)" className="h-8 w-[150px] text-[12px]" />
-      <Button className="h-8" disabled={!username.trim() || password.length < 8} onClick={save}>Save</Button>
-      <Button variant="outline" className="h-8" onClick={() => setOpen(false)}>Cancel</Button>
-    </span>
-  )
-}
-
 // ProfilePicker assigns a quality profile to one library.
 function ProfilePicker({ library, profiles, onSaved }: { library: ApiLibrary; profiles: ApiProfile[]; onSaved: () => void }) {
   if (profiles.length <= 1) return null
@@ -283,7 +250,7 @@ function ProfilePicker({ library, profiles, onSaved }: { library: ApiLibrary; pr
       onChange={async e => {
         try {
           await api.setLibraryProfile(library.id, Number(e.target.value))
-          toast.success(`${library.name}: profile updated`)
+          toast.success("Quality profile updated")
           onSaved()
         } catch (err) {
           toast.error(`Couldn't save: ${err instanceof Error ? err.message : err}`)
@@ -294,38 +261,39 @@ function ProfilePicker({ library, profiles, onSaved }: { library: ApiLibrary; pr
   )
 }
 
+// LibrariesPanel is the one library: its root folder, the scan that matches
+// what's already there, and its quality profile. There's no adding or
+// deleting libraries any more — who sees which books is decided by tags, and
+// each person's OPDS login lives under Account.
 function LibrariesPanel() {
   const { data, loading, reload } = useApi(() => api.libraries())
-  const libraries = data?.libraries ?? []
+  const library = data?.libraries?.[0] ?? null
   const profilesQuery = useApi(() => acquisition.profiles())
   const profiles = profilesQuery.data?.profiles ?? []
   const [reviewLib, setReviewLib] = useState<ApiLibrary | null>(null)
-  const [adding, setAdding] = useState(false)
-  const [name, setName] = useState("")
   const [rootPath, setRootPath] = useState("/data/books/")
-  const [scanning, setScanning] = useState<number | null>(null)
-  const [deleteLib, setDeleteLib] = useState<ApiLibrary | null>(null)
+  const [scanning, setScanning] = useState(false)
 
+  // a fresh install with no library yet (the wizard skipped) creates it here
   const create = async () => {
     try {
-      await api.createLibrary(name.trim(), rootPath.trim())
-      toast.success(`Library "${name.trim()}" created`)
-      setAdding(false); setName("")
+      await api.createLibrary("Library", rootPath.trim())
+      toast.success("Library created")
       reload()
     } catch (e) {
       toast.error(`Couldn't create: ${e instanceof Error ? e.message : e}`)
     }
   }
   const scan = async (l: ApiLibrary) => {
-    setScanning(l.id)
+    setScanning(true)
     try {
       const r = await api.scanLibrary(l.id)
-      toast.success(`${l.name}: ${r.scanned} files · ${r.matched} matched · ${r.review} need review`)
+      toast.success(`${r.scanned} files · ${r.matched} matched · ${r.review} need review`)
       reload()
     } catch (e) {
       toast.error(`Scan failed: ${e instanceof Error ? e.message : e}`)
     } finally {
-      setScanning(null)
+      setScanning(false)
     }
   }
 
@@ -333,65 +301,44 @@ function LibrariesPanel() {
 
   return (
     <>
-      <Card title="Libraries"
-        action={
-          <Button variant="outline" size="icon" className="h-7 w-7 rounded-full" aria-label="Add library" onClick={() => setAdding(a => !a)}>
-            <Plus className="h-4 w-4" />
-          </Button>
-        }
-        desc="Each library is a root folder with its own OPDS feed and quality profile. Watched lists route their books into one of these.">
-        <div className="flex flex-col gap-2">
-          {loading && <p className="mono-label text-faint">loading…</p>}
-          {libraries.map(l => (
-            <div key={l.id} className="flex flex-wrap items-center gap-3 rounded-lg border border-linesoft bg-surface2 px-4 py-3">
-              <div className="min-w-[120px]">
-                <div className="font-book text-[16px] font-bold">{l.name}</div>
-                <div className="text-[11.5px] text-faint">{l.rootPath}</div>
-                <div className="mt-1"><OPDSCreds library={l} onSaved={reload} /></div>
-              </div>
-              <span className="text-xs text-muted-foreground">{l.bookCount} books · {l.onShelf} on shelf</span>
-              <ProfilePicker library={l} profiles={profiles} onSaved={reload} />
-              <div className="ml-auto flex gap-2">
-                <Button variant="outline" className="h-8" disabled={scanning === l.id} onClick={() => scan(l)}>
-                  {scanning === l.id ? "Scanning…" : "Scan folder"}
-                </Button>
-                {l.reviewCount > 0 && (
-                  <Button variant="outline" className="h-8 border-brass text-brass" onClick={() => setReviewLib(l)}>
-                    Import failed
-                    <span className="font-label ml-1.5 flex h-[16px] min-w-[16px] items-center justify-center rounded-full bg-brass px-1 text-[9.5px] font-bold text-brass-ink">
-                      {l.reviewCount}
-                    </span>
-                  </Button>
-                )}
-                <Button variant="outline" size="icon" aria-label={`Delete ${l.name}`} title="Delete library"
-                  className="h-8 w-8 text-muted-foreground hover:border-want hover:text-want"
-                  onClick={() => setDeleteLib(l)}>
-                  <Trash2 className="h-3.5 w-3.5" />
-                </Button>
-              </div>
+      <Card title="Library"
+        desc="Every book lives here once, in one folder. Who sees which books is decided by tags (Settings → Tags), not by separate libraries.">
+        {loading && <p className="mono-label text-faint">loading…</p>}
+        {!loading && !library && (
+          <div className="flex flex-wrap items-end gap-2 rounded-lg border border-dashed border-linesoft px-4 py-3">
+            <div className="min-w-[240px] flex-1">
+              <FieldLabel>Root path (under /data)</FieldLabel>
+              <PathInput value={rootPath} onChange={setRootPath} className="h-9" />
             </div>
-          ))}
-          {adding ? (
-            <div className="flex flex-wrap items-end gap-2 rounded-lg border border-dashed border-linesoft px-4 py-3">
-              <div>
-                <FieldLabel>Name</FieldLabel>
-                <Input value={name} onChange={e => setName(e.target.value)} className="h-9 max-w-[140px]" placeholder="Library name" />
-              </div>
-              <div className="min-w-[240px] flex-1">
-                <FieldLabel>Root path (under /data)</FieldLabel>
-                <PathInput value={rootPath} onChange={setRootPath} className="h-9" />
-              </div>
-              <Button className="h-9" disabled={!name.trim() || !rootPath.trim()} onClick={create}>Create</Button>
-              <Button variant="outline" className="h-9" onClick={() => setAdding(false)}>Cancel</Button>
+            <Button className="h-9" disabled={!rootPath.trim()} onClick={create}>Create library</Button>
+          </div>
+        )}
+        {library && (
+          <div className="flex flex-wrap items-center gap-3 rounded-lg border border-linesoft bg-surface2 px-4 py-3">
+            <div className="min-w-[120px]">
+              <div className="mono-label text-faint">Root folder</div>
+              <div className="text-[13px]">{library.rootPath}</div>
             </div>
-          ) : null}
-        </div>
+            <span className="text-xs text-muted-foreground">{library.bookCount} books · {library.onShelf} on shelf</span>
+            <ProfilePicker library={library} profiles={profiles} onSaved={reload} />
+            <div className="ml-auto flex gap-2">
+              <Button variant="outline" className="h-8" disabled={scanning} onClick={() => scan(library)}>
+                {scanning ? "Scanning…" : "Scan folder"}
+              </Button>
+              {library.reviewCount > 0 && (
+                <Button variant="outline" className="h-8 border-brass text-brass" onClick={() => setReviewLib(library)}>
+                  Import failed
+                  <span className="font-label ml-1.5 flex h-[16px] min-w-[16px] items-center justify-center rounded-full bg-brass px-1 text-[9.5px] font-bold text-brass-ink">
+                    {library.reviewCount}
+                  </span>
+                </Button>
+              )}
+            </div>
+          </div>
+        )}
       </Card>
 
-      <NamingCard libraries={libraries} />
-
-      <DeleteLibraryDialog library={deleteLib} onOpenChange={v => { if (!v) setDeleteLib(null) }}
-        onDeleted={() => reload()} />
+      <NamingCard libraries={library ? [library] : []} />
     </>
   )
 }
@@ -683,8 +630,9 @@ function LogsPanel() {
 
 // USER_PANELS is everything a non-admin account may open. Pairing an e-reader
 // is everyday business, not administration, so the KoReader page stays — the
-// library picker inside it is already limited to the libraries that account
-// holds, and the devices listed are only their own. Everything else on this
+// tag picker inside it is already limited to the tags that account holds,
+// and the devices listed are only their own. Account holds their own OPDS
+// login. Everything else on this
 // screen configures the install and would answer 403.
 //
 // Anything ADDED to a panel listed here needs its own check: the panel being
@@ -692,12 +640,12 @@ function LogsPanel() {
 // wizard" button was the one that got through — harmless in the end, since
 // every step of the wizard is admin-only server-side, but it offered a user a
 // flow that could only fail.
-const USER_PANELS: Panel[] = ["koreader", "kindle", "about"]
+const USER_PANELS: Panel[] = ["account", "koreader", "kindle", "about"]
 
 export function SettingsView() {
   const { isAdmin } = useAccess()
   const nav = isAdmin ? NAV : NAV.filter(n => USER_PANELS.includes(n.id))
-  const [panel, setPanel] = useState<Panel>(() => (isAdmin ? "libraries" : "koreader"))
+  const [panel, setPanel] = useState<Panel>(() => (isAdmin ? "libraries" : "account"))
   return (
     <section>
       <Folio title="Settings" end={isAdmin ? (
@@ -730,6 +678,8 @@ export function SettingsView() {
         </nav>
         <div className="w-full max-w-[880px]">
           {panel === "libraries" && <LibrariesPanel />}
+          {panel === "tags" && <TagsPanel />}
+          {panel === "account" && <AccountPanel />}
           {panel === "metadata" && <MetadataPanel />}
           {panel === "health" && <HealthPanel />}
           {panel === "logs" && <LogsPanel />}

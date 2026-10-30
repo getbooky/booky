@@ -105,12 +105,15 @@ func main() {
 		log.Printf("koreader: sealed %d legacy device token(s)", n)
 	}
 
+	accounts := auth.New(database)
 	server, err := api.New(api.Deps{
 		DB: database, Version: version, Dist: web.Dist,
 		Catalog: cat, Chain: chain, Importer: imp, Covers: covers, AuthorPhotos: authorPhotos, Settings: cfg, Logs: logs,
 		Acquire: engine, Watcher: watch,
-		Auth: auth.New(database), KoReader: koDevices, Kindle: kindle.New(database, keeper), Backups: backups,
-		OPDS: opds.New(database, cat, covers),
+		Auth: accounts, KoReader: koDevices, Kindle: kindle.New(database, keeper), Backups: backups,
+		// one auth store for web and OPDS, so a lockout or a changed OPDS
+		// password applies to both at once
+		OPDS: opds.New(database, cat, covers, accounts),
 	})
 	if err != nil {
 		log.Fatalf("init server: %v", err)
@@ -118,7 +121,21 @@ func main() {
 	// new arrivals email themselves to auto-send Kindles; backgrounded so a
 	// slow mail server never stalls a delivery
 	imp.OnFileAdded = func(bookID, libraryID int64, path, format string) {
-		go server.KindleAutoSend(bookID, libraryID, path, format)
+		go server.KindleOnImport(bookID)
+	}
+	// a watched list sharing a book that's already on disk: send on tag
+	watch.OnTagged = func(ch catalog.TagChange) {
+		go server.KindleOnTagged(ch.BookID, ch.Added, true)
+	}
+
+	// Finish the move to one library: files still sitting in the old
+	// per-person folders come home, and second copies are removed (when
+	// identical) or set aside (when not). Nothing to do once it has run.
+	if rep, err := imp.Consolidate(cfg.Get("naming_scheme")); err != nil {
+		log.Printf("consolidate: %v", err)
+	} else if rep.Moved+rep.Removed+rep.SetAside+rep.Failed > 0 {
+		log.Printf("consolidate: %d file(s) moved into the library, %d duplicate(s) removed, %d set aside in %s, %d failed",
+			rep.Moved, rep.Removed, rep.SetAside, importer.DuplicatesDir, rep.Failed)
 	}
 
 	// background loops: list polling, release-day triggers, download tracking

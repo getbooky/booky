@@ -45,6 +45,21 @@ type listRequest struct {
 	SearchOnAdd      bool   `json:"searchOnAdd"`
 	Enabled          bool   `json:"enabled"`
 	QualityProfileID int64  `json:"qualityProfileId"`
+	// TagIDs is the list's audience; left out on an update, it stays as is
+	TagIDs *[]int64 `json:"tagIds"`
+}
+
+// setListTags stores a list's audience after checking every tag exists.
+func (s *Server) setListTags(listID int64, tagIDs *[]int64) error {
+	if tagIDs == nil {
+		return nil
+	}
+	for _, id := range *tagIDs {
+		if _, err := s.Catalog.GetTag(id); err != nil {
+			return fmt.Errorf("tag %d not found", id)
+		}
+	}
+	return s.Catalog.SetListTags(listID, *tagIDs)
 }
 
 func (req *listRequest) toList() (watcher.WatchedList, error) {
@@ -72,6 +87,9 @@ func (s *Server) handleCreateList(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, err)
 		return
 	}
+	if req.LibraryID == 0 {
+		req.LibraryID = s.Catalog.TheLibrary()
+	}
 	list, err := req.toList()
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, err)
@@ -79,6 +97,11 @@ func (s *Server) handleCreateList(w http.ResponseWriter, r *http.Request) {
 	}
 	id, err := s.Watcher.CreateList(list)
 	if err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	if err := s.setListTags(id, req.TagIDs); err != nil {
+		_ = s.Watcher.DeleteList(id)
 		writeErr(w, http.StatusBadRequest, err)
 		return
 	}
@@ -130,6 +153,10 @@ func (s *Server) handleUpdateList(w http.ResponseWriter, r *http.Request) {
 		list.SourceRef = ref
 	}
 	if err := s.Watcher.UpdateList(list); err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	if err := s.setListTags(id, req.TagIDs); err != nil {
 		writeErr(w, http.StatusBadRequest, err)
 		return
 	}
@@ -301,7 +328,7 @@ func (s *Server) handleAuthorSearch(w http.ResponseWriter, r *http.Request) {
 	// upgrades: this author's books sitting below their profile's cutoff
 	if unmet, libIDs, err := s.Acquire.CutoffUnmet(); err == nil {
 		for i, b := range unmet {
-			if b.AuthorID == authorID && a.mayLibrary(libIDs[i]) {
+			if b.AuthorID == authorID && s.mayFile(a, b.ID) {
 				add(grabTarget{b.ID, libIDs[i]})
 			}
 		}
@@ -366,7 +393,7 @@ func (s *Server) handleLibrarySearch(w http.ResponseWriter, r *http.Request) {
 	}
 	if unmet, libIDs, err := s.Acquire.CutoffUnmet(); err == nil {
 		for i, b := range unmet {
-			if (libraryID == 0 || libIDs[i] == libraryID) && a.mayLibrary(libIDs[i]) {
+			if (libraryID == 0 || libIDs[i] == libraryID) && s.mayFile(a, b.ID) {
 				add(grabTarget{b.ID, libIDs[i]})
 			}
 		}

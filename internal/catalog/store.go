@@ -46,19 +46,23 @@ func New(db *sql.DB) *Store { return &Store{db: db} }
 // Visibility narrows a listing (or a cascade's write target) to one account.
 // A nil *Visibility means no narrowing at all — admins, background loops, and
 // the pre-auth wizard — so every caller that doesn't care passes nil.
+//
+// A shelved book is visible when it carries one of TagIDs (see migration
+// 0024); an untagged one is admin-only. Catalog-only books — bibliography
+// entries nobody has shelved — follow their author instead.
 type Visibility struct {
-	// LibraryIDs is the set of libraries the account may reach.
-	LibraryIDs []int64
+	// TagIDs is the set of tags the account holds, its personal tag included.
+	TagIDs []int64
 	// UserID keeps authors the account added by hand visible before any of
 	// their books have been shelved anywhere (see migration 0018).
 	UserID int64
 }
 
-func (v *Visibility) libraryIDs() []int64 {
+func (v *Visibility) tagIDs() []int64 {
 	if v == nil {
 		return nil
 	}
-	return v.LibraryIDs
+	return v.TagIDs
 }
 
 func (v *Visibility) userID() int64 {
@@ -93,10 +97,11 @@ func idList(ids []int64) (placeholders string, args []any) {
 }
 
 // IDPlaceholders and UnscopedFlag expose the two pieces a Visibility-aware
-// query needs, for the watcher's own "where do these books go" lookups. Bind
-// UnscopedFlag first, then spread the args — same order as the SQL reads.
+// query needs to other packages: the placeholders go in a book_tags IN (...)
+// test. Bind UnscopedFlag first, then spread the args — same order as the SQL
+// reads.
 func IDPlaceholders(v *Visibility) (placeholders string, args []any) {
-	return idList(v.libraryIDs())
+	return idList(v.tagIDs())
 }
 
 func UnscopedFlag(v *Visibility) int64 { return v.unscoped() }
@@ -152,8 +157,11 @@ type Book struct {
 	GoodreadsID string  `json:"goodreadsId,omitempty"`
 	HardcoverID string  `json:"hardcoverId,omitempty"`
 	ISBN13      string  `json:"isbn13,omitempty"`
-	// per-library presence, filled by list queries
-	LibraryID  int64    `json:"libraryId,omitempty"`
+	// shelf presence, filled by list queries: the one library's id once the
+	// book is shelved, 0 for a catalog-only bibliography entry
+	LibraryID int64 `json:"libraryId,omitempty"`
+	// the tags sharing this book, filled by list queries and GetBook
+	Tags       []int64  `json:"tagIds"`
 	Monitored  bool     `json:"monitored"`
 	FilePath   string   `json:"filePath,omitempty"`
 	FileFormat string   `json:"fileFormat,omitempty"`
@@ -364,8 +372,10 @@ func (s *Store) upsertBookWithAuthor(meta metadata.BookMeta, authorID int64) (in
 // already exists in the catalog and whether it's in a library / monitored —
 // so the add dialog can show "In library" / "Monitored" instead of offering
 // to add a duplicate. Identity matches the same keys as UpsertBook.
-func (s *Store) MonitorState(meta metadata.BookMeta) (inLibrary, monitored bool) {
-	var bookID int64
+//
+// bookID comes back too (0 when unknown) so callers can narrow the answer to
+// what an account may see.
+func (s *Store) MonitorState(meta metadata.BookMeta) (bookID int64, inLibrary, monitored bool) {
 	found := false
 	try := func(query, val string) bool {
 		if val == "" {
@@ -392,12 +402,12 @@ func (s *Store) MonitorState(meta metadata.BookMeta) (inLibrary, monitored bool)
 		}
 	}
 	if !found {
-		return false, false
+		return 0, false, false
 	}
 	var count, mon int
 	_ = s.db.QueryRow(`SELECT COUNT(*), COALESCE(MAX(monitored), 0) FROM library_books WHERE book_id = ?`, bookID).
 		Scan(&count, &mon)
-	return count > 0, mon == 1
+	return bookID, count > 0, mon == 1
 }
 
 // AuthorState reports whether an author already counts as added — for the
@@ -641,7 +651,7 @@ func (s *Store) SetFile(libraryID, bookID int64, path, format string, size int64
 // 8 on shelf" for an author whose books they can mostly not open would be
 // both a leak and a lie.
 func (s *Store) ListAuthors(v *Visibility) ([]Author, error) {
-	ph, libArgs := idList(v.libraryIDs())
+	ph, tagArgs := idList(v.tagIDs())
 	all := v.unscoped()
 	// A book counts as visible when it is in one of the account's libraries
 	// or in none at all — a catalog-only bibliography entry, which is public
@@ -652,9 +662,9 @@ func (s *Store) ListAuthors(v *Visibility) ([]Author, error) {
 	query := fmt.Sprintf( //nolint:gosec // G201: placeholders only, see above
 		`
 		SELECT a.id, a.name, a.sort_name, a.monitored, a.bio, a.image_url,
-		       COUNT(DISTINCT CASE WHEN ? = 1 OR lb.id IS NULL OR lb.library_id IN (%[1]s) THEN b.id END),
+		       COUNT(DISTINCT CASE WHEN ? = 1 OR lb.id IS NULL OR EXISTS (SELECT 1 FROM book_tags bt WHERE bt.book_id = lb.book_id AND bt.tag_id IN (%[1]s)) THEN b.id END),
 		       COUNT(DISTINCT CASE WHEN lb.file_path IS NOT NULL
-		             AND (? = 1 OR lb.library_id IN (%[1]s)) THEN b.id END)
+		             AND (? = 1 OR EXISTS (SELECT 1 FROM book_tags bt WHERE bt.book_id = lb.book_id AND bt.tag_id IN (%[1]s))) THEN b.id END)
 		FROM authors a
 		LEFT JOIN books b ON b.author_id = a.id
 		LEFT JOIN library_books lb ON lb.book_id = b.id
@@ -662,15 +672,15 @@ func (s *Store) ListAuthors(v *Visibility) ([]Author, error) {
 		HAVING CASE WHEN ? = 1
 		       THEN a.added_manually = 1 OR COUNT(DISTINCT lb.id) > 0
 		       ELSE a.id IN (SELECT author_id FROM user_authors WHERE user_id = ?)
-		            OR COUNT(DISTINCT CASE WHEN lb.library_id IN (%[1]s) THEN lb.id END) > 0
+		            OR COUNT(DISTINCT CASE WHEN EXISTS (SELECT 1 FROM book_tags bt WHERE bt.book_id = lb.book_id AND bt.tag_id IN (%[1]s)) THEN lb.id END) > 0
 		       END
 		ORDER BY a.sort_name`, ph)
 	args := []any{all}
-	args = append(args, libArgs...)
+	args = append(args, tagArgs...)
 	args = append(args, all)
-	args = append(args, libArgs...)
+	args = append(args, tagArgs...)
 	args = append(args, all, v.userID())
-	args = append(args, libArgs...)
+	args = append(args, tagArgs...)
 	rows, err := s.db.Query(query, args...)
 	if err != nil {
 		return nil, err
@@ -726,7 +736,7 @@ func (s *Store) AuthorInfoDue(authorID int64) bool {
 // index page's cover fan narrow the same way, so a series never advertises
 // books from a library the account can't open.
 func (s *Store) ListSeries(v *Visibility) ([]Series, error) {
-	ph, libArgs := idList(v.libraryIDs())
+	ph, tagArgs := idList(v.tagIDs())
 	all := v.unscoped()
 	// G201 is about interpolating VALUES into SQL. The only thing spliced in
 	// here is the "?,?,?" run idList builds from a slice length — the ids
@@ -734,16 +744,16 @@ func (s *Store) ListSeries(v *Visibility) ([]Series, error) {
 	query := fmt.Sprintf( //nolint:gosec // G201: placeholders only, see above
 		`
 		SELECT sr.id, sr.author_id, a.name, sr.name, sr.monitored,
-		       COUNT(DISTINCT CASE WHEN ? = 1 OR lb.id IS NULL OR lb.library_id IN (%[1]s) THEN b.id END),
+		       COUNT(DISTINCT CASE WHEN ? = 1 OR lb.id IS NULL OR EXISTS (SELECT 1 FROM book_tags bt WHERE bt.book_id = lb.book_id AND bt.tag_id IN (%[1]s)) THEN b.id END),
 		       COUNT(DISTINCT CASE WHEN lb.file_path IS NOT NULL
-		             AND (? = 1 OR lb.library_id IN (%[1]s)) THEN b.id END),
+		             AND (? = 1 OR EXISTS (SELECT 1 FROM book_tags bt WHERE bt.book_id = lb.book_id AND bt.tag_id IN (%[1]s))) THEN b.id END),
 		       COALESCE((SELECT group_concat(id) FROM (
 		           SELECT b2.id AS id FROM books b2
 		           WHERE b2.series_id = sr.id
 		             AND (? = 1
 		                  OR NOT EXISTS (SELECT 1 FROM library_books x WHERE x.book_id = b2.id)
 		                  OR EXISTS (SELECT 1 FROM library_books x
-		                             WHERE x.book_id = b2.id AND x.library_id IN (%[1]s)))
+		                             WHERE x.book_id = b2.id AND EXISTS (SELECT 1 FROM book_tags bt WHERE bt.book_id = x.book_id AND bt.tag_id IN (%[1]s))))
 		           ORDER BY COALESCE(b2.series_num, 1e9), b2.id LIMIT 3)), '')
 		FROM series sr
 		JOIN authors a ON a.id = sr.author_id
@@ -752,17 +762,17 @@ func (s *Store) ListSeries(v *Visibility) ([]Series, error) {
 		GROUP BY sr.id
 		HAVING CASE WHEN ? = 1
 		       THEN COUNT(DISTINCT lb.id) > 0
-		       ELSE COUNT(DISTINCT CASE WHEN lb.library_id IN (%[1]s) THEN lb.id END) > 0
+		       ELSE COUNT(DISTINCT CASE WHEN EXISTS (SELECT 1 FROM book_tags bt WHERE bt.book_id = lb.book_id AND bt.tag_id IN (%[1]s)) THEN lb.id END) > 0
 		       END
 		ORDER BY sr.name`, ph)
 	args := []any{all}
-	args = append(args, libArgs...)
+	args = append(args, tagArgs...)
 	args = append(args, all)
-	args = append(args, libArgs...)
+	args = append(args, tagArgs...)
 	args = append(args, all)
-	args = append(args, libArgs...)
+	args = append(args, tagArgs...)
 	args = append(args, all)
-	args = append(args, libArgs...)
+	args = append(args, tagArgs...)
 	rows, err := s.db.Query(query, args...)
 	if err != nil {
 		return nil, err
@@ -835,6 +845,9 @@ func (s *Store) GetBook(id int64) (*Book, error) {
 	if locks, err := s.fieldLocks(id); err == nil && len(locks) > 0 {
 		b.FieldLocks = locks
 	}
+	if tags, err := s.BookTags(id); err == nil {
+		b.Tags = tags
+	}
 	return &b, nil
 }
 
@@ -846,7 +859,8 @@ func (s *Store) ListBooks(authorID, libraryID, seriesID int64) ([]Book, error) {
 	const query = `SELECT ` + bookColumns + `,
 		COALESCE(lb.library_id, 0), COALESCE(lb.monitored, 0),
 		COALESCE(lb.file_path, ''), COALESCE(lb.file_format, ''), COALESCE(lb.file_size, 0),
-		COALESCE(lb.added_at, '')
+		COALESCE(lb.added_at, ''),
+		COALESCE((SELECT group_concat(bt.tag_id) FROM book_tags bt WHERE bt.book_id = b.id), '')
 		FROM books b
 		JOIN authors a ON a.id = b.author_id
 		LEFT JOIN series sr ON sr.id = b.series_id
@@ -864,14 +878,15 @@ func (s *Store) ListBooks(authorID, libraryID, seriesID int64) ([]Book, error) {
 	var out []Book
 	for rows.Next() {
 		var b Book
-		var genres string
+		var genres, tags string
 		err := rows.Scan(&b.ID, &b.AuthorID, &b.Author, &b.SeriesID, &b.SeriesName, &b.SeriesNum,
 			&b.Title, &b.Description, &b.Language, &b.Publisher, &b.ReleaseDate,
 			&b.GoodreadsID, &b.HardcoverID, &b.ISBN13, &genres, &b.RatingsCount,
-			&b.LibraryID, &b.Monitored, &b.FilePath, &b.FileFormat, &b.FileSize, &b.AddedAt)
+			&b.LibraryID, &b.Monitored, &b.FilePath, &b.FileFormat, &b.FileSize, &b.AddedAt, &tags)
 		if err != nil {
 			return nil, err
 		}
+		b.Tags = parseIDList(tags)
 		if genres != "" {
 			_ = json.Unmarshal([]byte(genres), &b.Genres) //nolint:errcheck
 		}

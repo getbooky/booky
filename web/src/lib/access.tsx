@@ -14,11 +14,13 @@ import type { ApiUser } from "@/api"
 export interface Access {
   user: ApiUser | null
   isAdmin: boolean
-  /** Libraries this account may work in. Empty for admins, who reach all. */
-  libraryIds: number[]
+  /** Tags this account holds, its personal tag included. Admins see every
+   * book whatever they hold. */
+  tagIds: number[]
+  personalTagId: number
 }
 
-const AccessContext = createContext<Access>({ user: null, isAdmin: true, libraryIds: [] })
+const AccessContext = createContext<Access>({ user: null, isAdmin: true, tagIds: [], personalTagId: 0 })
 
 export const AccessProvider = AccessContext.Provider
 
@@ -26,7 +28,8 @@ export function accessFor(user: ApiUser | null): Access {
   return {
     user,
     isAdmin: user === null || user.role === "admin",
-    libraryIds: user?.libraryIds ?? [],
+    tagIds: user?.tagIds ?? [],
+    personalTagId: user?.personalTagId ?? 0,
   }
 }
 

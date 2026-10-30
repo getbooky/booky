@@ -88,24 +88,20 @@ func TestLastAdminUndeletable(t *testing.T) {
 	}
 }
 
-// A user's library grants come back on every read path — the session lookup
-// especially, since that's what every API request goes through. Admins carry
-// no list at all and MayAccess answers yes regardless, so an admin is never
-// mistaken for an account with no access.
-func TestUserLibraryGrants(t *testing.T) {
+// An account's tags come back on every read path — the session lookup
+// especially, since that's what every API request goes through. Every
+// account holds its personal tag; shared tags are granted and revoked
+// without ever touching it, and land on the next request, not the next
+// login.
+func TestUserTags(t *testing.T) {
 	s := testStore(t)
-	if _, err := s.db.Exec(`INSERT INTO quality_profiles (id, name, formats, cutoff_format)
-		VALUES (1, 'EPUB preferred', '["epub"]', 'epub')`); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := s.db.Exec(`INSERT INTO libraries (id, name, root_path, quality_profile_id, opds_username, opds_password_hash)
-		VALUES (1, 'Alex', '/a', 1, 'alex-shelf', 'unset'), (2, 'Private', '/p', 1, 'p-shelf', 'unset')`); err != nil {
+	if _, err := s.db.Exec(`INSERT INTO tags (id, name) VALUES (101, 'Kids'), (102, 'Household')`); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.CreateUser("root", "correct horse battery", "admin", nil); err != nil {
 		t.Fatal(err)
 	}
-	userID, err := s.CreateUser("sam", "another passphrase", "user", []int64{1})
+	userID, err := s.CreateUser("sam", "another passphrase", "user", []int64{101})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -114,36 +110,93 @@ func TestUserLibraryGrants(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !user.MayAccess(1) || user.MayAccess(2) {
-		t.Fatalf("login grants = %v, want library 1 only", user.Libraries)
+	if user.PersonalTag == 0 || !user.HasTag(user.PersonalTag) {
+		t.Fatalf("login user = %+v, want a personal tag it holds", user)
 	}
-
-	session := s.SessionUser(token)
-	if session == nil || !session.MayAccess(1) || session.MayAccess(2) {
-		t.Fatalf("session grants = %v, want library 1 only", session)
+	if !user.HasTag(101) || user.HasTag(102) {
+		t.Fatalf("login tags = %v, want Kids only (plus personal)", user.Tags)
 	}
+	personal := user.PersonalTag
 
-	// re-scoping lands on the next request, not the next login
-	if err := s.SetUserLibraries(userID, []int64{2}); err != nil {
+	// re-scoping lands on the next request, not the next login — and never
+	// strips the personal tag
+	if err := s.SetUserTags(userID, []int64{102}); err != nil {
 		t.Fatal(err)
 	}
-	session = s.SessionUser(token)
-	if session == nil || session.MayAccess(1) || !session.MayAccess(2) {
-		t.Fatalf("grants must be re-read per request, got %v", session)
+	session := s.SessionUser(token)
+	if session == nil || session.HasTag(101) || !session.HasTag(102) || !session.HasTag(personal) {
+		t.Fatalf("tags must be re-read per request and keep the personal tag, got %+v", session)
 	}
 
-	// an admin reaches everything without holding a single grant row
+	// another account's personal tag can never be granted
+	rootID := s.SessionUser(mustLogin(t, s, "root", "correct horse battery")).PersonalTag
+	if err := s.SetUserTags(userID, []int64{rootID}); err == nil {
+		t.Fatal("granting someone else's personal tag must fail")
+	}
+	if session := s.SessionUser(token); !session.HasTag(102) {
+		t.Fatalf("a refused grant must change nothing, got %v", session.Tags)
+	}
+
+	// an admin holds just their personal tag; seeing everything is decided by
+	// the role, not by tags
 	admin := s.SessionUser(mustLogin(t, s, "root", "correct horse battery"))
-	if len(admin.Libraries) != 0 || !admin.MayAccess(1) || !admin.MayAccess(2) {
-		t.Fatalf("admin = %v, want no stored grants but access to all", admin)
+	if !admin.IsAdmin() || len(admin.Tags) != 1 {
+		t.Fatalf("admin = %+v, want the admin role and only a personal tag", admin)
+	}
+}
+
+// OPDS signs in with the account's own login, and locks out after repeated
+// failures like the web login does — on a separate counter.
+func TestOPDSLogin(t *testing.T) {
+	s := testStore(t)
+	id, err := s.CreateUser("sam", "web passphrase!", "user", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	u, err := s.OPDSLogin("sam", "web passphrase!", "1.2.3.4")
+	if err != nil || u.ID != id {
+		t.Fatalf("OPDS login = %v, %v", u, err)
+	}
+	if _, err := s.OPDSLogin("sam", "wrong passphrase", "1.2.3.4"); err == nil {
+		t.Fatal("a wrong password opened OPDS")
+	}
+	if _, err := s.OPDSLogin("nobody", "web passphrase!", "1.2.3.4"); err == nil {
+		t.Fatal("an unknown account opened OPDS")
 	}
 
-	// a nonexistent library is refused outright rather than half-applied
-	if err := s.SetUserLibraries(userID, []int64{2, 999}); err == nil {
-		t.Fatal("granting a library that doesn't exist must fail")
+	// a changed password stops working at once, even while the old one sits
+	// in the sign-in cache
+	hash, err := HashPassword("new passphrase!")
+	if err != nil {
+		t.Fatal(err)
 	}
-	if session = s.SessionUser(token); !session.MayAccess(2) {
-		t.Fatal("a failed re-scope must leave the previous grants intact")
+	if _, err := s.db.Exec(`UPDATE users SET password_hash = ? WHERE id = ?`, hash, id); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.OPDSLogin("sam", "web passphrase!", "1.2.3.4"); err == nil {
+		t.Fatal("old password still opens OPDS after a change")
+	}
+	if _, err := s.OPDSLogin("sam", "new passphrase!", "1.2.3.4"); err != nil {
+		t.Fatalf("new password refused: %v", err)
+	}
+
+	// lockout: after maxFailures the right password is refused too — even
+	// while it sits in the sign-in cache from a moment ago
+	if _, err := s.OPDSLogin("sam", "new passphrase!", "5.6.7.8"); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < maxFailures; i++ {
+		_, _ = s.OPDSLogin("sam", "wrong", "5.6.7.8")
+	}
+	if _, err := s.OPDSLogin("sam", "new passphrase!", "5.6.7.8"); err == nil {
+		t.Fatal("OPDS must lock out after repeated failures")
+	}
+	// ...but only for that IP, and the web login is a separate counter
+	if _, err := s.OPDSLogin("sam", "new passphrase!", "1.2.3.4"); err != nil {
+		t.Fatalf("other IP locked out too: %v", err)
+	}
+	if _, _, err := s.Login("sam", "new passphrase!", "5.6.7.8"); err != nil {
+		t.Fatalf("OPDS failures locked the web login: %v", err)
 	}
 }
 

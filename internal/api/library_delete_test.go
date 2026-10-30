@@ -52,96 +52,26 @@ func libraryCount(t *testing.T, h http.Handler) int {
 	return len(libs)
 }
 
-func TestDeleteLibraryKeepMode(t *testing.T) {
+// There is one library holding every book. Deleting it would empty the
+// install, and a second one would bring back the per-person split tags
+// replaced — both are refused, even for an admin.
+func TestTheLibraryIsTheOnlyLibrary(t *testing.T) {
 	srv := testServer(t)
 	h := srv.Handler()
 	libID, path := addLibraryWithBook(t, srv, h)
 
-	rec, out := doJSON(t, h, "DELETE", "/api/v1/libraries/"+intToStr(libID)+"?mode=keep", nil)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("delete library: %d %s", rec.Code, rec.Body)
-	}
-	if out["deletedFiles"].(float64) != 0 {
-		t.Errorf("keep mode reported deleted files: %v", out)
+	rec, _ := doJSON(t, h, "DELETE", "/api/v1/libraries/"+intToStr(libID)+"?mode=files", nil)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("deleting the library: got %d, want 400", rec.Code)
 	}
 	if _, err := os.Stat(path); err != nil {
-		t.Errorf("file must survive mode=keep: %v", err)
+		t.Fatalf("a refused delete touched the file: %v", err)
 	}
-	if n := libraryCount(t, h); n != 0 {
-		t.Errorf("library still listed: %d", n)
-	}
-	// the book leaves the library view but keeps its catalog row
-	rec, out = doJSON(t, h, "GET", "/api/v1/books?libraryId="+intToStr(libID), nil)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("list books: %d %s", rec.Code, rec.Body)
-	}
-	if books, _ := out["books"].([]any); len(books) != 0 {
-		t.Errorf("deleted library still lists books: %v", books)
-	}
-}
-
-func TestDeleteLibraryFilesMode(t *testing.T) {
-	srv := testServer(t)
-	h := srv.Handler()
-	libID, path := addLibraryWithBook(t, srv, h)
-
-	rec, out := doJSON(t, h, "DELETE", "/api/v1/libraries/"+intToStr(libID)+"?mode=files", nil)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("delete library: %d %s", rec.Code, rec.Body)
-	}
-	if out["deletedFiles"].(float64) != 1 {
-		t.Errorf("deletedFiles = %v, want 1", out["deletedFiles"])
-	}
-	if _, err := os.Stat(path); !os.IsNotExist(err) {
-		t.Error("mode=files must delete the library's files")
-	}
-	if n := libraryCount(t, h); n != 0 {
-		t.Errorf("library still listed: %d", n)
-	}
-}
-
-func TestDeleteLibraryRejectsBadMode(t *testing.T) {
-	srv := testServer(t)
-	h := srv.Handler()
-	libID, _ := addLibraryWithBook(t, srv, h)
-
-	rec, _ := doJSON(t, h, "DELETE", "/api/v1/libraries/"+intToStr(libID)+"?mode=nuke", nil)
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("status = %d, want 400", rec.Code)
+	rec, _ = doJSON(t, h, "POST", "/api/v1/libraries", map[string]string{"name": "Second", "rootPath": filepath.Join(srv.mediaRoot, "second")})
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("creating a second library: got %d, want 409", rec.Code)
 	}
 	if n := libraryCount(t, h); n != 1 {
-		t.Errorf("rejected delete must leave the library alone: %d", n)
-	}
-}
-
-func TestDeleteLibraryUnknownID(t *testing.T) {
-	h := testServer(t).Handler()
-	rec, _ := doJSON(t, h, "DELETE", "/api/v1/libraries/404", nil)
-	if rec.Code != http.StatusNotFound {
-		t.Fatalf("status = %d, want 404", rec.Code)
-	}
-}
-
-// The per-book delete has three modes now; "library" is the one that leaves
-// the file alone.
-func TestRemoveBookLibraryModeKeepsFile(t *testing.T) {
-	srv := testServer(t)
-	h := srv.Handler()
-	libID, path := addLibraryWithBook(t, srv, h)
-
-	rec, _ := doJSON(t, h, "DELETE",
-		"/api/v1/libraries/"+intToStr(libID)+"/books/1?mode=library", nil)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("remove book: %d %s", rec.Code, rec.Body)
-	}
-	if _, err := os.Stat(path); err != nil {
-		t.Errorf("mode=library must leave the file on disk: %v", err)
-	}
-	rec, out := doJSON(t, h, "GET", "/api/v1/books?libraryId="+intToStr(libID), nil)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("list books: %d", rec.Code)
-	}
-	if books, _ := out["books"].([]any); len(books) != 0 {
-		t.Errorf("removed book still in the library: %v", books)
+		t.Fatalf("libraries = %d, want 1", n)
 	}
 }

@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/getbooky/booky/internal/catalog"
 	"github.com/getbooky/booky/internal/epub"
 	"github.com/getbooky/booky/internal/metadata"
 	"github.com/getbooky/booky/internal/settings"
@@ -45,8 +46,14 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 	}
 	out := make([]searchResult, len(results))
 	authors := map[string]bool{}
+	acc := s.access(r)
 	for i, m := range results {
-		inLib, mon := s.Catalog.MonitorState(m)
+		bookID, inLib, mon := s.Catalog.MonitorState(m)
+		// "in library" means on YOUR shelf: a book shared with other people
+		// reads as not-yet-added, and adding it shares it with you
+		if inLib && !s.mayFile(acc, bookID) {
+			inLib, mon = false, false
+		}
 		out[i] = searchResult{BookMeta: m, InLibrary: inLib, Monitored: mon}
 		for _, a := range m.Authors {
 			if _, seen := authors[a]; !seen {
@@ -168,7 +175,9 @@ func (s *Server) handleBooks(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"books": s.bookScope(a).filter(books)})
+	books = s.bookScope(a).filter(books)
+	a.redactTags(books)
+	writeJSON(w, http.StatusOK, map[string]any{"books": books})
 }
 
 func (s *Server) handleBook(w http.ResponseWriter, r *http.Request) {
@@ -185,7 +194,9 @@ func (s *Server) handleBook(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusNotFound, errors.New("book not found"))
 		return
 	}
-	writeJSON(w, http.StatusOK, book)
+	one := []catalog.Book{*book}
+	s.access(r).redactTags(one)
+	writeJSON(w, http.StatusOK, one[0])
 }
 
 // clientBookMeta is a BookMeta as the client sends it back: the search
@@ -200,9 +211,30 @@ type clientBookMeta struct {
 }
 
 type addBookRequest struct {
-	Meta      clientBookMeta `json:"meta"`
-	LibraryID int64          `json:"libraryId"`
-	Monitored bool           `json:"monitored"`
+	Meta clientBookMeta `json:"meta"`
+	// LibraryID may be left out: there is one library
+	LibraryID int64 `json:"libraryId"`
+	Monitored bool  `json:"monitored"`
+	// TagIDs is who the book is for. An admin may name any tags (none means
+	// admin-only); anyone else picks among their own, defaulting to their
+	// personal tag.
+	TagIDs []int64 `json:"tagIds"`
+}
+
+// audienceFor validates the tags a caller asked to give a book.
+func (s *Server) audienceFor(a access, tagIDs []int64) ([]int64, error) {
+	for _, id := range tagIDs {
+		if _, err := s.Catalog.GetTag(id); err != nil {
+			return nil, fmt.Errorf("tag %d not found", id)
+		}
+		if !a.admin() && !a.user.HasTag(id) {
+			return nil, fmt.Errorf("you can only share books with tags you hold")
+		}
+	}
+	if len(tagIDs) == 0 && !a.admin() && a.user != nil && a.user.PersonalTag != 0 {
+		return []int64{a.user.PersonalTag}, nil
+	}
+	return tagIDs, nil
 }
 
 // handleAddBook adds a book from metadata-search results: enrich across the
@@ -214,10 +246,19 @@ func (s *Server) handleAddBook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if req.LibraryID == 0 {
-		writeErr(w, http.StatusBadRequest, errors.New("libraryId required"))
+		req.LibraryID = s.Catalog.TheLibrary()
+	}
+	if req.LibraryID == 0 {
+		writeErr(w, http.StatusBadRequest, errors.New("set up the library first"))
 		return
 	}
 	if !s.requireLibrary(w, r, req.LibraryID) {
+		return
+	}
+	a := s.access(r)
+	audience, err := s.audienceFor(a, req.TagIDs)
+	if err != nil {
+		writeErr(w, http.StatusForbidden, err)
 		return
 	}
 	meta := s.Chain.Enrich(r.Context(), req.Meta.BookMeta)
@@ -229,6 +270,16 @@ func (s *Server) handleAddBook(w http.ResponseWriter, r *http.Request) {
 	if err := s.Catalog.AddToLibrary(bookID, req.LibraryID, req.Monitored); err != nil {
 		writeErr(w, http.StatusInternalServerError, err)
 		return
+	}
+	// adding a book someone else already has shares it with the new audience
+	// — the file is on disk once either way
+	if len(audience) > 0 {
+		ch, err := s.Catalog.AddBookTags(bookID, audience)
+		if err != nil {
+			writeErr(w, http.StatusInternalServerError, err)
+			return
+		}
+		s.tagsChanged([]catalog.TagChange{ch}, true)
 	}
 	if err := s.Covers.Ensure(r.Context(), bookID, meta.CoverURL); err != nil {
 		// non-fatal: cover retries on next refresh
@@ -301,6 +352,11 @@ func (s *Server) handleCreateLibrary(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	req.RootPath = root
+	// one library per install: everything after it is a tag
+	if s.Catalog.TheLibrary() != 0 {
+		writeErr(w, http.StatusConflict, errors.New("the library already exists — create a tag to share books with someone"))
+		return
+	}
 	profileID, err := s.Catalog.EnsureDefaultProfile()
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err)
@@ -321,6 +377,12 @@ func (s *Server) handleCreateLibrary(w http.ResponseWriter, r *http.Request) {
 // drop out of the Library view, staying catalog-only on author/series pages.
 func (s *Server) handleDeleteLibrary(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAdmin(w, r) {
+		return
+	}
+	// there is one library holding every book; deleting it would empty the
+	// install. Sharing is done with tags now.
+	if s.Catalog.TheLibrary() != 0 {
+		writeErr(w, http.StatusBadRequest, errors.New("there's one library holding every book — share and unshare with tags instead"))
 		return
 	}
 	libraryID, err := strconv.ParseInt(r.PathValue("id"), 10, 64)

@@ -263,6 +263,12 @@ func (s *Store) RemoveBookFromLibrary(bookID, libraryID int64, mode string) erro
 		libraryID, bookID); err != nil {
 		return err
 	}
+	// Out of the library means shared with nobody: a later re-add starts from
+	// the audience its adder picks, not whoever had it before.
+	if _, err := s.db.Exec(`DELETE FROM book_tags WHERE book_id = ?
+		AND NOT EXISTS (SELECT 1 FROM library_books WHERE book_id = ?)`, bookID, bookID); err != nil {
+		return err
+	}
 	// An author or series with nothing left in any library stops being tracked
 	// — no point syncing a bibliography nobody holds. A hand-added author is
 	// exempt: browsing their catalog-only bibliography is exactly what they're
@@ -580,5 +586,29 @@ func (s *Store) AttachMonitoredSeriesBooks(authorID int64) (int, error) {
 		return 0, err
 	}
 	n, _ := res.RowsAffected()
+	if err := s.InheritSeriesTags(0, authorID); err != nil {
+		return int(n), err
+	}
 	return int(n), nil
+}
+
+// InheritSeriesTags gives untagged shelved books in a series the tags their
+// shelved siblings carry — a new entry joining a Kids series reaches the kids
+// like the rest of it did. Books that already carry any tag are left alone:
+// someone chose those. Scope it by seriesID, or by authorID for all of an
+// author's series (pass 0 for the other).
+func (s *Store) InheritSeriesTags(seriesID, authorID int64) error {
+	_, err := s.db.Exec(`
+		INSERT OR IGNORE INTO book_tags (book_id, tag_id)
+		SELECT DISTINCT b.id, bt.tag_id
+		FROM books b
+		JOIN library_books lb ON lb.book_id = b.id
+		JOIN series sr ON sr.id = b.series_id
+		JOIN books sib ON sib.series_id = b.series_id AND sib.id != b.id
+		JOIN library_books slb ON slb.book_id = sib.id
+		JOIN book_tags bt ON bt.book_id = sib.id
+		WHERE (? = 0 OR b.series_id = ?) AND (? = 0 OR sr.author_id = ?)
+		  AND NOT EXISTS (SELECT 1 FROM book_tags x WHERE x.book_id = b.id)`,
+		seriesID, seriesID, authorID, authorID)
+	return err
 }

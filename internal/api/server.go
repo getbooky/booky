@@ -51,6 +51,9 @@ type Server struct {
 	// sources — is fenced to this mount, keeping /config, /etc and the binary
 	// itself out of reach. Tests repoint it at a temp dir.
 	mediaRoot string
+	// the paced Kindle auto-send worker, started on first use
+	kindleOnce sync.Once
+	kindleJobs chan kindleJob
 }
 
 type Deps struct {
@@ -153,9 +156,16 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/v1/auth/me", s.handleMe)
 	mux.HandleFunc("GET /api/v1/users", s.handleUsers)
 	mux.HandleFunc("POST /api/v1/users", s.handleCreateUser)
-	mux.HandleFunc("PUT /api/v1/users/{id}/libraries", s.handleSetUserLibraries)
+	mux.HandleFunc("PUT /api/v1/users/{id}/tags", s.handleSetUserTags)
 	mux.HandleFunc("DELETE /api/v1/users/{id}", s.handleDeleteUser)
-	mux.HandleFunc("PUT /api/v1/libraries/{id}/opds", s.handleSetOPDS)
+	mux.HandleFunc("GET /api/v1/auth/opds", s.handleOPDSStatus)
+	mux.HandleFunc("GET /api/v1/tags", s.handleTags)
+	mux.HandleFunc("POST /api/v1/tags", s.handleCreateTag)
+	mux.HandleFunc("PATCH /api/v1/tags/{id}", s.handleRenameTag)
+	mux.HandleFunc("DELETE /api/v1/tags/{id}", s.handleDeleteTag)
+	mux.HandleFunc("PUT /api/v1/tags/{id}/members", s.handleSetTagMembers)
+	mux.HandleFunc("PUT /api/v1/books/{id}/tags", s.handleSetBookTags)
+	mux.HandleFunc("POST /api/v1/tags/bulk", s.handleBulkTags)
 	mux.HandleFunc("GET /api/v1/devices", s.handleDevices)
 	mux.HandleFunc("POST /api/v1/devices", s.handleCreateDevice)
 	mux.HandleFunc("PUT /api/v1/devices/{id}", s.handleUpdateDevice)

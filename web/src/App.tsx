@@ -3,7 +3,7 @@ import { Toaster, toast } from "sonner"
 import { Search, Settings as SettingsIcon } from "lucide-react"
 import { cn } from "@/lib/utils"
 import { api } from "@/api"
-import type { ApiAuthor, ApiBook, ApiLibrary, ApiSeries, ApiUser } from "@/api"
+import type { ApiAuthor, ApiBook, ApiLibrary, ApiSeries, ApiTag, ApiUser } from "@/api"
 import {
   DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel,
   DropdownMenuSeparator, DropdownMenuTrigger,
@@ -13,6 +13,7 @@ import { Sidebar, BottomNav } from "@/components/Sidebar"
 import type { BrowseView, CustomScope } from "@/components/Sidebar"
 import { AddScopeDialog } from "@/components/AddScopeDialog"
 import { LibraryView } from "@/views/Library"
+import { HomeView } from "@/views/Home"
 import type { Scope, ScopeFilter } from "@/views/Library"
 import { SeriesView } from "@/views/Series"
 import { SeriesDetailView } from "@/views/SeriesDetail"
@@ -23,8 +24,7 @@ import { WantedView } from "@/views/Wanted"
 import { ActivityView } from "@/views/Activity"
 import { SettingsView, ReviewScreen } from "@/views/Settings"
 import { AddBookDialog } from "@/components/AddBookDialog"
-import { AddLibraryDialog } from "@/components/AddLibraryDialog"
-import { DeleteLibraryDialog } from "@/components/DeleteLibraryDialog"
+import { useTags } from "@/components/TagPills"
 import { BookDetail } from "@/components/BookDetail"
 import { LoginView } from "@/views/Login"
 import { ReaderView } from "@/views/Reader"
@@ -42,6 +42,8 @@ type Nav = {
   view: View
   scope: Scope
   library: ApiLibrary | null
+  /** the library filtered to one tag's books (sidebar "Shared with") */
+  tag: ApiTag | null
   customScope: CustomScope | null
   book: ApiBook | null
   author: ApiAuthor | null
@@ -51,7 +53,7 @@ type Nav = {
   reader: ApiBook | null
 }
 
-const HOME: Nav = { view: "library", scope: "all", library: null, customScope: null, book: null, author: null, series: null, review: null, reader: null }
+const HOME: Nav = { view: "home", scope: "all", library: null, tag: null, customScope: null, book: null, author: null, series: null, review: null, reader: null }
 
 const routeFor = (n: Nav): string => {
   if (n.reader) return `#/read/${n.reader.id}`
@@ -59,6 +61,7 @@ const routeFor = (n: Nav): string => {
   if (n.book) return `#/book/${n.book.id}`
   if (n.view === "library") {
     if (n.customScope) return `#/scope/${encodeURIComponent(n.customScope.name)}`
+    if (n.tag) return `#/tag/${n.tag.id}`
     if (n.library) return `#/library/${n.library.id}`
     if (n.scope !== "all") return `#/${n.scope}`
     return "#/library"
@@ -74,6 +77,7 @@ const routeFor = (n: Nav): string => {
 const navFromHash = (): Nav => {
   const head = window.location.hash.replace(/^#\/?/, "").split("/")[0]
   switch (head) {
+    case "library": return { ...HOME, view: "library" }
     case "series": return { ...HOME, view: "series" }
     case "author": case "authors": return { ...HOME, view: "author" }
     case "calendar": case "wanted": case "activity": return { ...HOME, view: head as View }
@@ -107,8 +111,6 @@ function BookyApp({ user, usersExist, onLoggedOut }: { user: ApiUser | null; use
   const access = useMemo(() => accessFor(user), [user])
   const [nav, setNav] = useState<Nav>(() => (window.history.state?.nav as Nav) ?? navFromHash())
   const [addOpen, setAddOpen] = useState(false)
-  const [addLibOpen, setAddLibOpen] = useState(false)
-  const [deleteLib, setDeleteLib] = useState<ApiLibrary | null>(null)
   const [refreshTick, setRefreshTick] = useState(0)
   const [addScopeOpen, setAddScopeOpen] = useState(false)
 
@@ -160,7 +162,8 @@ function BookyApp({ user, usersExist, onLoggedOut }: { user: ApiUser | null; use
   // covers our own actions; the interval covers everyone else's.
   const libs = useApi(() => api.libraries(), 10_000)
   const libraries = libs.data?.libraries ?? []
-  const bumped = () => { setRefreshTick(t => t + 1); libs.reload() }
+  const tagsQuery = useTags()
+  const bumped = () => { setRefreshTick(t => t + 1); libs.reload(); tagsQuery.reload() }
 
   // First run: the wizard greets exactly while NO account exists — its first
   // step (creating the admin) is the one mandatory piece of setup, and once
@@ -204,7 +207,8 @@ function BookyApp({ user, usersExist, onLoggedOut }: { user: ApiUser | null; use
     <AccessProvider value={access}>
     <div className="flex min-h-screen">
       <Sidebar
-        view={nav.view} activeLibraryId={nav.library?.id ?? null} scope={nav.scope} libraries={libraries}
+        view={nav.view} activeTagId={nav.tag?.id ?? null} scope={nav.scope}
+        library={libraries[0] ?? null} tags={tagsQuery.tags} personalTagId={access.personalTagId}
         customScopes={customScopes} activeCustomScope={nav.customScope?.name ?? null}
         onAddScope={() => setAddScopeOpen(true)}
         onSelectCustomScope={cs => go({ view: "library", customScope: cs })}
@@ -214,15 +218,12 @@ function BookyApp({ user, usersExist, onLoggedOut }: { user: ApiUser | null; use
           toast(`Scope "${name}" deleted`)
         }}
         onBrowse={v => go({ view: v })}
-        onSelectLibrary={l => go({ view: "library", library: l })}
+        onSelectTag={t => go({ view: "library", tag: t })}
         onSelectScope={s => go({ view: "library", scope: s })}
         canManage={access.isAdmin}
-        onAddLibrary={() => setAddLibOpen(true)}
         onScan={scan}
         onRefresh={refresh}
         onReview={l => go({ view: "library", review: l })}
-        onEditLibrary={() => go({ view: "settings" })}
-        onDeleteLibrary={setDeleteLib}
       />
 
       {/* main */}
@@ -291,8 +292,8 @@ function BookyApp({ user, usersExist, onLoggedOut }: { user: ApiUser | null; use
                       const author = ((await api.authors()).authors ?? []).find(a => a.id === b.authorId)
                       if (author) go({ view: "author", author })
                     }} />
-                : <LibraryView key={`${refreshTick}-${nav.library?.id ?? 0}-${nav.scope}-${nav.customScope?.name ?? ""}`}
-                    library={nav.library} scope={nav.scope} libraries={libraries}
+                : <LibraryView key={`${refreshTick}-${nav.tag?.id ?? 0}-${nav.scope}-${nav.customScope?.name ?? ""}`}
+                    library={null} tag={nav.tag} scope={nav.scope} libraries={libraries}
                     initialFilters={nav.customScope?.filters as ScopeFilter[] | undefined}
                     scopeTitle={nav.customScope?.name}
                     onOpenBook={b => go({ view: "library", book: b })}
@@ -306,7 +307,13 @@ function BookyApp({ user, usersExist, onLoggedOut }: { user: ApiUser | null; use
                       if (series) go({ view: "series", series })
                     }}
                     onRead={openReader}
-                    onSelectLibrary={l => go({ view: "library", library: l })} />)}
+                    onSelectTag={t => go({ view: "library", tag: t })} />)}
+              {nav.view === "home" && (
+                <HomeView key={refreshTick} libraries={libraries} userName={user?.username}
+                  onOpenBook={b => go({ view: "library", book: b })}
+                  onOpenTag={t => go({ view: "library", tag: t })}
+                  onBrowse={v => go({ view: v })} />
+              )}
               {nav.view === "series" && (nav.series
                 ? <SeriesDetailView key={nav.series.id} series={nav.series}
                     onBack={back}
@@ -342,13 +349,6 @@ function BookyApp({ user, usersExist, onLoggedOut }: { user: ApiUser | null; use
       {nav.reader && <ReaderView key={nav.reader.id} book={nav.reader} onClose={back} />}
 
       <AddBookDialog open={addOpen} onOpenChange={setAddOpen} libraries={libraries} onAdded={bumped} />
-      <AddLibraryDialog open={addLibOpen} onOpenChange={setAddLibOpen} onCreated={bumped} />
-      <DeleteLibraryDialog library={deleteLib} onOpenChange={v => { if (!v) setDeleteLib(null) }}
-        onDeleted={l => {
-          // don't strand the user on a library that no longer exists
-          if (navRef.current.library?.id === l.id) go({ view: "library" }, { replace: true })
-          bumped()
-        }} />
       <SetupWizard open={wizardOpen} onOpenChange={closeWizard} onDone={bumped} />
       <AddScopeDialog open={addScopeOpen} onOpenChange={setAddScopeOpen}
         onSave={async (name, filters) => {

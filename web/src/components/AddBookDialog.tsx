@@ -6,6 +6,8 @@ import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigge
 import { MiniCover, Cover, hashColors } from "@/components/Cover"
 import { Tag } from "@/components/bits"
 
+import { TagPicker, useTags } from "@/components/TagPills"
+import { useAccess } from "@/lib/access"
 import { api } from "@/api"
 import type { ApiLibrary, SearchResult } from "@/api"
 import { toast } from "sonner"
@@ -112,6 +114,12 @@ export function AddBookDialog({ open, onOpenChange, libraries, onAdded }: {
   const [searching, setSearching] = useState(false)
   const [preview, setPreview] = useState<SearchResult | null>(null)
   const timer = useRef<ReturnType<typeof setTimeout>>(undefined)
+  // who the book is for. An admin starts from nobody (admin-only) and picks;
+  // anyone else starts on their own shelf and may share with tags they hold.
+  const { tags } = useTags()
+  const { isAdmin, personalTagId } = useAccess()
+  const [audience, setAudience] = useState<number[] | null>(null)
+  const forTags = audience ?? (isAdmin || !personalTagId ? [] : [personalTagId])
 
   // debounce keystrokes so each pause = one provider query
   useEffect(() => {
@@ -141,9 +149,10 @@ export function AddBookDialog({ open, onOpenChange, libraries, onAdded }: {
 
   const add = async (r: SearchResult, libraryId: number) => {
     try {
-      const book = await api.addBook(r, libraryId, true)
-      const libName = libraries.find(l => l.id === libraryId)?.name
-      toast.success(`${book.title} added & monitored${libName && libraries.length > 1 ? ` in ${libName}` : ""}`)
+      const book = await api.addBook(r, libraryId, true, forTags)
+      const who = forTags.length === 0 ? " — admin-only until you share it"
+        : forTags.length === 1 && forTags[0] === personalTagId ? " to your shelf" : ""
+      toast.success(`${book.title} added & monitored${who}`)
       onAdded()
       close(false)
     } catch (e) {
@@ -202,6 +211,13 @@ export function AddBookDialog({ open, onOpenChange, libraries, onAdded }: {
                 <Input autoFocus value={q} onChange={e => setQ(e.target.value)}
                   placeholder="Title, author, or ISBN…" className="pl-9" />
               </div>
+              {tags.length > 0 && (
+                <div className="mt-3 flex flex-wrap items-center gap-x-2.5 gap-y-1.5">
+                  <span className="mono-label text-faint">For</span>
+                  <TagPicker tags={tags} value={forTags} onChange={setAudience}
+                    hidePersonal={isAdmin} keepPersonal={personalTagId} />
+                </div>
+              )}
             </DialogHeader>
             <div className="h-[min(380px,60dvh)] overflow-y-auto px-2 py-2">
               {searching && <div className="mono-label px-3 py-4 text-faint">searching providers…</div>}

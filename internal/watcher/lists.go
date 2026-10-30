@@ -21,6 +21,8 @@ type WatchedList struct {
 	LastChecked      string `json:"lastChecked,omitempty"`
 	LastError        string `json:"lastError,omitempty"`
 	ItemCount        int    `json:"itemCount"`
+	// TagIDs are who the list's books are for — every book it adds gets them
+	TagIDs []int64 `json:"tagIds"`
 }
 
 func validScope(s string) bool  { return s == "book" || s == "series" || s == "author" }
@@ -118,7 +120,18 @@ func (w *Watcher) listQuery(id int64) ([]WatchedList, error) {
 		}
 		out = append(out, l)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	// tags are read after the cursor closes — one statement per connection
+	for i := range out {
+		tags, err := w.catalog.ListTagIDs(out[i].ID)
+		if err != nil {
+			return nil, err
+		}
+		out[i].TagIDs = tags
+	}
+	return out, nil
 }
 
 // knownItems returns the external ids a list has already routed → book id.

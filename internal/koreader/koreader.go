@@ -27,10 +27,14 @@ func New(database *sql.DB, keeper *secrets.Keeper) *Store {
 }
 
 type Device struct {
-	ID        int64   `json:"id"`
-	Name      string  `json:"name"`
-	Libraries []int64 `json:"libraryIds"`     // browsable/downloadable
-	AutoIDs   []int64 `json:"autoLibraryIds"` // auto-download new arrivals
+	ID   int64  `json:"id"`
+	Name string `json:"name"`
+	// TagIDs are the tags the device carries (browse/download) and AutoIDs
+	// the ones it auto-downloads. Both are capped by the OWNER's current
+	// tags at every request. The columns held library ids before migration
+	// 0024; libraries became tags of the same id, so they carry over as-is.
+	TagIDs    []int64 `json:"tagIds"`
+	AutoIDs   []int64 `json:"autoTagIds"`
 	CreatedAt string  `json:"createdAt"`
 	LastSync  string  `json:"lastSync,omitempty"`
 	// OwnerID is the account that paired the device. Everyone manages their
@@ -45,21 +49,12 @@ type Device struct {
 
 const deviceColumns = `id, name, token, library_ids, auto_ids, created_at, COALESCE(last_sync, ''), owner_user_id`
 
-// Create registers a device with a fresh token, owned by ownerID. Auto
-// libraries must be a subset of browsable ones. The caller is responsible for
-// having already checked that the owner may reach every library listed.
-func (s *Store) Create(name string, libraries, autoIDs []int64, ownerID int64) (*Device, error) {
-	if name == "" || len(libraries) == 0 {
-		return nil, fmt.Errorf("name and at least one library required")
-	}
-	allowed := map[int64]bool{}
-	for _, id := range libraries {
-		allowed[id] = true
-	}
-	for _, id := range autoIDs {
-		if !allowed[id] {
-			return nil, fmt.Errorf("auto-download library %d is not in the device's library list", id)
-		}
+// Create registers a device with a fresh token, owned by ownerID. Auto tags
+// must be a subset of the device's tags. The caller is responsible for having
+// already checked that the owner holds every tag listed.
+func (s *Store) Create(name string, tags, autoIDs []int64, ownerID int64) (*Device, error) {
+	if err := checkTags(name, tags, autoIDs); err != nil {
+		return nil, err
 	}
 	// the database gets the hash (lookup) and a sealed copy (zip rebuilds) —
 	// never the raw token, so a stolen booky.db can't sync anyone's shelf
@@ -69,7 +64,7 @@ func (s *Store) Create(name string, libraries, autoIDs []int64, ownerID int64) (
 		return nil, err
 	}
 	res, err := s.db.Exec(`INSERT INTO devices (name, token, token_ct, library_ids, auto_ids, owner_user_id) VALUES (?, ?, ?, ?, ?, ?)`,
-		name, auth.HashToken(raw), ct, idsJSON(libraries), idsJSON(autoIDs), ownerID)
+		name, auth.HashToken(raw), ct, idsJSON(tags), idsJSON(autoIDs), ownerID)
 	if err != nil {
 		return nil, err
 	}
@@ -81,21 +76,12 @@ func (s *Store) Create(name string, libraries, autoIDs []int64, ownerID int64) (
 // its sealed copy) survive untouched, so the plugin already on the device
 // keeps syncing — the server computes sync responses from the STORED lists,
 // while the zip's own baked lists go stale until it's re-downloaded.
-func (s *Store) Update(id int64, name string, libraries, autoIDs []int64) (*Device, error) {
-	if name == "" || len(libraries) == 0 {
-		return nil, fmt.Errorf("name and at least one library required")
-	}
-	allowed := map[int64]bool{}
-	for _, lid := range libraries {
-		allowed[lid] = true
-	}
-	for _, lid := range autoIDs {
-		if !allowed[lid] {
-			return nil, fmt.Errorf("auto-download library %d is not in the device's library list", lid)
-		}
+func (s *Store) Update(id int64, name string, tags, autoIDs []int64) (*Device, error) {
+	if err := checkTags(name, tags, autoIDs); err != nil {
+		return nil, err
 	}
 	res, err := s.db.Exec(`UPDATE devices SET name = ?, library_ids = ?, auto_ids = ? WHERE id = ?`,
-		name, idsJSON(libraries), idsJSON(autoIDs), id)
+		name, idsJSON(tags), idsJSON(autoIDs), id)
 	if err != nil {
 		return nil, err
 	}
@@ -179,11 +165,11 @@ func (s *Store) scanOne(row *sql.Row) (*Device, error) {
 	return &d, nil
 }
 
-// finish fills in the parsed library lists and zones the timestamps. "Last
+// finish fills in the parsed tag lists and zones the timestamps. "Last
 // sync 21:14" is only meaningful in the reader's own timezone — the column
 // is UTC and says so nowhere, so the zone goes on here (db.SQLTime).
 func (d *Device) finish(libs, autos string) {
-	d.Libraries = parseIDs(libs)
+	d.TagIDs = parseIDs(libs)
 	d.AutoIDs = parseIDs(autos)
 	d.CreatedAt, d.LastSync = db.SQLTime(d.CreatedAt), db.SQLTime(d.LastSync)
 }
@@ -223,9 +209,36 @@ func (s *Store) TouchSync(id int64) {
 	_, _ = s.db.Exec(`UPDATE devices SET last_sync = datetime('now') WHERE id = ?`, id)
 }
 
-func (d *Device) MayAccess(libraryID int64) bool {
-	for _, id := range d.Libraries {
-		if id == libraryID {
+func checkTags(name string, tags, autoIDs []int64) error {
+	if name == "" || len(tags) == 0 {
+		return fmt.Errorf("name and at least one tag required")
+	}
+	allowed := map[int64]bool{}
+	for _, id := range tags {
+		allowed[id] = true
+	}
+	for _, id := range autoIDs {
+		if !allowed[id] {
+			return fmt.Errorf("auto-download tag %d is not one of the device's tags", id)
+		}
+	}
+	return nil
+}
+
+// HasTag reports whether the device carries a tag.
+func (d *Device) HasTag(tagID int64) bool {
+	for _, id := range d.TagIDs {
+		if id == tagID {
+			return true
+		}
+	}
+	return false
+}
+
+// AutoFor reports whether the device auto-downloads a tag.
+func (d *Device) AutoFor(tagID int64) bool {
+	for _, id := range d.AutoIDs {
+		if id == tagID {
 			return true
 		}
 	}

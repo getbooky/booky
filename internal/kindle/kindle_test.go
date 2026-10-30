@@ -24,34 +24,28 @@ func testStore(t *testing.T) *Store {
 
 func TestDeviceLifecycle(t *testing.T) {
 	s := testStore(t)
-	d, err := s.CreateDevice(7, "Paperwhite", "trevor_7fk2@kindle.com", []int64{1, 2}, []int64{1})
+	d, err := s.CreateDevice(7, "Paperwhite", "trevor_7fk2@kindle.com", []int64{1})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if d.OwnerID != 7 || d.Email != "trevor_7fk2@kindle.com" {
 		t.Fatalf("device = %+v", d)
 	}
-	if !d.MayAccess(2) || d.MayAccess(3) {
-		t.Error("MayAccess wrong")
-	}
-	if !d.AutoFor(1) || d.AutoFor(2) {
+	if !d.AutoFor([]int64{3, 1}) || d.AutoFor([]int64{2}) {
 		t.Error("AutoFor wrong")
 	}
 
-	// auto outside the library list is rejected
-	if _, err := s.CreateDevice(7, "Bad", "x@kindle.com", []int64{1}, []int64{9}); err == nil {
-		t.Fatal("auto-send library outside device list must be rejected")
-	}
 	// junk input rejected
-	if _, err := s.CreateDevice(7, "NoEmail", "not-an-email", []int64{1}, nil); err == nil {
+	if _, err := s.CreateDevice(7, "NoEmail", "not-an-email", nil); err == nil {
 		t.Fatal("non-email address must be rejected")
 	}
-	if _, err := s.CreateDevice(7, "NoLibs", "y@kindle.com", nil, nil); err == nil {
-		t.Fatal("device without libraries must be rejected")
+	// a device with no auto-send tags is fine: manual sends only
+	if _, err := s.CreateDevice(7, "Manual", "y@kindle.com", nil); err != nil {
+		t.Fatalf("manual-only device rejected: %v", err)
 	}
 
 	all, err := s.ListDevices()
-	if err != nil || len(all) != 1 {
+	if err != nil || len(all) != 2 {
 		t.Fatalf("list = %+v, %v", all, err)
 	}
 	if err := s.RemoveDevice(d.ID); err != nil {

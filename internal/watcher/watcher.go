@@ -35,6 +35,9 @@ type Watcher struct {
 	// Backups, when set, are created on a weekly tick and pruned to the
 	// configured keep count.
 	Backups *backup.Manager
+	// OnTagged hears about every tag the watcher gives a book (a list's
+	// audience arriving), so send-on-tag can email books already on disk.
+	OnTagged func(catalog.TagChange)
 	// Pace spaces consecutive automatic searches (release-day taper, backlog)
 	// so providers never see a burst. Zeroed in tests.
 	Pace time.Duration
@@ -434,6 +437,13 @@ func (w *Watcher) routeBook(ctx context.Context, l *WatchedList, meta metadata.B
 			return 0, err
 		}
 	}
+	// the list's audience gets the book — even one already shelved, since
+	// whoever the list feeds asked for it
+	listTags, err := w.catalog.ListTagIDs(l.ID)
+	if err != nil {
+		return 0, err
+	}
+	w.tagBook(bookID, listTags)
 	if err := w.covers.Ensure(ctx, bookID, meta.CoverURL); err != nil {
 		log.Printf("watcher: cover for %q: %v", meta.Title, err) // retries on refresh
 	}
@@ -455,7 +465,7 @@ func (w *Watcher) routeBook(ctx context.Context, l *WatchedList, meta metadata.B
 		}
 		// author scope = the backlist too: pull the bibliography into the
 		// list's library, monitored, so it all becomes wanted
-		if n, err := w.ExpandAuthor(ctx, book.AuthorID, Attach{LibraryID: l.LibraryID, Monitored: true}); err != nil {
+		if n, err := w.ExpandAuthor(ctx, book.AuthorID, Attach{LibraryID: l.LibraryID, Monitored: true, TagIDs: listTags}); err != nil {
 			log.Printf("watcher: expand backlist for %q: %v", book.Author, err)
 		} else if n > 0 {
 			log.Printf("watcher: %s: %d backlist book(s) for %q", l.Name, n, book.Author)
@@ -746,5 +756,20 @@ func (w *Watcher) pause(ctx context.Context, d time.Duration) bool {
 		return false
 	case <-time.After(d):
 		return true
+	}
+}
+
+// tagBook gives a book tags and reports what actually changed.
+func (w *Watcher) tagBook(bookID int64, tagIDs []int64) {
+	if len(tagIDs) == 0 {
+		return
+	}
+	ch, err := w.catalog.AddBookTags(bookID, tagIDs)
+	if err != nil {
+		log.Printf("watcher: tag book %d: %v", bookID, err)
+		return
+	}
+	if len(ch.Added) > 0 && w.OnTagged != nil {
+		w.OnTagged(ch)
 	}
 }

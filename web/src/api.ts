@@ -25,6 +25,8 @@ export interface ApiBook {
   genres?: string[]
   ratingsCount?: number
   fieldLocks?: Record<string, boolean>
+  /** Tags sharing this book. Plain users only see the tags they hold. */
+  tagIds?: number[]
 }
 
 export interface ApiAuthor {
@@ -133,10 +135,12 @@ export const api = {
     request<{ fieldLocks?: Record<string, boolean> }>(`/api/v1/books/${id}/lock`, {
       method: "PUT", body: JSON.stringify({ field, locked }),
     }),
-  addBook: (meta: SearchResult, libraryId: number, monitored = true) =>
+  /** tagIds: who the book is for. Empty lets the server pick — admin-only
+   * for an admin, the adder's personal tag for anyone else. */
+  addBook: (meta: SearchResult, libraryId: number, monitored = true, tagIds: number[] = []) =>
     request<ApiBook>("/api/v1/books", {
       method: "POST",
-      body: JSON.stringify({ meta, libraryId, monitored }),
+      body: JSON.stringify({ meta, libraryId, monitored, tagIds }),
     }),
   // these three can each land a different image at the same cover URL, so
   // they bump the cover generation on the way out
@@ -185,18 +189,16 @@ export const api = {
     }
     return res.json() as Promise<{ path: string; book: ApiBook }>
   },
-  moveBook: (id: number, fromLibraryId: number, toLibraryId: number) =>
-    request(`/api/v1/books/${id}/library`, {
-      method: "PUT",
-      body: JSON.stringify({ fromLibraryId, toLibraryId }),
-    }),
   editBook: (id: number, fields: Record<string, string>, lock = true) =>
     request<ApiBook>(`/api/v1/books/${id}`, {
       method: "PATCH",
       body: JSON.stringify({ fields, lock }),
     }),
+  /** For a plain user mode=library means "off my shelf"; status "shared"
+   * says the book stays because a tag still shares it with them. */
   removeBook: (libraryId: number, bookId: number, mode: "library" | "file" | "block") =>
-    request(`/api/v1/libraries/${libraryId}/books/${bookId}?mode=${mode}`, { method: "DELETE" }),
+    request<{ status: "removed" | "shared"; detail?: string }>(
+      `/api/v1/libraries/${libraryId}/books/${bookId}?mode=${mode}`, { method: "DELETE" }),
   setBookMonitored: (libraryId: number, bookId: number, monitored: boolean) =>
     request(`/api/v1/libraries/${libraryId}/books/${bookId}/monitored`, {
       method: "PUT",
@@ -423,6 +425,8 @@ export interface ApiWatchedList {
   lastChecked?: string
   lastError?: string
   itemCount: number
+  /** Who the list's books are for. */
+  tagIds: number[] | null
 }
 
 // Create/update payload: sourceRef takes whatever the user pasted (profile
@@ -439,6 +443,7 @@ export interface ListPayload {
   searchOnAdd: boolean
   enabled: boolean
   qualityProfileId?: number
+  tagIds?: number[]
 }
 
 export const watchers = {
@@ -460,15 +465,17 @@ export interface ApiUser {
   username: string
   role: "admin" | "user"
   createdAt: string
-  /** Libraries a 'user' may reach. Always empty for admins, who reach all. */
-  libraryIds: number[] | null
+  /** Every tag the account holds, its personal tag included. Admins see
+   * every book regardless. */
+  tagIds: number[] | null
+  personalTagId: number
 }
 
 export interface ApiDevice {
   id: number
   name: string
-  libraryIds: number[]
-  autoLibraryIds: number[]
+  tagIds: number[]
+  autoTagIds: number[]
   createdAt: string
   lastSync?: string
   /** The account that paired it; users only ever see their own devices. */
@@ -490,29 +497,28 @@ export const delivery = {
   logout: () => request("/api/v1/auth/logout", { method: "POST" }),
 
   users: () => request<{ users: ApiUser[] | null }>("/api/v1/users"),
-  createUser: (username: string, password: string, role: "admin" | "user", libraryIds: number[] = []) =>
+  createUser: (username: string, password: string, role: "admin" | "user", tagIds: number[] = []) =>
     request<{ id: number }>("/api/v1/users", {
-      method: "POST", body: JSON.stringify({ username, password, role, libraryIds }),
+      method: "POST", body: JSON.stringify({ username, password, role, tagIds }),
     }),
-  setUserLibraries: (id: number, libraryIds: number[]) =>
-    request<{ libraryIds: number[] }>(`/api/v1/users/${id}/libraries`, {
-      method: "PUT", body: JSON.stringify({ libraryIds }),
+  setUserTags: (id: number, tagIds: number[]) =>
+    request<ApiUser>(`/api/v1/users/${id}/tags`, {
+      method: "PUT", body: JSON.stringify({ tagIds }),
     }),
   deleteUser: (id: number) => request(`/api/v1/users/${id}`, { method: "DELETE" }),
 
-  setOPDS: (libraryId: number, username: string, password: string) =>
-    request<{ feedUrl: string }>(`/api/v1/libraries/${libraryId}/opds`, {
-      method: "PUT", body: JSON.stringify({ username, password }),
-    }),
+  /** Where the signed-in account's OPDS feed lives; reader apps sign in
+   * with the account's usual login. */
+  opds: () => request<{ username: string; feedPath: string }>("/api/v1/auth/opds"),
 
   devices: () => request<{ devices: ApiDevice[] | null }>("/api/v1/devices"),
-  createDevice: (name: string, libraryIds: number[], autoLibraryIds: number[]) =>
+  createDevice: (name: string, tagIds: number[], autoTagIds: number[]) =>
     request<ApiDevice>("/api/v1/devices", {
-      method: "POST", body: JSON.stringify({ name, libraryIds, autoLibraryIds }),
+      method: "POST", body: JSON.stringify({ name, tagIds, autoTagIds }),
     }),
-  updateDevice: (id: number, name: string, libraryIds: number[], autoLibraryIds: number[]) =>
+  updateDevice: (id: number, name: string, tagIds: number[], autoTagIds: number[]) =>
     request<ApiDevice>(`/api/v1/devices/${id}`, {
-      method: "PUT", body: JSON.stringify({ name, libraryIds, autoLibraryIds }),
+      method: "PUT", body: JSON.stringify({ name, tagIds, autoTagIds }),
     }),
   revokeDevice: (id: number) => request(`/api/v1/devices/${id}`, { method: "DELETE" }),
   pluginZipUrl: (id: number) => `/api/v1/devices/${id}/plugin.zip`,
@@ -531,8 +537,9 @@ export interface ApiKindleDevice {
   id: number
   name: string
   email: string
-  libraryIds: number[]
-  autoLibraryIds: number[]
+  /** Tags this device auto-sends: a book goes once, when it's on disk and
+   * carries one of them. Manual sends take anything the owner can see. */
+  autoTagIds: number[]
   createdAt: string
   lastSent?: string
   ownerId: number
@@ -564,17 +571,53 @@ export const kindle = {
     request("/api/v1/kindle/smtp/test", { method: "POST", body: JSON.stringify({ to }) }),
 
   devices: () => request<{ devices: ApiKindleDevice[] | null }>("/api/v1/kindle/devices"),
-  createDevice: (name: string, email: string, libraryIds: number[], autoLibraryIds: number[]) =>
+  createDevice: (name: string, email: string, autoTagIds: number[]) =>
     request<ApiKindleDevice>("/api/v1/kindle/devices", {
-      method: "POST", body: JSON.stringify({ name, email, libraryIds, autoLibraryIds }),
+      method: "POST", body: JSON.stringify({ name, email, autoTagIds }),
     }),
-  updateDevice: (id: number, name: string, email: string, libraryIds: number[], autoLibraryIds: number[]) =>
+  updateDevice: (id: number, name: string, email: string, autoTagIds: number[]) =>
     request<ApiKindleDevice>(`/api/v1/kindle/devices/${id}`, {
-      method: "PUT", body: JSON.stringify({ name, email, libraryIds, autoLibraryIds }),
+      method: "PUT", body: JSON.stringify({ name, email, autoTagIds }),
     }),
   removeDevice: (id: number) => request(`/api/v1/kindle/devices/${id}`, { method: "DELETE" }),
   testDevice: (id: number) => request(`/api/v1/kindle/devices/${id}/test`, { method: "POST", body: "{}" }),
 
   sendBook: (bookId: number, deviceId: number) =>
     request(`/api/v1/books/${bookId}/send`, { method: "POST", body: JSON.stringify({ deviceId }) }),
+}
+
+/* ---------- tags ---------- */
+
+export interface ApiTag {
+  id: number
+  name: string
+  /** Set on a personal tag: the one account it belongs to. */
+  ownerUserId?: number
+  personal: boolean
+  /** Admin listings only. */
+  bookCount: number
+  memberIds: number[] | null
+}
+
+export type BulkTagResult =
+  | { needsConfirm: true; kindleSends: number; kindleDevices: number }
+  | { updated: number; needsConfirm?: undefined }
+
+export const tags = {
+  list: () => request<{ tags: ApiTag[] }>("/api/v1/tags"),
+  create: (name: string, memberIds: number[] = []) =>
+    request<{ id: number }>("/api/v1/tags", { method: "POST", body: JSON.stringify({ name, memberIds }) }),
+  rename: (id: number, name: string) =>
+    request(`/api/v1/tags/${id}`, { method: "PATCH", body: JSON.stringify({ name }) }),
+  remove: (id: number) => request(`/api/v1/tags/${id}`, { method: "DELETE" }),
+  setMembers: (id: number, memberIds: number[]) =>
+    request(`/api/v1/tags/${id}/members`, { method: "PUT", body: JSON.stringify({ memberIds }) }),
+  setBookTags: (bookId: number, tagIds: number[]) =>
+    request<{ tagIds: number[] }>(`/api/v1/books/${bookId}/tags`, { method: "PUT", body: JSON.stringify({ tagIds }) }),
+  /** A bulk edit that would email more than a handful of books to Kindles
+   * changes nothing and answers needsConfirm; repeat with sendToKindle set. */
+  bulk: (bookIds: number[], tagIds: number[], mode: "add" | "remove" | "replace", sendToKindle?: boolean) =>
+    request<BulkTagResult>("/api/v1/tags/bulk", {
+      method: "POST", body: JSON.stringify({ bookIds, tagIds, mode, sendToKindle }),
+    }),
 }

@@ -39,7 +39,7 @@ export function SetupWizard({ open, onOpenChange, onDone }: { open: boolean; onO
   }, [open])
 
   // step state
-  const [libs, setLibs] = useState<{ name: string; path: string }[]>([{ name: "", path: "/data/books/" }])
+  const [libRoot, setLibRoot] = useState("/data/books/")
   const [naming, setNaming] = useState("{Author}/{Title}")
   const [hcToken, setHcToken] = useState("")
   const [writeOnImport, setWriteOnImport] = useState(true)
@@ -79,7 +79,8 @@ export function SetupWizard({ open, onOpenChange, onDone }: { open: boolean; onO
   const [serverUrl, setServerUrl] = useState("")
 
   // Send to Kindle step: the signed-in admin's own outgoing email + first
-  // device. Libraries are fetched on entry — step 3 may have just made them.
+  // device. Auto-send works by tag, and there are no tags yet this early —
+  // the device starts as manual-send and auto-send is picked in Settings.
   const [kFrom, setKFrom] = useState("")
   const [kHost, setKHost] = useState("")
   const [kPort, setKPort] = useState("587")
@@ -88,20 +89,7 @@ export function SetupWizard({ open, onOpenChange, onDone }: { open: boolean; onO
   const [kPass, setKPass] = useState("")
   const [kDevName, setKDevName] = useState("")
   const [kDevEmail, setKDevEmail] = useState("")
-  const [kSel, setKSel] = useState<Set<number>>(new Set())
-  const [kAuto, setKAuto] = useState<Set<number>>(new Set())
-  const [kLibs, setKLibs] = useState<{ id: number; name: string }[]>([])
   const [kTesting, setKTesting] = useState(false)
-  useEffect(() => {
-    if (!open || STEPS[step] !== "Send to Kindle") return
-    api.libraries().then(r => setKLibs((r.libraries ?? []).map(l => ({ id: l.id, name: l.name })))).catch(() => setKLibs([]))
-  }, [open, step])
-  const kToggle = (set: Set<number>, setter: (s: Set<number>) => void, id: number) => {
-    const next = new Set(set)
-    if (next.has(id)) next.delete(id)
-    else next.add(id)
-    setter(next)
-  }
   const kSaveSmtp = async () => {
     await kindle.putSmtp({
       fromAddr: kFrom.trim(), host: kHost.trim(), port: Number(kPort) || 587,
@@ -127,10 +115,10 @@ export function SetupWizard({ open, onOpenChange, onDone }: { open: boolean; onO
   const apply = async (): Promise<boolean> => {
     switch (step) {
       case 2: {
-        for (const l of libs) {
-          if (l.name.trim() && l.path.trim() && l.path.trim() !== "/data/books/") {
-            await api.createLibrary(l.name.trim(), l.path.trim())
-          }
+        // one library holds every book; who sees what is tags, set up later
+        if (libRoot.trim() && libRoot.trim() !== "/data/books/") {
+          const existing = (await api.libraries()).libraries ?? []
+          if (existing.length === 0) await api.createLibrary("Library", libRoot.trim())
         }
         if (naming.trim()) await api.putSetting("naming_scheme", naming.trim())
         return true
@@ -190,7 +178,7 @@ export function SetupWizard({ open, onOpenChange, onDone }: { open: boolean; onO
         }
         const libs = (await api.libraries()).libraries ?? []
         if (libs.length === 0) {
-          toast.error("Create a library first (step 3) — lists route their books into one")
+          toast.error("Set the library folder first (step 3) — lists route their books into it")
           return false
         }
         const common = {
@@ -235,8 +223,8 @@ export function SetupWizard({ open, onOpenChange, onDone }: { open: boolean; onO
         if (kFrom.trim() && kHost.trim()) {
           await kSaveSmtp()
         }
-        if (kDevName.trim() && kDevEmail.trim() && kSel.size > 0) {
-          await kindle.createDevice(kDevName.trim(), kDevEmail.trim(), [...kSel], [...kAuto].filter(id => kSel.has(id)))
+        if (kDevName.trim() && kDevEmail.trim()) {
+          await kindle.createDevice(kDevName.trim(), kDevEmail.trim(), [])
         }
         return true
       }
@@ -379,36 +367,17 @@ export function SetupWizard({ open, onOpenChange, onDone }: { open: boolean; onO
                       <Input type="password" value={adminPass} onChange={e => setAdminPass(e.target.value)} placeholder="password" />
                     </div>
                   </Field>
-                  <p className="text-xs text-faint">More accounts (and per-library scopes) live in Settings → Users.</p>
+                  <p className="text-xs text-faint">More accounts (and the tags that decide what each sees) live in Settings → Users and Settings → Tags.</p>
                 </>
               )}
             </div>
           )}
           {step === 2 && (
             <div className="grid gap-4">
-              <p className="text-[13px] text-muted-foreground">Add a root folder per library. Keep them on the same filesystem as your downloads for instant hardlink imports.</p>
-              {libs.map((l, i) => (
-                <Field key={i} label={i === 0 ? "Library · name / path" : `Library ${i + 1} · name / path`}>
-                  <div className="flex items-center gap-2">
-                    <Input value={l.name} placeholder={i === 0 ? "Library name" : "Another library"} className="max-w-[160px]"
-                      onChange={e => setLibs(ls => ls.map((x, j) => j === i ? { ...x, name: e.target.value } : x))} />
-                    <div className="flex-1">
-                      <PathInput value={l.path}
-                        onChange={v => setLibs(ls => ls.map((x, j) => j === i ? { ...x, path: v } : x))} />
-                    </div>
-                    {i > 0 && (
-                      <button type="button" aria-label="Remove library row"
-                        className="mono-label text-faint hover:text-want"
-                        onClick={() => setLibs(ls => ls.filter((_, j) => j !== i))}>✕</button>
-                    )}
-                  </div>
-                </Field>
-              ))}
-              <button type="button"
-                className="mono-label flex w-fit items-center gap-1.5 text-muted-foreground hover:text-brass"
-                onClick={() => setLibs(ls => [...ls, { name: "", path: "/data/books/" }])}>
-                + Add another library
-              </button>
+              <p className="text-[13px] text-muted-foreground">Pick the one folder every book lives in. Keep it on the same filesystem as your downloads for instant imports. Who sees which books is decided later with tags (Settings → Tags).</p>
+              <Field label="Library folder">
+                <PathInput value={libRoot} onChange={setLibRoot} />
+              </Field>
               <Field label="File naming"><Input value={naming} onChange={e => setNaming(e.target.value)} className="max-w-[240px] font-label text-[11.5px]" /></Field>
             </div>
           )}
@@ -578,7 +547,7 @@ export function SetupWizard({ open, onOpenChange, onDone }: { open: boolean; onO
           {step === 9 && (
             <div className="grid gap-4">
               <div className="text-[13.5px] leading-relaxed text-muted-foreground">
-                <p className="mb-3">Put Booky on your e-readers. Build a preconfigured KoReader plugin per device under <b className="text-foreground">Settings → KoReader devices</b> — pick which libraries it can browse and which auto-download, drop the zip in <span className="font-label text-[11px]">plugins/</span>, done.</p>
+                <p className="mb-3">Put Booky on your e-readers. Build a preconfigured KoReader plugin per device under <b className="text-foreground">Settings → KoReader devices</b> — pick which tags it carries and which auto-download, drop the zip in <span className="font-label text-[11px]">plugins/</span>, done.</p>
               </div>
               <Field label="Server URL (baked into plugin zips — an address your devices can reach)">
                 <Input value={serverUrl} onChange={e => setServerUrl(e.target.value)} placeholder="http://192.168.1.10:8787" className="font-label text-[11.5px]" />
@@ -615,26 +584,7 @@ export function SetupWizard({ open, onOpenChange, onDone }: { open: boolean; onO
                 <Field label="First Kindle — name"><Input value={kDevName} onChange={e => setKDevName(e.target.value)} placeholder="My Paperwhite" /></Field>
                 <Field label="Kindle email"><Input value={kDevEmail} onChange={e => setKDevEmail(e.target.value)} placeholder="name_xxxx@kindle.com" /></Field>
               </div>
-              {kLibs.length > 0 && (
-                <Field label="Libraries (check auto-send to email new arrivals)">
-                  <div className="flex flex-col gap-1.5">
-                    {kLibs.map(l => (
-                      <div key={l.id} className="flex items-center gap-4 text-[13px]">
-                        <label className="flex w-[160px] cursor-pointer items-center gap-2">
-                          <input type="checkbox" className="h-4 w-4 accent-[hsl(var(--brass))]"
-                            checked={kSel.has(l.id)} onChange={() => kToggle(kSel, setKSel, l.id)} />
-                          <span className="font-medium">{l.name}</span>
-                        </label>
-                        <label className="flex cursor-pointer items-center gap-1.5 text-[12px] text-muted-foreground">
-                          <input type="checkbox" className="h-3.5 w-3.5 accent-[hsl(var(--brass))]" disabled={!kSel.has(l.id)}
-                            checked={kAuto.has(l.id) && kSel.has(l.id)} onChange={() => kToggle(kAuto, setKAuto, l.id)} />
-                          auto-send
-                        </label>
-                      </div>
-                    ))}
-                  </div>
-                </Field>
-              )}
+              <p className="text-xs text-faint">Auto-send works by tag — once you've made tags, pick which ones this Kindle receives under Settings → Send to Kindle.</p>
               <Button variant="outline" className="h-8 w-fit" disabled={kTesting || !kFrom.trim() || !kHost.trim()} onClick={kTest}>
                 {kTesting ? "Sending…" : "Send test email"}
               </Button>

@@ -1,7 +1,7 @@
-// Package auth owns web-UI accounts: local username/password users
-// (admin/user roles, bcrypt hashes), cookie sessions, and login rate
-// limiting. OPDS and KoReader deliberately use per-library / per-device
-// credentials instead — a stolen e-reader never exposes a user account.
+// Package auth owns accounts: local username/password users (admin/user
+// roles, bcrypt hashes), cookie sessions, the tags each account holds, and
+// login rate limiting. OPDS signs in with the same username and password as
+// the web UI; KoReader devices use a per-device token.
 package auth
 
 import (
@@ -27,6 +27,15 @@ const (
 type Store struct {
 	db *sql.DB
 
+	// opdsOK remembers recent successful OPDS sign-ins, keyed by a hash of
+	// username+password. A reader app sends Basic credentials on every cover
+	// request, and a bcrypt per cover would make a 50-book feed take seconds.
+	// Entries hold the user id and the password hash they were checked
+	// against, so a changed password stops matching at once; the account and
+	// its tags are re-read on every request either way.
+	opdsMu sync.Mutex
+	opdsOK map[string]opdsHit
+
 	mu       sync.Mutex
 	failures map[string]failureState // key: username + "\n" + ip
 }
@@ -36,8 +45,16 @@ type failureState struct {
 	until time.Time
 }
 
+type opdsHit struct {
+	userID int64
+	hash   string // the stored password hash this sign-in was checked against
+	until  time.Time
+}
+
+const opdsCacheTTL = 5 * time.Minute
+
 func New(db *sql.DB) *Store {
-	return &Store{db: db, failures: map[string]failureState{}}
+	return &Store{db: db, failures: map[string]failureState{}, opdsOK: map[string]opdsHit{}}
 }
 
 type User struct {
@@ -45,25 +62,24 @@ type User struct {
 	Username  string `json:"username"`
 	Role      string `json:"role"`
 	CreatedAt string `json:"createdAt"`
-	// Libraries is what a 'user'-role account may reach. It is always empty
-	// for admins, who reach everything — ask MayAccess rather than reading
-	// this directly, or an admin looks like an account with no access at all.
-	Libraries []int64 `json:"libraryIds"`
+	// Tags is every tag the account holds, its personal tag included. A book
+	// is theirs when it carries one of these. Admins hold tags too (their
+	// personal one at least) but see everything regardless — ask the access
+	// checks rather than reading this as "what an admin can reach".
+	Tags []int64 `json:"tagIds"`
+	// PersonalTag is the account's own tag: what they add for themselves.
+	PersonalTag int64 `json:"personalTagId"`
 }
 
 func (u *User) IsAdmin() bool { return u != nil && u.Role == "admin" }
 
-// MayAccess reports whether the account may work in a library. Admins always
-// may; a plain user only in the libraries assigned to them.
-func (u *User) MayAccess(libraryID int64) bool {
+// HasTag reports whether the account holds a tag.
+func (u *User) HasTag(tagID int64) bool {
 	if u == nil {
 		return false
 	}
-	if u.IsAdmin() {
-		return true
-	}
-	for _, id := range u.Libraries {
-		if id == libraryID {
+	for _, id := range u.Tags {
+		if id == tagID {
 			return true
 		}
 	}
@@ -80,11 +96,10 @@ func (s *Store) Enabled() bool {
 	return n > 0
 }
 
-// CreateUser adds an account. libraryIDs is the set of libraries a 'user'
-// may reach and is ignored for admins, who reach everything. Creating a user
-// with no libraries is allowed — they can sign in and read nothing until an
-// admin grants one.
-func (s *Store) CreateUser(username, password, role string, libraryIDs []int64) (int64, error) {
+// CreateUser adds an account with its personal tag, plus membership in the
+// shared tags given. An account with no shared tags is ordinary: it sees
+// what it adds for itself and nothing else until an admin shares more.
+func (s *Store) CreateUser(username, password, role string, tagIDs []int64) (int64, error) {
 	username = strings.TrimSpace(username)
 	if username == "" || len(password) < 8 {
 		return 0, fmt.Errorf("username required and password must be at least 8 characters")
@@ -96,7 +111,12 @@ func (s *Store) CreateUser(username, password, role string, libraryIDs []int64) 
 	if err != nil {
 		return 0, err
 	}
-	res, err := s.db.Exec(`INSERT INTO users (username, password_hash, role) VALUES (?, ?, ?)`,
+	tx, err := s.db.Begin()
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback() //nolint:errcheck // no-op once committed
+	res, err := tx.Exec(`INSERT INTO users (username, password_hash, role) VALUES (?, ?, ?)`,
 		username, string(hash), role)
 	if err != nil {
 		return 0, fmt.Errorf("create user: %w", err)
@@ -105,59 +125,89 @@ func (s *Store) CreateUser(username, password, role string, libraryIDs []int64) 
 	if err != nil {
 		return 0, err
 	}
-	if role == "user" {
-		if err := s.SetUserLibraries(id, libraryIDs); err != nil {
-			// the account exists but reaches nothing — undo it rather than
-			// leave a half-configured user behind
-			_, _ = s.db.Exec(`DELETE FROM users WHERE id = ?`, id)
-			return 0, fmt.Errorf("assign libraries: %w", err)
-		}
+	res, err = tx.Exec(`INSERT INTO tags (name, owner_user_id) VALUES (?, ?)`, username, id)
+	if err != nil {
+		return 0, fmt.Errorf("personal tag: %w", err)
 	}
-	return id, nil
+	personal, err := res.LastInsertId()
+	if err != nil {
+		return 0, err
+	}
+	if _, err := tx.Exec(`INSERT INTO user_tags (user_id, tag_id) VALUES (?, ?)`, id, personal); err != nil {
+		return 0, err
+	}
+	if err := setSharedTags(tx, id, tagIDs); err != nil {
+		return 0, err
+	}
+	return id, tx.Commit()
 }
 
-// SetUserLibraries replaces an account's library grants. A nonexistent
-// library id fails the whole call (foreign key), so a typo can't half-apply.
-func (s *Store) SetUserLibraries(userID int64, libraryIDs []int64) error {
+// SetUserTags replaces an account's shared tags. The personal tag is never
+// touched here — it is the account's own and only goes with the account.
+// Another account's personal tag can't be granted either: personal means
+// personal. A nonexistent tag id fails the whole call.
+func (s *Store) SetUserTags(userID int64, tagIDs []int64) error {
 	tx, err := s.db.Begin()
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback() //nolint:errcheck // no-op once committed
-	if _, err := tx.Exec(`DELETE FROM user_libraries WHERE user_id = ?`, userID); err != nil {
+	if err := setSharedTags(tx, userID, tagIDs); err != nil {
 		return err
-	}
-	seen := map[int64]bool{}
-	for _, libID := range libraryIDs {
-		if seen[libID] {
-			continue
-		}
-		seen[libID] = true
-		if _, err := tx.Exec(`INSERT INTO user_libraries (user_id, library_id) VALUES (?, ?)`,
-			userID, libID); err != nil {
-			return fmt.Errorf("library %d: %w", libID, err)
-		}
 	}
 	return tx.Commit()
 }
 
-// libraries reads one account's grants. Admins are never stored, so this
-// correctly returns nothing for them — MayAccess short-circuits instead.
-func (s *Store) libraries(userID int64) ([]int64, error) {
-	rows, err := s.db.Query(`SELECT library_id FROM user_libraries WHERE user_id = ? ORDER BY library_id`, userID)
+func setSharedTags(tx *sql.Tx, userID int64, tagIDs []int64) error {
+	if _, err := tx.Exec(`DELETE FROM user_tags WHERE user_id = ?
+		AND tag_id IN (SELECT id FROM tags WHERE owner_user_id IS NULL)`, userID); err != nil {
+		return err
+	}
+	seen := map[int64]bool{}
+	for _, tagID := range tagIDs {
+		if seen[tagID] {
+			continue
+		}
+		seen[tagID] = true
+		var owner sql.NullInt64
+		if err := tx.QueryRow(`SELECT owner_user_id FROM tags WHERE id = ?`, tagID).Scan(&owner); err != nil {
+			return fmt.Errorf("tag %d not found", tagID)
+		}
+		if owner.Valid {
+			if owner.Int64 == userID {
+				continue // already held
+			}
+			return fmt.Errorf("tag %d is another account's personal tag", tagID)
+		}
+		if _, err := tx.Exec(`INSERT INTO user_tags (user_id, tag_id) VALUES (?, ?)`, userID, tagID); err != nil {
+			return fmt.Errorf("tag %d: %w", tagID, err)
+		}
+	}
+	return nil
+}
+
+// fillTags reads one account's tags. Read per request rather than cached in
+// the session, so an admin sharing or unsharing a tag takes effect on the
+// account's next click — and on their devices' next sync.
+func (s *Store) fillTags(u *User) error {
+	rows, err := s.db.Query(`SELECT ut.tag_id, COALESCE(t.owner_user_id, 0) FROM user_tags ut
+		JOIN tags t ON t.id = ut.tag_id WHERE ut.user_id = ? ORDER BY ut.tag_id`, u.ID)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	defer rows.Close()
-	var out []int64
+	u.Tags = []int64{}
 	for rows.Next() {
-		var id int64
-		if err := rows.Scan(&id); err != nil {
-			return nil, err
+		var id, owner int64
+		if err := rows.Scan(&id, &owner); err != nil {
+			return err
 		}
-		out = append(out, id)
+		u.Tags = append(u.Tags, id)
+		if owner == u.ID {
+			u.PersonalTag = id
+		}
 	}
-	return out, rows.Err()
+	return rows.Err()
 }
 
 func (s *Store) ListUsers() ([]User, error) {
@@ -177,23 +227,18 @@ func (s *Store) ListUsers() ([]User, error) {
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	// grants are read after the cursor closes — SQLite allows one statement
+	// tags are read after the cursor closes — SQLite allows one statement
 	// per connection at a time under the pooled driver
 	for i := range out {
-		if out[i].Role == "admin" {
-			continue
-		}
-		libs, err := s.libraries(out[i].ID)
-		if err != nil {
+		if err := s.fillTags(&out[i]); err != nil {
 			return nil, err
 		}
-		out[i].Libraries = libs
 	}
 	return out, nil
 }
 
 // UserByID resolves an account without a session — used to re-check a
-// KoReader device against its owner's current library grants. Returns nil
+// device (KoReader, Kindle) against its owner's current tags. Returns nil
 // when the account is gone.
 func (s *Store) UserByID(id int64) *User {
 	var u User
@@ -201,12 +246,8 @@ func (s *Store) UserByID(id int64) *User {
 		Scan(&u.ID, &u.Username, &u.Role, &u.CreatedAt); err != nil {
 		return nil
 	}
-	if u.Role != "admin" {
-		libs, err := s.libraries(u.ID)
-		if err != nil {
-			return nil
-		}
-		u.Libraries = libs
+	if err := s.fillTags(&u); err != nil {
+		return nil
 	}
 	return &u
 }
@@ -229,6 +270,75 @@ func (s *Store) DeleteUser(id int64) error {
 	}
 	_, err := s.db.Exec(`DELETE FROM users WHERE id = ?`, id)
 	return err
+}
+
+// OPDSLogin checks Basic credentials from a reader app against the account's
+// own login — the same username and password as the web UI — with the same
+// per-username+IP lockout (a separate counter, so a misconfigured reader
+// can't lock its owner out of the web UI). It returns the account with its
+// CURRENT tags.
+func (s *Store) OPDSLogin(username, password, ip string) (*User, error) {
+	username = strings.TrimSpace(username)
+	// the lockout comes first, before even the cache: otherwise, while the
+	// owner's reader keeps a cached sign-in warm, guesses from a locked-out
+	// IP would still be checked against it — at hash speed, unthrottled
+	key := "opds\n" + username + "\n" + ip
+	s.mu.Lock()
+	st := s.failures[key]
+	locked := time.Now().Before(st.until)
+	s.mu.Unlock()
+	if locked {
+		return nil, fmt.Errorf("too many attempts — try again shortly")
+	}
+
+	sum := sha256.Sum256([]byte(username + "\x00" + password))
+	cacheKey := hex.EncodeToString(sum[:])
+	s.opdsMu.Lock()
+	hit, ok := s.opdsOK[cacheKey]
+	s.opdsMu.Unlock()
+	if ok && time.Now().Before(hit.until) {
+		var current string
+		err := s.db.QueryRow(`SELECT password_hash FROM users WHERE id = ?`, hit.userID).Scan(&current)
+		if u := s.UserByID(hit.userID); err == nil && current == hit.hash && u != nil && u.Username == username {
+			return u, nil
+		}
+	}
+	fail := func() (*User, error) {
+		s.mu.Lock()
+		st := s.failures[key]
+		st.count++
+		if st.count >= maxFailures {
+			st.until = time.Now().Add(lockout)
+			st.count = 0
+		}
+		s.failures[key] = st
+		s.mu.Unlock()
+		return nil, fmt.Errorf("wrong username or password")
+	}
+
+	var id int64
+	var hash string
+	if err := s.db.QueryRow(`SELECT id, password_hash FROM users WHERE username = ?`, username).
+		Scan(&id, &hash); err != nil {
+		// burn comparable time so a missing account isn't distinguishable
+		// from a wrong password
+		_ = bcrypt.CompareHashAndPassword([]byte("$2a$10$7EqJtq98hPqEX7fNZaFWoOhi5B1Nl0jGVSyKyOaUmYQx1lWFZK1WS"), []byte(password))
+		return fail()
+	}
+	if bcrypt.CompareHashAndPassword([]byte(hash), []byte(password)) != nil {
+		return fail()
+	}
+	s.mu.Lock()
+	delete(s.failures, key)
+	s.mu.Unlock()
+	u := s.UserByID(id)
+	if u == nil {
+		return fail()
+	}
+	s.opdsMu.Lock()
+	s.opdsOK[cacheKey] = opdsHit{userID: id, hash: hash, until: time.Now().Add(opdsCacheTTL)}
+	s.opdsMu.Unlock()
+	return u, nil
 }
 
 // Login verifies credentials (rate-limited per username+IP) and mints a
@@ -273,10 +383,8 @@ func (s *Store) Login(username, password, ip string) (token string, user *User, 
 	delete(s.failures, key)
 	s.mu.Unlock()
 
-	if u.Role != "admin" {
-		if u.Libraries, err = s.libraries(u.ID); err != nil {
-			return "", nil, err
-		}
+	if err := s.fillTags(&u); err != nil {
+		return "", nil, err
 	}
 
 	token = randomToken()
@@ -313,15 +421,8 @@ func (s *Store) SessionUser(token string) *User {
 		s.Logout(token)
 		return nil
 	}
-	// Grants are read per request rather than cached in the session, so an
-	// admin adding or removing a library takes effect on the user's next
-	// click instead of at their next login.
-	if u.Role != "admin" {
-		libs, err := s.libraries(u.ID)
-		if err != nil {
-			return nil
-		}
-		u.Libraries = libs
+	if err := s.fillTags(&u); err != nil {
+		return nil
 	}
 	return &u
 }

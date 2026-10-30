@@ -21,6 +21,9 @@ type Attach struct {
 	LibraryID int64
 	Monitored bool
 	NewOnly   bool
+	// TagIDs are given to every book attached — a watched list's audience,
+	// so an author-scoped list shares the backlist with the same people.
+	TagIDs []int64
 }
 
 // SyncBibliography pulls an author's bibliography and leaves every book it
@@ -107,6 +110,7 @@ func (w *Watcher) ExpandAuthor(ctx context.Context, authorID int64, attach Attac
 			if _, err := w.attachIfAbsent(bookID, attach.LibraryID, attach.Monitored); err != nil {
 				log.Printf("watcher: expand attach %q: %v", meta.Title, err)
 			}
+			w.tagBook(bookID, attach.TagIDs)
 		}
 	}
 	// The Goodreads series overlay adds announced books and unlinked novellas
