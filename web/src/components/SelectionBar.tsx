@@ -57,7 +57,7 @@ function BulkTagDialog({ open, onOpenChange, books, onDone }: {
     <Dialog open={open} onOpenChange={v => { if (!v) setConfirm(null); onOpenChange(v) }}>
       <DialogContent className="max-w-md rounded-xl">
         <DialogHeader>
-          <DialogTitle className="font-book text-lg font-bold">Share {books.length} book{books.length === 1 ? "" : "s"}</DialogTitle>
+          <DialogTitle className="font-book text-lg font-bold">Tags · {books.length} book{books.length === 1 ? "" : "s"}</DialogTitle>
         </DialogHeader>
         {confirm ? (
           <div className="py-1 text-[13px] leading-relaxed">
@@ -242,9 +242,9 @@ export function SelectionBar({ books, onClear, onChanged }: {
           <RefreshCw className="h-4 w-4" />
         </Button>
         {isAdmin && (
-          <Button variant="ghost" size="icon" className="h-9 w-9 rounded-[10px]" title="Share with tags"
+          <Button variant="ghost" className="h-9 gap-1.5 rounded-[10px] px-2.5 text-[13px]" title="Tags — who these books are shared with"
             disabled={busy} onClick={() => setTagOpen(true)}>
-            <TagIcon className="h-4 w-4" />
+            <TagIcon className="h-4 w-4" /> Tags
           </Button>
         )}
         {kindleDevices.length === 1 && (
