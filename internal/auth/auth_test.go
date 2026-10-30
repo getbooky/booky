@@ -175,7 +175,11 @@ func TestOPDSLogin(t *testing.T) {
 		t.Fatal("old OPDS password still works after a change")
 	}
 
-	// lockout: after maxFailures the right password is refused too
+	// lockout: after maxFailures the right password is refused too — even
+	// while it sits in the sign-in cache from a moment ago
+	if _, err := s.OPDSLogin("sam", "reader-pass-2", "5.6.7.8"); err != nil {
+		t.Fatal(err)
+	}
 	for i := 0; i < maxFailures; i++ {
 		_, _ = s.OPDSLogin("sam", "wrong", "5.6.7.8")
 	}

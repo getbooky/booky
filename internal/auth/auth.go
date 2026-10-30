@@ -319,6 +319,18 @@ func (s *Store) OPDSConfigured(userID int64) bool {
 // web UI). It returns the account with its CURRENT tags.
 func (s *Store) OPDSLogin(username, password, ip string) (*User, error) {
 	username = strings.TrimSpace(username)
+	// the lockout comes first, before even the cache: otherwise, while the
+	// owner's reader keeps a cached sign-in warm, guesses from a locked-out
+	// IP would still be checked against it — at hash speed, unthrottled
+	key := "opds\n" + username + "\n" + ip
+	s.mu.Lock()
+	st := s.failures[key]
+	locked := time.Now().Before(st.until)
+	s.mu.Unlock()
+	if locked {
+		return nil, fmt.Errorf("too many attempts — try again shortly")
+	}
+
 	sum := sha256.Sum256([]byte(username + "\x00" + password))
 	cacheKey := hex.EncodeToString(sum[:])
 	s.opdsMu.Lock()
@@ -328,15 +340,6 @@ func (s *Store) OPDSLogin(username, password, ip string) (*User, error) {
 		if u := s.UserByID(hit.userID); u != nil && u.Username == username {
 			return u, nil
 		}
-	}
-
-	key := "opds\n" + username + "\n" + ip
-	s.mu.Lock()
-	st := s.failures[key]
-	locked := time.Now().Before(st.until)
-	s.mu.Unlock()
-	if locked {
-		return nil, fmt.Errorf("too many attempts — try again shortly")
 	}
 	fail := func() (*User, error) {
 		s.mu.Lock()

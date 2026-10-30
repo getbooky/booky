@@ -1,14 +1,10 @@
 import { useState } from "react"
 import {
   Activity as ActivityIcon, Bookmark, CalendarDays, CheckCircle2, Clock, Heart, House, Layers,
-  LibraryBig, MoreVertical, PanelLeftClose, PanelLeftOpen, Pencil,
-  RefreshCw, Search, Trash2, TriangleAlert, Users, X,
+  LibraryBig, PanelLeftClose, PanelLeftOpen, RefreshCw, TriangleAlert, User, Users, X,
 } from "lucide-react"
-import {
-  DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu"
 import { Logo } from "@/components/Logo"
-import type { ApiLibrary } from "@/api"
+import type { ApiLibrary, ApiTag } from "@/api"
 import type { Scope } from "@/views/Library"
 import { cn } from "@/lib/utils"
 
@@ -72,33 +68,41 @@ export function BottomNav({ view, onBrowse }: {
 }
 
 export function Sidebar({
-  view, activeLibraryId, scope, libraries, customScopes, activeCustomScope,
-  onBrowse, onSelectLibrary, onSelectScope, onAddLibrary, onScan, onRefresh, onReview, onEditLibrary,
-  onDeleteLibrary, onAddScope, onSelectCustomScope, onDeleteCustomScope, canManage,
+  view, activeTagId, scope, library, tags, personalTagId, customScopes, activeCustomScope,
+  onBrowse, onSelectTag, onSelectScope, onScan, onRefresh, onReview,
+  onAddScope, onSelectCustomScope, onDeleteCustomScope, canManage,
 }: {
   view: BrowseView | "settings"
-  activeLibraryId: number | null
+  activeTagId: number | null
   scope: Scope
-  libraries: ApiLibrary[]
+  /** The one library — for its upkeep menu (scan, refresh, failed imports). */
+  library: ApiLibrary | null
+  /** Tags the caller may filter by: every tag for an admin, their own otherwise. */
+  tags: ApiTag[]
+  personalTagId: number
   customScopes: CustomScope[]
   activeCustomScope: string | null
   onBrowse: (v: BrowseView) => void
-  onSelectLibrary: (l: ApiLibrary | null) => void
+  onSelectTag: (t: ApiTag) => void
   onSelectScope: (s: Scope) => void
-  onAddLibrary: () => void
   onScan: (l: ApiLibrary) => void
   onRefresh: (l: ApiLibrary) => void
   onReview: (l: ApiLibrary) => void
-  onEditLibrary: (l: ApiLibrary) => void
-  onDeleteLibrary: (l: ApiLibrary) => void
   onAddScope: () => void
   onSelectCustomScope: (s: CustomScope) => void
   onDeleteCustomScope: (name: string) => void
-  /** Admin-only library management. A user still gets refresh on their own. */
+  /** Admin-only library upkeep. */
   canManage: boolean
 }) {
   const [collapsed, setCollapsed] = useState(false)
   const libraryActive = view === "library" && scope === "all"
+  // shared tags first, then "My shelf", then (for an admin) everyone else's
+  // personal tags; colours follow the tag, not its position in the list
+  const ordered = [
+    ...tags.filter(t => !t.personal),
+    ...tags.filter(t => t.id === personalTagId),
+    ...tags.filter(t => t.personal && t.id !== personalTagId),
+  ].map(tag => ({ tag, color: LIB_COLORS[tag.id % LIB_COLORS.length] }))
 
   const item = (active: boolean) => cn(
     "flex w-full items-center gap-2.5 rounded-[10px] px-3 py-2 text-left text-[13.5px] font-medium text-muted-foreground transition-colors hover:bg-surface2 hover:text-foreground",
@@ -129,7 +133,7 @@ export function Sidebar({
       {BROWSE.map(n => (
         <button key={n.id} title={collapsed ? n.label : undefined}
           onClick={() => onBrowse(n.id)}
-          className={item(view === n.id && (n.id !== "library" || libraryActive || activeLibraryId === null))}>
+          className={item(view === n.id && (n.id !== "library" || libraryActive || activeTagId === null))}>
           <n.icon className="h-4 w-4 shrink-0" />
           {!collapsed && n.label}
           {!collapsed && n.soon && (
@@ -138,75 +142,47 @@ export function Sidebar({
         </button>
       ))}
 
-      <SectionHeader collapsed={collapsed} action={canManage ? (
-        <button onClick={onAddLibrary} aria-label="Add library"
-          className="flex h-5 w-5 items-center justify-center rounded-full text-faint hover:bg-brass/15 hover:text-brass">
-          <svg viewBox="0 0 24 24" width="13" height="13" style={{ stroke: "currentColor", fill: "none", strokeWidth: 2 }}><path d="M12 5v14M5 12h14" /></svg>
-        </button>
-      ) : undefined}>Libraries</SectionHeader>
-      {libraries.map((l, i) => (
-        <div key={l.id} className="group relative flex items-center">
-          <button title={collapsed ? l.name : undefined}
-            onClick={() => onSelectLibrary(l)}
-            className={cn(item(view === "library" && activeLibraryId === l.id), !collapsed && "pr-8")}>
-            <span className="h-2 w-2 shrink-0 rounded-[3px]" style={{ background: LIB_COLORS[i % LIB_COLORS.length] }} />
-            {!collapsed && l.name}
-            {!collapsed && l.reviewCount > 0 && (
-              <span className="h-[7px] w-[7px] shrink-0 rounded-full bg-brass" title={`${l.reviewCount} imports need attention`} />
-            )}
-            {!collapsed && (
-              <span className="font-label ml-auto rounded-lg bg-surface3 px-1.5 py-px text-[10px] text-muted-foreground">{l.bookCount}</span>
-            )}
+      {/* the one library's upkeep, for admins: scan the folder, refresh
+          metadata, and the failed-import queue when it has anything in it */}
+      {canManage && library && !collapsed && (
+        <div className="flex items-center gap-1 px-3 pt-1">
+          <button onClick={() => onScan(library)}
+            className="font-label rounded-md px-1.5 py-0.5 text-[9.5px] uppercase tracking-[0.08em] text-faint hover:bg-surface2 hover:text-foreground">
+            Scan
           </button>
-          {!collapsed && (
-            <DropdownMenu>
-              <DropdownMenuTrigger asChild>
-                <button aria-label={`${l.name} options`}
-                  className="absolute right-1 flex h-6 w-6 items-center justify-center rounded-lg text-faint opacity-0 transition-opacity hover:bg-surface3 hover:text-foreground focus-visible:opacity-100 group-hover:opacity-100 data-[state=open]:opacity-100">
-                  <MoreVertical className="h-3.5 w-3.5" />
-                </button>
-              </DropdownMenuTrigger>
-              <DropdownMenuContent side="right" align="start" className="min-w-[200px] rounded-xl">
-                {canManage && (
-                  <DropdownMenuItem onClick={() => onScan(l)}>
-                    <Search className="mr-2 h-3.5 w-3.5 text-muted-foreground" /> Scan library
-                  </DropdownMenuItem>
-                )}
-                <DropdownMenuItem onClick={() => onRefresh(l)}>
-                  <RefreshCw className="mr-2 h-3.5 w-3.5 text-muted-foreground" /> Refresh metadata
-                </DropdownMenuItem>
-                {canManage && l.reviewCount > 0 && (
-                  <DropdownMenuItem onClick={() => onReview(l)}>
-                    <CheckCircle2 className="mr-2 h-3.5 w-3.5 text-muted-foreground" /> Import failed
-                    <span className="font-label ml-auto rounded-lg bg-brass px-1.5 text-[9.5px] font-bold text-brass-ink">{l.reviewCount}</span>
-                  </DropdownMenuItem>
-                )}
-                {canManage && (
-                  <>
-                    <DropdownMenuSeparator />
-                    <DropdownMenuItem onClick={() => onEditLibrary(l)}>
-                      <Pencil className="mr-2 h-3.5 w-3.5 text-muted-foreground" /> Edit library
-                    </DropdownMenuItem>
-                    <DropdownMenuItem className="text-want" onClick={() => onDeleteLibrary(l)}>
-                      <Trash2 className="mr-2 h-3.5 w-3.5" /> Delete library
-                    </DropdownMenuItem>
-                  </>
-                )}
-              </DropdownMenuContent>
-            </DropdownMenu>
+          <button onClick={() => onRefresh(library)}
+            className="font-label rounded-md px-1.5 py-0.5 text-[9.5px] uppercase tracking-[0.08em] text-faint hover:bg-surface2 hover:text-foreground">
+            Refresh
+          </button>
+          {library.reviewCount > 0 && (
+            <button onClick={() => onReview(library)} title={`${library.reviewCount} imports need attention`}
+              className="font-label ml-auto flex items-center gap-1 rounded-md bg-brass/15 px-1.5 py-0.5 text-[9.5px] uppercase tracking-[0.08em] text-brass">
+              <CheckCircle2 className="h-3 w-3" /> {library.reviewCount}
+            </button>
           )}
         </div>
+      )}
+
+      {/* Tags are who-sees-what. Each one filters the library to the books it
+          shares; "My shelf" is the caller's personal tag. */}
+      <SectionHeader collapsed={collapsed}>{canManage ? "Shared with" : "Your tags"}</SectionHeader>
+      {ordered.map(({ tag, color }) => (
+        <button key={tag.id} title={collapsed ? tag.name : undefined}
+          onClick={() => onSelectTag(tag)}
+          className={item(view === "library" && activeTagId === tag.id)}>
+          {tag.personal
+            ? <User className="h-3.5 w-3.5 shrink-0" style={{ color }} />
+            : <span className="h-2 w-2 shrink-0 rounded-full" style={{ background: color }} />}
+          {!collapsed && <span className="truncate">{tag.id === personalTagId ? "My shelf" : tag.name}</span>}
+          {!collapsed && canManage && (
+            <span className="font-label ml-auto rounded-lg bg-surface3 px-1.5 py-px text-[10px] text-muted-foreground">{tag.bookCount}</span>
+          )}
+        </button>
       ))}
-      {libraries.length === 0 && !collapsed && (
-        canManage ? (
-          <button onClick={onAddLibrary} className="mx-3 rounded-[10px] border border-dashed px-3 py-2 text-left text-[12.5px] text-faint hover:border-brass/50 hover:text-brass">
-            + Add your first library
-          </button>
-        ) : (
-          <p className="mx-3 rounded-[10px] border border-dashed px-3 py-2 text-[12.5px] text-faint">
-            No libraries assigned to you yet — ask an admin.
-          </p>
-        )
+      {ordered.length === 0 && !collapsed && (
+        <p className="mx-3 rounded-[10px] border border-dashed px-3 py-2 text-[12.5px] text-faint">
+          {canManage ? "No tags yet — Settings → Tags." : "Nothing shared with you yet."}
+        </p>
       )}
 
       <SectionHeader collapsed={collapsed} action={

@@ -1,7 +1,9 @@
 import { useMemo, useRef } from "react"
 import { ChevronLeft, ChevronRight } from "lucide-react"
 import { api, coverUrl, watchers } from "@/api"
-import type { ApiBook, ApiLibrary } from "@/api"
+import type { ApiBook, ApiLibrary, ApiTag } from "@/api"
+import { useTags } from "@/components/TagPills"
+import { useAccess } from "@/lib/access"
 import { Cover, hashColors } from "@/components/Cover"
 import { bookRibbon } from "@/views/Library"
 import { LIB_COLORS } from "@/components/Sidebar"
@@ -74,11 +76,11 @@ function ShelfRow({ title, meta, books, onOpenBook, onSeeAll, dot }: {
   )
 }
 
-export function HomeView({ libraries, userName, onOpenBook, onOpenLibrary, onBrowse }: {
+export function HomeView({ libraries, userName, onOpenBook, onOpenTag, onBrowse }: {
   libraries: ApiLibrary[]
   userName?: string
   onOpenBook: (b: ApiBook) => void
-  onOpenLibrary: (l: ApiLibrary) => void
+  onOpenTag: (t: ApiTag) => void
   onBrowse: (v: "library" | "calendar" | "wanted") => void
 }) {
   const booksQuery = useApi(() => api.books(), 15_000)
@@ -89,11 +91,18 @@ export function HomeView({ libraries, userName, onOpenBook, onOpenLibrary, onBro
   const recent = useMemo(() => all.filter(b => b.filePath).sort(newestFirst).slice(0, 24), [all])
   const wanted = useMemo(() => all.filter(b => !b.filePath && b.monitored).sort(newestFirst).slice(0, 24), [all])
   const upcoming = useMemo(() => dedupe(calQuery.data?.books ?? []).slice(0, 24), [calQuery.data])
-  const perLibrary = useMemo(() => libraries.map((l, i) => ({
-    library: l,
-    color: LIB_COLORS[i % LIB_COLORS.length],
-    books: rows.filter(b => b.libraryId === l.id && b.filePath).sort(newestFirst).slice(0, 24),
-  })), [libraries, rows])
+  // one row per shared tag, so a household sees "Kids", "Book club"… at a
+  // glance; personal tags stay out of it (that's what My shelf is for)
+  const { tags } = useTags()
+  const { personalTagId } = useAccess()
+  const perTag = useMemo(() => [
+    ...tags.filter(t => t.id === personalTagId),
+    ...tags.filter(t => !t.personal),
+  ].map(t => ({
+    tag: t,
+    color: LIB_COLORS[t.id % LIB_COLORS.length],
+    books: all.filter(b => b.filePath && (b.tagIds ?? []).includes(t.id)).sort(newestFirst).slice(0, 24),
+  })), [tags, all, personalTagId])
 
   const hour = new Date().getHours()
   const greeting = hour < 12 ? "Good morning" : hour < 18 ? "Good afternoon" : "Good evening"
@@ -107,7 +116,10 @@ export function HomeView({ libraries, userName, onOpenBook, onOpenLibrary, onBro
         </h1>
         {!booksQuery.loading && (
           <span className="mono-label text-muted-foreground">
-            {onShelf} on the shelf · {wanted.length} wanted · {libraries.length} {libraries.length === 1 ? "library" : "libraries"}
+            {onShelf} on the shelf · {wanted.length} wanted</span>
+        )}
+        {!booksQuery.loading && libraries.length === 0 && (
+          <span className="mono-label text-want">no library set up yet
           </span>
         )}
       </div>
@@ -115,10 +127,10 @@ export function HomeView({ libraries, userName, onOpenBook, onOpenLibrary, onBro
       <ShelfRow title="Recently added" books={recent} onOpenBook={onOpenBook} onSeeAll={() => onBrowse("library")} />
       <ShelfRow title="Coming soon" meta="monitored releases" books={upcoming} onOpenBook={onOpenBook} onSeeAll={() => onBrowse("calendar")} />
       <ShelfRow title="Still wanted" books={wanted} onOpenBook={onOpenBook} onSeeAll={() => onBrowse("wanted")} />
-      {perLibrary.length > 1 && perLibrary.map(p => (
-        <ShelfRow key={p.library.id} title={p.library.name} dot={p.color}
-          meta={`${p.library.onShelf} on shelf`} books={p.books}
-          onOpenBook={onOpenBook} onSeeAll={() => onOpenLibrary(p.library)} />
+      {perTag.map(p => (
+        <ShelfRow key={p.tag.id} title={p.tag.id === personalTagId ? "My shelf" : p.tag.name} dot={p.color}
+          meta={p.tag.id === personalTagId ? "just for you" : "shared"} books={p.books}
+          onOpenBook={onOpenBook} onSeeAll={() => onOpenTag(p.tag)} />
       ))}
 
       {!booksQuery.loading && all.length === 0 && (

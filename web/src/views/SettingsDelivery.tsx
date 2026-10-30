@@ -4,13 +4,14 @@ import { Input } from "@/components/ui/input"
 import { Switch } from "@/components/ui/switch"
 import { Tag } from "@/components/bits"
 import { api, delivery } from "@/api"
-import type { ApiDevice, ApiLibrary, ApiUser } from "@/api"
+import type { ApiDevice, ApiTag, ApiUser } from "@/api"
 import { useAccess } from "@/lib/access"
 import { formatFull, formatWhen } from "@/lib/time"
 import { useApi } from "@/hooks/use-api"
 import { toast } from "sonner"
 import { Download, Pencil, Plus, X } from "lucide-react"
 import { SettingField } from "@/views/Settings"
+import { TagPicker, TagPill, useTags } from "@/components/TagPills"
 
 function Card({ title, desc, action, children }: { title: string; desc?: string; action?: React.ReactNode; children: React.ReactNode }) {
   return (
@@ -31,80 +32,67 @@ function Label({ children }: { children: React.ReactNode }) {
 
 /* ---------- Users ---------- */
 
-// LibraryPicker is the checkbox list shared by the create form and the
-// per-user editor below.
-function LibraryPicker({ libraries, selected, onToggle }: {
-  libraries: ApiLibrary[]
-  selected: Set<number>
-  onToggle: (id: number) => void
-}) {
-  if (libraries.length === 0) {
-    return <p className="text-[12.5px] text-faint">No libraries yet — create one first.</p>
-  }
-  return (
-    <div className="flex flex-wrap gap-x-4 gap-y-1.5">
-      {libraries.map(l => (
-        <label key={l.id} className="flex cursor-pointer items-center gap-2 text-[13px]">
-          <input type="checkbox" className="h-4 w-4 accent-[hsl(var(--brass))]"
-            checked={selected.has(l.id)} onChange={() => onToggle(l.id)} />
-          <span className="font-medium">{l.name}</span>
-        </label>
-      ))}
-    </div>
-  )
-}
-
-// UserRow shows a user's libraries and lets an admin re-scope them without
-// deleting the account. Admins have no list — they reach everything.
-function UserRow({ user, libraries, onDelete, onChanged }: {
+// UserRow shows the tags an account holds and lets an admin change its shared
+// tags without deleting it. The personal tag is the account's own and shows
+// read-only; admins see every book whatever they hold.
+function UserRow({ user, tags, onDelete, onChanged }: {
   user: ApiUser
-  libraries: ApiLibrary[]
+  tags: ApiTag[]
   onDelete: () => void
   onChanged: () => void
 }) {
+  const shared = (user.tagIds ?? []).filter(id => id !== user.personalTagId)
   const [editing, setEditing] = useState(false)
-  const [selected, setSelected] = useState<Set<number>>(new Set(user.libraryIds ?? []))
+  const [selected, setSelected] = useState<number[]>(shared)
   const isAdminUser = user.role === "admin"
+  const byId = new Map(tags.map(t => [t.id, t]))
+  const personal = byId.get(user.personalTagId)
 
-  const toggle = (id: number) => {
-    const next = new Set(selected)
-    if (next.has(id)) next.delete(id)
-    else next.add(id)
-    setSelected(next)
-  }
   const save = async () => {
     try {
-      await delivery.setUserLibraries(user.id, [...selected])
-      toast.success(`${user.username}'s libraries updated`)
+      await delivery.setUserTags(user.id, selected)
+      toast.success(`${user.username}'s tags updated — it applies on their next click`)
       setEditing(false)
       onChanged()
     } catch (e) {
       toast.error(`Couldn't save: ${e instanceof Error ? e.message : e}`)
     }
   }
+  const opdsOff = async () => {
+    if (!window.confirm(`Turn off ${user.username}'s OPDS login?\n\nReader apps using it stop working until they set a new OPDS password.`)) return
+    try {
+      await delivery.clearUserOPDS(user.id)
+      toast(`${user.username}'s OPDS login turned off`)
+    } catch (e) {
+      toast.error(`Couldn't turn it off: ${e instanceof Error ? e.message : e}`)
+    }
+  }
   return (
     <div className="rounded-lg border border-linesoft bg-surface2 px-4 py-3">
-      <div className="flex flex-wrap items-center gap-3">
+      <div className="flex flex-wrap items-center gap-2.5">
         <span className="font-book text-[15px] font-bold">{user.username}</span>
         <Tag kind={isAdminUser ? "brand" : "dim"}>{user.role}</Tag>
+        {personal && <TagPill tag={personal} on={false} size="sm" />}
         {isAdminUser ? (
-          <span className="text-[12px] text-faint">every library</span>
+          <span className="text-[12px] text-faint">sees every book</span>
+        ) : shared.length === 0 ? (
+          <span className="text-[12px] text-faint">only what they add themselves</span>
         ) : (
-          (user.libraryIds ?? []).length === 0
-            ? <span className="text-[12px] text-want">no libraries assigned</span>
-            : (user.libraryIds ?? []).map(id => (
-                <Tag key={id} kind="dim">{libraries.find(l => l.id === id)?.name ?? `#${id}`}</Tag>
-              ))
+          shared.map(id => byId.get(id)).filter(Boolean).map(t => <TagPill key={t!.id} tag={t!} on size="sm" />)
         )}
         <span className="ml-auto" />
         {!isAdminUser && (
           <Button variant="outline" className="h-8" onClick={() => {
-            setSelected(new Set(user.libraryIds ?? []))
+            setSelected(shared)
             setEditing(e => !e)
           }}>
-            {editing ? "Cancel" : "Libraries"}
+            {editing ? "Cancel" : "Tags"}
           </Button>
         )}
+        <Button variant="outline" className="h-8 text-faint" title="Switch off this account's OPDS password — a lost e-reader, say"
+          onClick={opdsOff}>
+          OPDS off
+        </Button>
         <Button variant="outline" size="icon" className="h-8 w-8 text-faint" aria-label={`Delete ${user.username}`}
           onClick={onDelete}>
           <X className="h-3.5 w-3.5" />
@@ -112,8 +100,8 @@ function UserRow({ user, libraries, onDelete, onChanged }: {
       </div>
       {editing && (
         <div className="mt-3 border-t border-linesoft pt-3">
-          <Label>Libraries this user may browse, add to and monitor</Label>
-          <LibraryPicker libraries={libraries} selected={selected} onToggle={toggle} />
+          <Label>Books shared with these tags reach {user.username}</Label>
+          <TagPicker tags={tags} value={selected} onChange={setSelected} hidePersonal />
           <Button className="mt-3 h-9" onClick={save}>Save</Button>
         </div>
       )}
@@ -123,26 +111,25 @@ function UserRow({ user, libraries, onDelete, onChanged }: {
 
 export function UsersPanel() {
   const { data, loading, reload } = useApi(() => delivery.users())
-  const { data: libData } = useApi(() => api.libraries())
+  const { tags, reload: reloadTags } = useTags()
   const users = data?.users ?? []
-  const libraries = libData?.libraries ?? []
   const [adding, setAdding] = useState(false)
   const [username, setUsername] = useState("")
   const [password, setPassword] = useState("")
   const [role, setRole] = useState<"admin" | "user">("user")
-  const [selected, setSelected] = useState<Set<number>>(new Set())
+  const [selected, setSelected] = useState<number[]>([])
 
-  // the first account is forced to admin, and admins reach every library, so
-  // the picker only matters once we're actually creating a scoped user
+  // the first account is forced to admin, and admins see every book, so the
+  // picker only matters once we're actually creating a plain user
   const effectiveRole = users.length === 0 ? "admin" : role
-  const needsLibraries = effectiveRole === "user"
+  const needsTags = effectiveRole === "user"
 
   const create = async () => {
     try {
-      await delivery.createUser(username.trim(), password, effectiveRole, [...selected])
+      await delivery.createUser(username.trim(), password, effectiveRole, needsTags ? selected : [])
       toast.success(`User "${username.trim()}" created`)
-      setAdding(false); setUsername(""); setPassword(""); setSelected(new Set())
-      reload()
+      setAdding(false); setUsername(""); setPassword(""); setSelected([])
+      reload(); reloadTags()
     } catch (e) {
       toast.error(`Couldn't create: ${e instanceof Error ? e.message : e}`)
     }
@@ -151,7 +138,7 @@ export function UsersPanel() {
     try {
       await delivery.deleteUser(id)
       toast(`User "${name}" deleted`)
-      reload()
+      reload(); reloadTags()
     } catch (e) {
       toast.error(`Couldn't delete: ${e instanceof Error ? e.message : e}`)
     }
@@ -164,14 +151,14 @@ export function UsersPanel() {
           <Plus className="h-4 w-4" />
         </Button>
       }
-      desc="Web UI accounts. Until the first user exists Booky is open; creating one turns login on (the first account is always an admin). A 'user' works only in the libraries you assign: they can browse, search and add books, refresh metadata and monitor authors and series there, but not edit metadata, delete books, or reach any of these settings. OPDS feeds and KoReader devices use their own credentials — never these.">
+      desc="Web UI accounts. Until the first user exists Booky is open; creating one turns login on (the first account is always an admin). A 'user' sees the books shared with their tags plus whatever they add for themselves (their personal tag): they can browse, search and add books, refresh metadata and grab releases, but not edit metadata, delete files, change tags, or reach these settings. Each person sets their own OPDS password under Account; KoReader devices carry their own token.">
       {loading && <p className="mono-label text-faint">loading…</p>}
       {!loading && users.length === 0 && !adding && (
         <p className="text-[13px] text-muted-foreground">No accounts — anyone who can reach this page has full access. Add an admin to require login.</p>
       )}
       <div className="flex flex-col gap-2">
         {users.map(u => (
-          <UserRow key={u.id} user={u} libraries={libraries}
+          <UserRow key={u.id} user={u} tags={tags}
             onDelete={() => remove(u.id, u.username)} onChanged={reload} />
         ))}
         {adding && (
@@ -195,24 +182,18 @@ export function UsersPanel() {
                 </select>
               </div>
             </div>
-            {needsLibraries && (
+            {needsTags && (
               <div className="mt-3">
-                <Label>Libraries this user may access</Label>
-                <LibraryPicker libraries={libraries} selected={selected} onToggle={id => {
-                  const next = new Set(selected)
-                  if (next.has(id)) next.delete(id)
-                  else next.add(id)
-                  setSelected(next)
-                }} />
+                <Label>Shared tags</Label>
+                <TagPicker tags={tags} value={selected} onChange={setSelected} hidePersonal
+                  empty="No shared tags yet — they'll start with only what they add themselves. Create tags under Settings → Tags." />
                 <p className="mt-1.5 text-[12px] text-faint">
-                  They can add books to, and monitor authors and series for, exactly these — and see nothing else.
+                  They see books carrying any of these, plus everything they add themselves. Change it any time.
                 </p>
               </div>
             )}
             <div className="mt-3 flex gap-2">
-              <Button className="h-9"
-                disabled={!username.trim() || password.length < 8 || (needsLibraries && selected.size === 0)}
-                onClick={create}>Create</Button>
+              <Button className="h-9" disabled={!username.trim() || password.length < 8} onClick={create}>Create</Button>
               <Button variant="outline" className="h-9" onClick={() => setAdding(false)}>Cancel</Button>
             </div>
           </div>
@@ -306,29 +287,57 @@ function ScheduleToggle() {
 
 /* ---------- KoReader devices ---------- */
 
-function DeviceRow({ device, libraries, onChanged }: { device: ApiDevice; libraries: ApiLibrary[]; onChanged: () => void }) {
-  const libName = (id: number) => libraries.find(l => l.id === id)?.name ?? `#${id}`
+// DeviceTags is the shared editor for a device's tags: which it carries, and
+// which of those it auto-downloads. `allowed` caps the choice to what the
+// pairing account holds — the server enforces the same against the owner.
+function DeviceTags({ tags, allowed, sel, setSel, auto, setAuto, keepPersonal }: {
+  tags: ApiTag[]
+  allowed?: number[]
+  sel: number[]
+  setSel: (v: number[]) => void
+  auto: number[]
+  setAuto: (v: number[]) => void
+  keepPersonal: number
+}) {
+  return (
+    <>
+      <div className="mt-3">
+        <Label>Books tagged</Label>
+        <TagPicker tags={tags} allowed={allowed} hidePersonal keepPersonal={keepPersonal} value={sel}
+          onChange={next => { setSel(next); setAuto(auto.filter(id => next.includes(id))) }} />
+      </div>
+      <div className="mt-3">
+        <Label>Auto-download new arrivals tagged</Label>
+        <TagPicker tags={tags} allowed={sel} value={auto.filter(id => sel.includes(id))} onChange={setAuto}
+          empty="Pick the device's tags above first." />
+      </div>
+    </>
+  )
+}
+
+function DeviceRow({ device, tags, allowed, keepPersonal, onChanged }: {
+  device: ApiDevice
+  tags: ApiTag[]
+  allowed?: number[]
+  keepPersonal: number
+  onChanged: () => void
+}) {
+  const byId = new Map(tags.map(t => [t.id, t]))
   // in-place editing: the token survives, so the device keeps syncing against
-  // the new lists immediately — only the zip's own baked lists go stale
+  // the new tags immediately — only the zip's own baked lists go stale
   const [editing, setEditing] = useState(false)
   const [name, setName] = useState(device.name)
-  const [sel, setSel] = useState<Set<number>>(new Set(device.libraryIds))
-  const [auto, setAuto] = useState<Set<number>>(new Set(device.autoLibraryIds))
+  const [sel, setSel] = useState<number[]>(device.tagIds)
+  const [auto, setAuto] = useState<number[]>(device.autoTagIds)
   const startEdit = () => {
     setName(device.name)
-    setSel(new Set(device.libraryIds)); setAuto(new Set(device.autoLibraryIds))
+    setSel(device.tagIds); setAuto(device.autoTagIds)
     setEditing(true)
-  }
-  const toggle = (set: Set<number>, setter: (s: Set<number>) => void, id: number) => {
-    const next = new Set(set)
-    if (next.has(id)) next.delete(id)
-    else next.add(id)
-    setter(next)
   }
   const save = async () => {
     try {
-      await delivery.updateDevice(device.id, name.trim(), [...sel], [...auto].filter(id => sel.has(id)))
-      toast.success(`"${name.trim()}" updated — syncing follows the new libraries right away`)
+      await delivery.updateDevice(device.id, name.trim(), sel, auto.filter(id => sel.includes(id)))
+      toast.success(`"${name.trim()}" updated — syncing follows the new tags right away`)
       setEditing(false)
       onChanged()
     } catch (e) {
@@ -356,11 +365,15 @@ function DeviceRow({ device, libraries, onChanged }: { device: ApiDevice; librar
       {/* only admins are sent an owner, and only they see other people's
           devices — so this labels exactly the rows that need it */}
       {device.ownerName && <Tag kind="dim">{device.ownerName}</Tag>}
-      {device.libraryIds.map(id => (
-        <Tag key={id} kind={device.autoLibraryIds.includes(id) ? "info" : "dim"}>
-          {libName(id)}{device.autoLibraryIds.includes(id) ? " · auto" : ""}
-        </Tag>
-      ))}
+      {device.tagIds.map(id => {
+        const t = byId.get(id)
+        const isAuto = device.autoTagIds.includes(id)
+        return (
+          <Tag key={id} kind={isAuto ? "info" : "dim"}>
+            {t?.name ?? `#${id}`}{isAuto ? " · auto" : ""}
+          </Tag>
+        )
+      })}
       <div className="ml-auto flex gap-2">
         <Button variant="outline" className="h-8" asChild>
           <a href={delivery.pluginZipUrl(device.id)} download>
@@ -381,28 +394,11 @@ function DeviceRow({ device, libraries, onChanged }: { device: ApiDevice; librar
             <Label>Device name</Label>
             <Input value={name} onChange={e => setName(e.target.value)} className="h-9 w-[180px]" />
           </div>
-          <div className="mt-3">
-            <Label>Libraries (check "auto-download" to push new arrivals)</Label>
-            <div className="flex flex-col gap-1.5">
-              {libraries.map(l => (
-                <div key={l.id} className="flex items-center gap-4 text-[13px]">
-                  <label className="flex w-[160px] cursor-pointer items-center gap-2">
-                    <input type="checkbox" className="h-4 w-4 accent-[hsl(var(--brass))]"
-                      checked={sel.has(l.id)} onChange={() => toggle(sel, setSel, l.id)} />
-                    <span className="font-medium">{l.name}</span>
-                  </label>
-                  <label className="flex cursor-pointer items-center gap-1.5 text-[12px] text-muted-foreground">
-                    <input type="checkbox" className="h-3.5 w-3.5 accent-[hsl(var(--brass))]" disabled={!sel.has(l.id)}
-                      checked={auto.has(l.id) && sel.has(l.id)} onChange={() => toggle(auto, setAuto, l.id)} />
-                    auto-download
-                  </label>
-                </div>
-              ))}
-            </div>
-          </div>
-          <p className="mt-2 text-xs text-faint">Syncing follows the new libraries immediately — the token doesn't change. Download a fresh plugin zip when convenient so the device's own list matches.</p>
+          <DeviceTags tags={tags} allowed={allowed} sel={sel} setSel={setSel} auto={auto} setAuto={setAuto}
+            keepPersonal={keepPersonal} />
+          <p className="mt-2 text-xs text-faint">Syncing follows the new tags immediately — the token doesn't change. Download a fresh plugin zip when convenient so the device's own list matches.</p>
           <div className="mt-3 flex gap-2">
-            <Button className="h-9" disabled={!name.trim() || sel.size === 0} onClick={save}>Save</Button>
+            <Button className="h-9" disabled={!name.trim() || sel.length === 0} onClick={save}>Save</Button>
             <Button variant="outline" className="h-9" onClick={() => setEditing(false)}>Cancel</Button>
           </div>
         </div>
@@ -412,32 +408,26 @@ function DeviceRow({ device, libraries, onChanged }: { device: ApiDevice; librar
 }
 
 export function DevicesPanel() {
-  const { isAdmin } = useAccess()
+  const { isAdmin, tagIds, personalTagId } = useAccess()
   const { data, loading, reload } = useApi(() => delivery.devices())
-  // already scoped by the server: a user is offered only their own libraries
-  const { data: libData } = useApi(() => api.libraries())
+  // already scoped by the server: a user is offered only their own tags
+  const { tags } = useTags()
+  // an admin may pick any tag; everyone else what they hold
+  const allowed = isAdmin ? undefined : tagIds
   // polled so saving the URL in the card below unblocks Add device live
   const { data: urlData } = useApi(() => api.getSetting("server_url"), 5_000)
   const serverUrlMissing = urlData !== undefined && (urlData?.value ?? "").trim() === ""
   const devices = data?.devices ?? []
-  const libraries = libData?.libraries ?? []
   const [adding, setAdding] = useState(false)
   const [name, setName] = useState("")
-  const [selected, setSelected] = useState<Set<number>>(new Set())
-  const [auto, setAuto] = useState<Set<number>>(new Set())
+  const [selected, setSelected] = useState<number[]>([])
+  const [auto, setAuto] = useState<number[]>([])
 
-  const toggle = (set: Set<number>, setter: (s: Set<number>) => void, id: number) => {
-    const next = new Set(set)
-    if (next.has(id)) next.delete(id)
-    else next.add(id)
-    setter(next)
-  }
   const create = async () => {
     try {
-      const libs = [...selected]
-      await delivery.createDevice(name.trim(), libs, [...auto].filter(id => selected.has(id)))
+      await delivery.createDevice(name.trim(), selected, auto.filter(id => selected.includes(id)))
       toast.success(`Device "${name.trim()}" added — download its plugin zip`)
-      setAdding(false); setName(""); setSelected(new Set()); setAuto(new Set())
+      setAdding(false); setName(""); setSelected([]); setAuto([])
       reload()
     } catch (e) {
       toast.error(`Couldn't add device: ${e instanceof Error ? e.message : e}`)
@@ -454,8 +444,8 @@ export function DevicesPanel() {
         }
         desc={
           isAdmin
-            ? "Each device gets its own preconfigured plugin zip: extract it, copy the resulting booky.koplugin folder into KOReader's plugins directory, and it syncs over wifi — no credentials to type on the device, the zip carries its own token and the server address. Auto-download libraries push new arrivals onto the device; revoking a device cuts it off instantly. You see every account's devices and can revoke any of them."
-            : "Pair your own e-reader: each device gets its own preconfigured plugin zip — extract it, copy the resulting booky.koplugin folder into KOReader's plugins directory, and it syncs over wifi with no credentials to type. You can only pick from the libraries assigned to you, and only your own devices appear here."
+            ? "Each device gets its own preconfigured plugin zip: extract it, copy the resulting booky.koplugin folder into KOReader's plugins directory, and it syncs over wifi — no credentials to type on the device, the zip carries its own token and the server address. A device carries books with the tags you pick (never more than its owner holds, checked on every sync); auto-download tags push new arrivals. Revoking a device cuts it off instantly. You see every account's devices and can revoke any of them."
+            : "Pair your own e-reader: each device gets its own preconfigured plugin zip — extract it, copy the resulting booky.koplugin folder into KOReader's plugins directory, and it syncs over wifi with no credentials to type. Pick which of your tags it carries; only your own devices appear here."
         }>
         {serverUrlMissing && (
           <div className="mb-3 rounded-r-lg border-l-[3px] border-want bg-want/10 px-4 py-2.5 text-[13px]">
@@ -471,7 +461,9 @@ export function DevicesPanel() {
           </p>
         )}
         <div className="flex flex-col gap-2">
-          {devices.map(d => <DeviceRow key={d.id} device={d} libraries={libraries} onChanged={reload} />)}
+          {devices.map(d => (
+            <DeviceRow key={d.id} device={d} tags={tags} allowed={allowed} keepPersonal={personalTagId} onChanged={reload} />
+          ))}
           {adding && (
             <div className="rounded-lg border border-dashed border-linesoft px-4 py-3">
               <div className="flex flex-wrap items-end gap-3">
@@ -480,27 +472,10 @@ export function DevicesPanel() {
                   <Input value={name} onChange={e => setName(e.target.value)} className="h-9 w-[180px]" placeholder="My Kobo" />
                 </div>
               </div>
-              <div className="mt-3">
-                <Label>Libraries (check "auto" to push new arrivals)</Label>
-                <div className="flex flex-col gap-1.5">
-                  {libraries.map(l => (
-                    <div key={l.id} className="flex items-center gap-4 text-[13px]">
-                      <label className="flex w-[160px] cursor-pointer items-center gap-2">
-                        <input type="checkbox" className="h-4 w-4 accent-[hsl(var(--brass))]"
-                          checked={selected.has(l.id)} onChange={() => toggle(selected, setSelected, l.id)} />
-                        <span className="font-medium">{l.name}</span>
-                      </label>
-                      <label className="flex cursor-pointer items-center gap-1.5 text-[12px] text-muted-foreground">
-                        <input type="checkbox" className="h-3.5 w-3.5 accent-[hsl(var(--brass))]" disabled={!selected.has(l.id)}
-                          checked={auto.has(l.id) && selected.has(l.id)} onChange={() => toggle(auto, setAuto, l.id)} />
-                        auto-download
-                      </label>
-                    </div>
-                  ))}
-                </div>
-              </div>
+              <DeviceTags tags={tags} allowed={allowed} sel={selected} setSel={setSelected} auto={auto} setAuto={setAuto}
+                keepPersonal={personalTagId} />
               <div className="mt-3 flex gap-2">
-                <Button className="h-9" disabled={!name.trim() || selected.size === 0 || serverUrlMissing} onClick={create}>Add device</Button>
+                <Button className="h-9" disabled={!name.trim() || selected.length === 0 || serverUrlMissing} onClick={create}>Add device</Button>
                 <Button variant="outline" className="h-9" onClick={() => setAdding(false)}>Cancel</Button>
               </div>
             </div>
@@ -508,7 +483,7 @@ export function DevicesPanel() {
         </div>
       </Card>
       {isAdmin && (
-        <Card title="Server URL" desc="Baked into every plugin zip so devices know where to sync — use an address your e-readers can reach on your network.">
+        <Card title="Server URL" desc="Baked into every plugin zip so devices know where to sync — and shown as the OPDS address under Account. Use an address your e-readers can reach on your network.">
           <div className="max-w-md">
             <SettingField settingKey="server_url" label="Server URL" placeholder="http://192.168.1.10:8787" />
           </div>

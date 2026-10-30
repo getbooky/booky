@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react"
-import { acquisition, api, canRead, coverUrl, kindle } from "@/api"
+import { acquisition, api, canRead, coverUrl, kindle, tags as tagsApi } from "@/api"
 import type { ApiBook, ApiKindleDevice, ApiLibrary } from "@/api"
 import { AddToLibraryButton } from "@/components/AddToLibrary"
 import { Cover, hashColors } from "@/components/Cover"
@@ -11,11 +11,12 @@ import { Input } from "@/components/ui/input"
 import { Textarea } from "@/components/ui/textarea"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu"
-import { ArrowLeft, BookOpenText, FolderInput, Lock, LockOpen, Mail, Pencil, RefreshCw, Search, Trash2, Upload, Zap } from "lucide-react"
+import { TagPill, useTags } from "@/components/TagPills"
+import { ArrowLeft, BookOpenText, FolderInput, Lock, LockOpen, Mail, Pencil, RefreshCw, Search, Trash2, Upload, Users, Zap } from "lucide-react"
 import { toast } from "sonner"
 import { cn } from "@/lib/utils"
 import { useIsAdmin } from "@/lib/access"
-import { removeModesFor, removeModeDesc, removeModeLabel } from "@/lib/removeModes"
+import { removeModesFor, removeModeDesc, removeModeLabel, removeOutcome } from "@/lib/removeModes"
 import type { RemoveMode } from "@/lib/removeModes"
 import { bookRibbon } from "@/views/Library"
 import { ReleasesDialog } from "@/components/ReleasesDialog"
@@ -301,6 +302,62 @@ export function EditMetadataDialog({ open, onOpenChange, book, onSaved }: {
   )
 }
 
+// SharedWith is who the book reaches. An admin edits it right here — tags are
+// sharing, and this is the one place a book's audience is decided by hand. A
+// plain user sees the tags they share with the book (the server only sends
+// those), so "why is this on my shelf?" has an answer.
+function SharedWith({ book, onChange }: { book: ApiBook; onChange: (tagIds: number[]) => void }) {
+  const isAdmin = useIsAdmin()
+  const { tags } = useTags()
+  const [saving, setSaving] = useState(false)
+  const current = book.tagIds ?? []
+  const save = async (next: number[]) => {
+    setSaving(true)
+    try {
+      const r = await tagsApi.setBookTags(book.id, next)
+      onChange(r.tagIds)
+    } catch (e) {
+      toast.error(`Couldn't update sharing: ${e instanceof Error ? e.message : e}`)
+    } finally {
+      setSaving(false)
+    }
+  }
+  const shared = tags.filter(t => !t.personal)
+  const personal = tags.filter(t => t.personal && current.includes(t.id))
+  return (
+    <div className="mt-5 rounded-2xl border border-linesoft bg-surface px-5 py-4">
+      <div className="flex items-center gap-2">
+        <Users className="h-4 w-4 text-muted-foreground" />
+        <h2 className="text-[13.5px] font-semibold">Shared with</h2>
+        {isAdmin && current.length === 0 && (
+          <span className="text-[12px] text-muted-foreground">— nobody yet; only admins can see it</span>
+        )}
+      </div>
+      <div className={cn("mt-3 flex flex-wrap gap-1.5", saving && "opacity-60")}>
+        {isAdmin
+          ? (
+            <>
+              {shared.map(t => (
+                <TagPill key={t.id} tag={t} on={current.includes(t.id)} disabled={saving}
+                  onClick={() => save(current.includes(t.id) ? current.filter(x => x !== t.id) : [...current, t.id])} />
+              ))}
+              {personal.map(t => (
+                <TagPill key={t.id} tag={t} on disabled={saving}
+                  onClick={() => save(current.filter(x => x !== t.id))} />
+              ))}
+            </>
+          )
+          : tags.filter(t => current.includes(t.id)).map(t => <TagPill key={t.id} tag={t} on />)}
+      </div>
+      {isAdmin && (
+        <p className="mt-2.5 text-[11.5px] text-faint">
+          Everyone holding a tag sees the book in the app, their OPDS feed and their KoReader — and Kindles auto-sending that tag get it once.
+        </p>
+      )}
+    </div>
+  )
+}
+
 // icon actions on the hero card: small, glassy, brass on hover
 const ICON_BTN = "h-8 w-8 rounded-lg border-linesoft bg-surface/75 backdrop-blur hover:border-brass/50 hover:text-brass"
 
@@ -333,10 +390,9 @@ export function BookDetail({ book: initial, onBack, onChanged, onRead, onOpenSer
 
   const remove = async (mode: RemoveMode) => {
     if (!book.libraryId) return
-    if (!window.confirm(`${book.title}\n\n${removeModeLabel(mode)}?\n${removeModeDesc(mode)}`)) return
+    if (!window.confirm(`${book.title}\n\n${removeModeLabel(mode, isAdmin)}?\n${removeModeDesc(mode, isAdmin)}`)) return
     try {
-      await api.removeBook(book.libraryId, book.id, mode)
-      toast(`${book.title} removed`)
+      toast(removeOutcome(book.title, await api.removeBook(book.libraryId, book.id, mode)))
       onChanged()
       onBack()
     } catch (e) {
@@ -385,14 +441,12 @@ export function BookDetail({ book: initial, onBack, onChanged, onRead, onOpenSer
   }
 
   // Send to Kindle: the button appears only when everything is ready — the
-  // caller has a device covering this library whose owner email is set, and
-  // the file is a format Amazon takes by email. Otherwise the action row
-  // looks exactly as it always did.
+  // caller has a device whose owner email is set, and the file is a format
+  // Amazon takes by email. Whether the device's owner may have this book is
+  // the server's call (it answers 403 otherwise).
   const { data: kindleData } = useApi(() => kindle.devices())
   const [sending, setSending] = useState(false)
-  const bookLibraryId = book.libraryId ?? 0
-  const kindleTargets = (kindleData?.devices ?? []).filter(d =>
-    d.emailConfigured && bookLibraryId > 0 && d.libraryIds.includes(bookLibraryId))
+  const kindleTargets = (kindleData?.devices ?? []).filter(d => d.emailConfigured && !!book.libraryId)
   const kindleSendable = !!book.filePath && ["epub", "pdf"].includes((book.fileFormat ?? "").toLowerCase())
   const sendToKindle = async (d: ApiKindleDevice) => {
     setSending(true)
@@ -618,6 +672,8 @@ export function BookDetail({ book: initial, onBack, onChanged, onRead, onOpenSer
           </div>
         </div>
       </div>
+
+      {book.libraryId ? <SharedWith book={book} onChange={tagIds => setBook({ ...book, tagIds })} /> : null}
 
       {book.filePath && (
         <>

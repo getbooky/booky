@@ -2,8 +2,9 @@ import { useState } from "react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Tag } from "@/components/bits"
-import { api, kindle } from "@/api"
-import type { ApiKindleDevice, ApiLibrary, ApiSmtpConfig } from "@/api"
+import { kindle } from "@/api"
+import type { ApiKindleDevice, ApiSmtpConfig, ApiTag } from "@/api"
+import { TagPicker, useTags } from "@/components/TagPills"
 import { useAccess } from "@/lib/access"
 import { formatFull, formatWhen } from "@/lib/time"
 import { useApi } from "@/hooks/use-api"
@@ -29,30 +30,31 @@ function Label({ children }: { children: React.ReactNode }) {
 
 /* ---------- Kindle devices ---------- */
 
-function KindleDeviceRow({ device, libraries, onChanged }: { device: ApiKindleDevice; libraries: ApiLibrary[]; onChanged: () => void }) {
-  const libName = (id: number) => libraries.find(l => l.id === id)?.name ?? `#${id}`
+// AUTO_SEND_HINT is the rule, said once: what auto-send does and doesn't do.
+const AUTO_SEND_HINT = "A book is emailed once, the moment it's on the shelf and carries one of these tags — when it imports, or when it's tagged later. Adding a tag here doesn't email the books that already have it. Send to Kindle on a book's page works for anything you can see."
+
+function KindleDeviceRow({ device, tags, allowed, keepPersonal, onChanged }: {
+  device: ApiKindleDevice
+  tags: ApiTag[]
+  allowed?: number[]
+  keepPersonal: number
+  onChanged: () => void
+}) {
+  const byId = new Map(tags.map(t => [t.id, t]))
   const [testing, setTesting] = useState(false)
-  // in-place editing: add a library, flip auto-send, fix the address — no
-  // re-pairing
+  // in-place editing: change auto-send tags, fix the address — no re-pairing
   const [editing, setEditing] = useState(false)
   const [name, setName] = useState(device.name)
   const [email, setEmail] = useState(device.email)
-  const [sel, setSel] = useState<Set<number>>(new Set(device.libraryIds))
-  const [auto, setAuto] = useState<Set<number>>(new Set(device.autoLibraryIds))
+  const [auto, setAuto] = useState<number[]>(device.autoTagIds)
   const startEdit = () => {
     setName(device.name); setEmail(device.email)
-    setSel(new Set(device.libraryIds)); setAuto(new Set(device.autoLibraryIds))
+    setAuto(device.autoTagIds)
     setEditing(true)
-  }
-  const toggle = (set: Set<number>, setter: (s: Set<number>) => void, id: number) => {
-    const next = new Set(set)
-    if (next.has(id)) next.delete(id)
-    else next.add(id)
-    setter(next)
   }
   const save = async () => {
     try {
-      await kindle.updateDevice(device.id, name.trim(), email.trim(), [...sel], [...auto].filter(id => sel.has(id)))
+      await kindle.updateDevice(device.id, name.trim(), email.trim(), auto)
       toast.success(`"${name.trim()}" updated`)
       setEditing(false)
       onChanged()
@@ -93,11 +95,11 @@ function KindleDeviceRow({ device, libraries, onChanged }: { device: ApiKindleDe
       {/* only admins are sent an owner name, and only they see other
           people's devices — so this labels exactly the rows that need it */}
       {device.ownerName && <Tag kind="dim">{device.ownerName}</Tag>}
-      {device.libraryIds.map(id => (
-        <Tag key={id} kind={device.autoLibraryIds.includes(id) ? "info" : "dim"}>
-          {libName(id)}{device.autoLibraryIds.includes(id) ? " · auto" : ""}
-        </Tag>
-      ))}
+      {device.autoTagIds.length === 0
+        ? <span className="text-[12px] text-faint">manual sends only</span>
+        : device.autoTagIds.map(id => (
+            <Tag key={id} kind="info">auto · {byId.get(id)?.name ?? `#${id}`}</Tag>
+          ))}
       {!device.emailConfigured && (
         <Tag kind="want">owner email not set</Tag>
       )}
@@ -126,26 +128,12 @@ function KindleDeviceRow({ device, libraries, onChanged }: { device: ApiKindleDe
             </div>
           </div>
           <div className="mt-3">
-            <Label>Libraries (check "auto-send" to email new arrivals)</Label>
-            <div className="flex flex-col gap-1.5">
-              {libraries.map(l => (
-                <div key={l.id} className="flex items-center gap-4 text-[13px]">
-                  <label className="flex w-[160px] cursor-pointer items-center gap-2">
-                    <input type="checkbox" className="h-4 w-4 accent-[hsl(var(--brass))]"
-                      checked={sel.has(l.id)} onChange={() => toggle(sel, setSel, l.id)} />
-                    <span className="font-medium">{l.name}</span>
-                  </label>
-                  <label className="flex cursor-pointer items-center gap-1.5 text-[12px] text-muted-foreground">
-                    <input type="checkbox" className="h-3.5 w-3.5 accent-[hsl(var(--brass))]" disabled={!sel.has(l.id)}
-                      checked={auto.has(l.id) && sel.has(l.id)} onChange={() => toggle(auto, setAuto, l.id)} />
-                    auto-send
-                  </label>
-                </div>
-              ))}
-            </div>
+            <Label>Auto-send books tagged</Label>
+            <TagPicker tags={tags} allowed={allowed} hidePersonal keepPersonal={keepPersonal} value={auto} onChange={setAuto} />
+            <p className="mt-1.5 max-w-[62ch] text-xs text-faint">{AUTO_SEND_HINT}</p>
           </div>
           <div className="mt-3 flex gap-2">
-            <Button className="h-9" disabled={!name.trim() || !email.trim() || sel.size === 0} onClick={save}>Save</Button>
+            <Button className="h-9" disabled={!name.trim() || !email.trim()} onClick={save}>Save</Button>
             <Button variant="outline" className="h-9" onClick={() => setEditing(false)}>Cancel</Button>
           </div>
         </div>
@@ -272,31 +260,24 @@ function OutgoingEmailCard({ configured, onChanged }: { configured: boolean; onC
 /* ---------- panel ---------- */
 
 export function KindlePanel() {
-  const { isAdmin } = useAccess()
+  const { isAdmin, tagIds, personalTagId } = useAccess()
   const { data, loading, reload } = useApi(() => kindle.devices())
   const smtp = useApi(() => kindle.smtp())
-  // already scoped by the server: a user is offered only their own libraries
-  const { data: libData } = useApi(() => api.libraries())
+  // already scoped by the server: a user is offered only their own tags
+  const { tags } = useTags()
+  const allowed = isAdmin ? undefined : tagIds
   const devices = data?.devices ?? []
-  const libraries = libData?.libraries ?? []
   const configured = smtp.data?.configured === true
   const [adding, setAdding] = useState(false)
   const [name, setName] = useState("")
   const [email, setEmail] = useState("")
-  const [selected, setSelected] = useState<Set<number>>(new Set())
-  const [auto, setAuto] = useState<Set<number>>(new Set())
+  const [auto, setAuto] = useState<number[]>([])
 
-  const toggle = (set: Set<number>, setter: (s: Set<number>) => void, id: number) => {
-    const next = new Set(set)
-    if (next.has(id)) next.delete(id)
-    else next.add(id)
-    setter(next)
-  }
   const create = async () => {
     try {
-      await kindle.createDevice(name.trim(), email.trim(), [...selected], [...auto].filter(id => selected.has(id)))
+      await kindle.createDevice(name.trim(), email.trim(), auto)
       toast.success(`Device "${name.trim()}" added`)
-      setAdding(false); setName(""); setEmail(""); setSelected(new Set()); setAuto(new Set())
+      setAdding(false); setName(""); setEmail(""); setAuto([])
       reload()
     } catch (e) {
       toast.error(`Couldn't add device: ${e instanceof Error ? e.message : e}`)
@@ -314,8 +295,8 @@ export function KindlePanel() {
         }
         desc={
           isAdmin
-            ? "Books are emailed to a Kindle's @kindle.com address — EPUB or PDF, up to 50 MB. The Kindle must approve your from address first (Amazon → Preferences → Personal Document Settings). Auto-send delivers new arrivals as they import. You see every account's devices; each sends through its owner's outgoing email."
-            : "Books are emailed to a Kindle's @kindle.com address — EPUB or PDF, up to 50 MB. The Kindle must approve your from address first (Amazon → Preferences → Personal Document Settings). Auto-send delivers new arrivals as they import. Only your devices appear here."
+            ? "Books are emailed to a Kindle's @kindle.com address — EPUB or PDF, up to 50 MB. The Kindle must approve your from address first (Amazon → Preferences → Personal Document Settings). Auto-send emails books carrying the tags you pick — each book once. You see every account's devices; each sends through its owner's outgoing email and never reaches past its owner's tags."
+            : "Books are emailed to a Kindle's @kindle.com address — EPUB or PDF, up to 50 MB. The Kindle must approve your from address first (Amazon → Preferences → Personal Document Settings). Auto-send emails books carrying the tags you pick — each book once. Only your devices appear here."
         }>
         {!configured && !smtp.loading && (
           <div className="mb-3 rounded-r-lg border-l-[3px] border-want bg-want/10 px-4 py-2.5 text-[13px]">
@@ -329,7 +310,9 @@ export function KindlePanel() {
           </p>
         )}
         <div className="flex flex-col gap-2">
-          {devices.map(d => <KindleDeviceRow key={d.id} device={d} libraries={libraries} onChanged={onChanged} />)}
+          {devices.map(d => (
+            <KindleDeviceRow key={d.id} device={d} tags={tags} allowed={allowed} keepPersonal={personalTagId} onChanged={onChanged} />
+          ))}
           {adding && (
             <div className="rounded-lg border border-dashed border-linesoft px-4 py-3">
               <div className="flex flex-wrap items-end gap-3">
@@ -343,26 +326,12 @@ export function KindlePanel() {
                 </div>
               </div>
               <div className="mt-3">
-                <Label>Libraries (check "auto-send" to email new arrivals)</Label>
-                <div className="flex flex-col gap-1.5">
-                  {libraries.map(l => (
-                    <div key={l.id} className="flex items-center gap-4 text-[13px]">
-                      <label className="flex w-[160px] cursor-pointer items-center gap-2">
-                        <input type="checkbox" className="h-4 w-4 accent-[hsl(var(--brass))]"
-                          checked={selected.has(l.id)} onChange={() => toggle(selected, setSelected, l.id)} />
-                        <span className="font-medium">{l.name}</span>
-                      </label>
-                      <label className="flex cursor-pointer items-center gap-1.5 text-[12px] text-muted-foreground">
-                        <input type="checkbox" className="h-3.5 w-3.5 accent-[hsl(var(--brass))]" disabled={!selected.has(l.id)}
-                          checked={auto.has(l.id) && selected.has(l.id)} onChange={() => toggle(auto, setAuto, l.id)} />
-                        auto-send
-                      </label>
-                    </div>
-                  ))}
-                </div>
+                <Label>Auto-send books tagged</Label>
+                <TagPicker tags={tags} allowed={allowed} hidePersonal keepPersonal={personalTagId} value={auto} onChange={setAuto} />
+                <p className="mt-1.5 max-w-[62ch] text-xs text-faint">{AUTO_SEND_HINT} Leave it empty for manual sends only.</p>
               </div>
               <div className="mt-3 flex gap-2">
-                <Button className="h-9" disabled={!name.trim() || !email.trim() || selected.size === 0} onClick={create}>Add device</Button>
+                <Button className="h-9" disabled={!name.trim() || !email.trim()} onClick={create}>Add device</Button>
                 <Button variant="outline" className="h-9" onClick={() => setAdding(false)}>Cancel</Button>
               </div>
             </div>

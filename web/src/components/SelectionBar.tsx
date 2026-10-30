@@ -1,6 +1,8 @@
 import { useState } from "react"
-import { api, kindle } from "@/api"
-import type { ApiBook, ApiKindleDevice, ApiLibrary } from "@/api"
+import { api, kindle, tags as tagsApi } from "@/api"
+import type { ApiBook, ApiKindleDevice } from "@/api"
+import { TagPicker, useTags } from "@/components/TagPills"
+import { Chips } from "@/components/bits"
 import { useApi } from "@/hooks/use-api"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -10,11 +12,95 @@ import { Label } from "@/components/ui/label"
 import {
   DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
-import { FolderInput, Mail, Pencil, RefreshCw, Trash2, X } from "lucide-react"
+import { Mail, Pencil, RefreshCw, Tag as TagIcon, Trash2, X } from "lucide-react"
 import { removeModesFor } from "@/lib/removeModes"
 import type { RemoveMode } from "@/lib/removeModes"
 import { toast } from "sonner"
 import { useIsAdmin } from "@/lib/access"
+
+// BulkTagDialog shares (or unshares) a selection. When the change would
+// email more than a handful of books to Kindles, the server changes nothing
+// and says how many — the dialog then asks before anything is sent, and
+// "tag without sending" marks those books as handled so they never trickle
+// out later.
+function BulkTagDialog({ open, onOpenChange, books, onDone }: {
+  open: boolean; onOpenChange: (v: boolean) => void; books: ApiBook[]; onDone: () => void
+}) {
+  const { tags } = useTags()
+  const [mode, setMode] = useState<"add" | "remove" | "replace">("add")
+  const [picked, setPicked] = useState<number[]>([])
+  const [confirm, setConfirm] = useState<{ sends: number; devices: number } | null>(null)
+  const [busy, setBusy] = useState(false)
+  const ids = books.map(b => b.id)
+
+  const run = async (sendToKindle?: boolean) => {
+    setBusy(true)
+    try {
+      const r = await tagsApi.bulk(ids, picked, mode, sendToKindle)
+      if (r.needsConfirm) {
+        setConfirm({ sends: r.kindleSends, devices: r.kindleDevices })
+        return
+      }
+      toast.success(`${books.length} book${books.length === 1 ? "" : "s"} updated`)
+      setConfirm(null)
+      setPicked([])
+      onOpenChange(false)
+      onDone()
+    } catch (e) {
+      toast.error(`Couldn't update sharing: ${e instanceof Error ? e.message : e}`)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <Dialog open={open} onOpenChange={v => { if (!v) setConfirm(null); onOpenChange(v) }}>
+      <DialogContent className="max-w-md rounded-xl">
+        <DialogHeader>
+          <DialogTitle className="font-book text-lg font-bold">Share {books.length} book{books.length === 1 ? "" : "s"}</DialogTitle>
+        </DialogHeader>
+        {confirm ? (
+          <div className="py-1 text-[13px] leading-relaxed">
+            <p>
+              This would email <b>{confirm.sends} book{confirm.sends === 1 ? "" : "s"}</b> to{" "}
+              {confirm.devices === 1 ? "a Kindle" : `${confirm.devices} Kindles`} that auto-send{" "}
+              {picked.length === 1 ? "this tag" : "these tags"}.
+            </p>
+            <p className="mt-2 text-muted-foreground">
+              Tag without sending and those books won't go out later either — you can still send any of them by hand.
+            </p>
+          </div>
+        ) : (
+          <div className="grid gap-4 py-1">
+            <Chips value={mode} onChange={setMode} options={[
+              { v: "add", label: "Add tags" }, { v: "remove", label: "Remove tags" }, { v: "replace", label: "Replace all" },
+            ]} />
+            <TagPicker tags={tags} value={picked} onChange={setPicked} />
+            {mode === "replace" && picked.length === 0 && (
+              <p className="text-[12px] text-want">Replacing with no tags makes these books admin-only.</p>
+            )}
+          </div>
+        )}
+        <DialogFooter>
+          {confirm ? (
+            <>
+              <Button variant="outline" disabled={busy} onClick={() => setConfirm(null)}>Back</Button>
+              <Button variant="outline" disabled={busy} onClick={() => run(false)}>Tag without sending</Button>
+              <Button disabled={busy} onClick={() => run(true)}>Tag &amp; send</Button>
+            </>
+          ) : (
+            <>
+              <Button variant="outline" onClick={() => onOpenChange(false)}>Cancel</Button>
+              <Button disabled={busy || (picked.length === 0 && mode !== "replace")} onClick={() => run()}>
+                {busy ? "Saving…" : "Apply"}
+              </Button>
+            </>
+          )}
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  )
+}
 
 function BulkDeleteDialog({ open, onOpenChange, count, onConfirm }: {
   open: boolean; onOpenChange: (v: boolean) => void; count: number
@@ -97,15 +183,15 @@ async function runBulk(books: ApiBook[], label: string, fn: (b: ApiBook) => Prom
   else toast.warning(`${label}: ${ok} done, ${failed} failed${lastError ? ` — ${lastError}` : ""}`)
 }
 
-export function SelectionBar({ books, libraries, onClear, onChanged }: {
+export function SelectionBar({ books, onClear, onChanged }: {
   books: ApiBook[]
-  libraries: ApiLibrary[]
   onClear: () => void
   onChanged: () => void
 }) {
   const isAdmin = useIsAdmin()
   const [delOpen, setDelOpen] = useState(false)
   const [editOpen, setEditOpen] = useState(false)
+  const [tagOpen, setTagOpen] = useState(false)
   const [busy, setBusy] = useState(false)
   const { data: kindleData } = useApi(() => kindle.devices())
   const kindleDevices = (kindleData?.devices ?? []).filter(d => d.emailConfigured)
@@ -122,24 +208,21 @@ export function SelectionBar({ books, libraries, onClear, onChanged }: {
   const doRefresh = guard(() => runBulk(books, "Refreshed", b => api.refreshBook(b.id)))
   const doEdit = (fields: Record<string, string>) =>
     guard(() => runBulk(books, "Edited", b => api.editBook(b.id, fields, true)))()
-  const doMove = (to: ApiLibrary) =>
-    guard(() => runBulk(books, `Moved to ${to.name}`, b => api.moveBook(b.id, b.libraryId ?? 0, to.id)))()
-
   // Bulk Send to Kindle mails what qualifies and says what didn't: only
-  // EPUB/PDF files from libraries the device covers go out. A selection with
-  // nothing sendable stays selected — clearing it would just eat the picks.
+  // EPUB/PDF files on the shelf go out, and the server refuses anything the
+  // device's owner can't see. A selection with nothing sendable stays
+  // selected — clearing it would just eat the picks.
   const doSend = (d: ApiKindleDevice) => {
     const sendable = books.filter(b =>
-      !!b.filePath && ["epub", "pdf"].includes((b.fileFormat ?? "").toLowerCase()) &&
-      !!b.libraryId && d.libraryIds.includes(b.libraryId))
+      !!b.filePath && ["epub", "pdf"].includes((b.fileFormat ?? "").toLowerCase()))
     if (sendable.length === 0) {
-      toast.warning("Nothing to send — Kindle takes EPUB or PDF files from the device's libraries")
+      toast.warning("Nothing to send — Kindle takes EPUB or PDF files")
       return
     }
     const skipped = books.length - sendable.length
     void guard(async () => {
       await runBulk(sendable, `Sent to ${d.name}`, b => kindle.sendBook(b.id, d.id))
-      if (skipped > 0) toast(`${skipped} book${skipped === 1 ? "" : "s"} skipped — no EPUB/PDF file, or outside ${d.name}'s libraries`)
+      if (skipped > 0) toast(`${skipped} book${skipped === 1 ? "" : "s"} skipped — no EPUB or PDF file`)
     })()
   }
 
@@ -158,19 +241,11 @@ export function SelectionBar({ books, libraries, onClear, onChanged }: {
           disabled={busy} onClick={doRefresh}>
           <RefreshCw className="h-4 w-4" />
         </Button>
-        {isAdmin && libraries.length > 1 && (
-          <DropdownMenu>
-            <DropdownMenuTrigger asChild>
-              <Button variant="ghost" size="icon" className="h-9 w-9 rounded-[10px]" title="Move to library" disabled={busy}>
-                <FolderInput className="h-4 w-4" />
-              </Button>
-            </DropdownMenuTrigger>
-            <DropdownMenuContent side="top" align="center" className="rounded-xl">
-              {libraries.map(l => (
-                <DropdownMenuItem key={l.id} onClick={() => doMove(l)}>{l.name}</DropdownMenuItem>
-              ))}
-            </DropdownMenuContent>
-          </DropdownMenu>
+        {isAdmin && (
+          <Button variant="ghost" size="icon" className="h-9 w-9 rounded-[10px]" title="Share with tags"
+            disabled={busy} onClick={() => setTagOpen(true)}>
+            <TagIcon className="h-4 w-4" />
+          </Button>
         )}
         {kindleDevices.length === 1 && (
           <Button variant="ghost" size="icon" className="h-9 w-9 rounded-[10px]" title={`Send to Kindle — ${kindleDevices[0].name}`}
@@ -205,6 +280,8 @@ export function SelectionBar({ books, libraries, onClear, onChanged }: {
       </div>
       <BulkDeleteDialog open={delOpen} onOpenChange={setDelOpen} count={books.length} onConfirm={doDelete} />
       <BulkEditDialog open={editOpen} onOpenChange={setEditOpen} count={books.length} onConfirm={doEdit} />
+      <BulkTagDialog open={tagOpen} onOpenChange={setTagOpen} books={books}
+        onDone={() => { onChanged(); onClear() }} />
     </>
   )
 }

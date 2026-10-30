@@ -1,6 +1,7 @@
 import { useMemo, useState } from "react"
 import { api, acquisition, canRead, coverUrl, kindle } from "@/api"
-import type { ApiBook, ApiKindleDevice, ApiLibrary } from "@/api"
+import type { ApiBook, ApiKindleDevice, ApiLibrary, ApiTag } from "@/api"
+import { useTags } from "@/components/TagPills"
 import { useApi } from "@/hooks/use-api"
 import { Cover, hashColors } from "@/components/Cover"
 import type { RibbonKind } from "@/components/Cover"
@@ -24,9 +25,9 @@ import { ReleasesDialog } from "@/components/ReleasesDialog"
 import { ImportBookDialog } from "@/components/ImportBookDialog"
 import { toast } from "sonner"
 import { cn } from "@/lib/utils"
-import { removeModesFor, removeModeDesc, removeModeLabel } from "@/lib/removeModes"
+import { removeModesFor, removeModeDesc, removeModeLabel, removeOutcome } from "@/lib/removeModes"
 import type { RemoveMode } from "@/lib/removeModes"
-import { useIsAdmin } from "@/lib/access"
+import { useAccess, useIsAdmin } from "@/lib/access"
 
 export type Scope = "all" | "recent" | "missing" | "upgrade"
 
@@ -63,9 +64,8 @@ const SORT_CMP: Record<SortKey, (a: ApiBook, b: ApiBook) => number> = {
   release: (a, b) => (a.releaseDate ?? "").localeCompare(b.releaseDate ?? ""),
 }
 
-function BookCell({ book, libraries, kindleDevices, seriesTag, bust, selected, selectionActive, onToggleSelect, onOpen, onOpenAuthor, onOpenSeries, onRead, onEdit, onSearch, onChanged }: {
+function BookCell({ book, kindleDevices, seriesTag, bust, selected, selectionActive, onToggleSelect, onOpen, onOpenAuthor, onOpenSeries, onRead, onEdit, onSearch, onChanged }: {
   book: ApiBook
-  libraries: ApiLibrary[]
   kindleDevices: ApiKindleDevice[]
   seriesTag?: boolean
   bust?: number
@@ -82,13 +82,12 @@ function BookCell({ book, libraries, kindleDevices, seriesTag, bust, selected, s
 }) {
   const [c1, c2] = hashColors(book.title)
   const isAdmin = useIsAdmin()
-  const otherLibs = libraries.filter(l => l.id !== book.libraryId)
 
-  // Send to Kindle, same gate as the book page: a device covering this
-  // library with its owner's email set, and a file Amazon takes by email.
-  // One device sends straight away; several open a picker submenu.
-  const kindleTargets = kindleDevices.filter(d =>
-    d.emailConfigured && !!book.libraryId && d.libraryIds.includes(book.libraryId))
+  // Send to Kindle, same gate as the book page: a device with its owner's
+  // email set, and a file Amazon takes by email (the server checks the
+  // owner may have the book). One device sends straight away; several open a
+  // picker submenu.
+  const kindleTargets = kindleDevices.filter(d => d.emailConfigured && !!book.libraryId)
   const kindleSendable = !!book.filePath && ["epub", "pdf"].includes((book.fileFormat ?? "").toLowerCase())
   const sendToKindle = async (d: ApiKindleDevice) => {
     toast(`Sending to ${d.name}…`)
@@ -114,13 +113,7 @@ function BookCell({ book, libraries, kindleDevices, seriesTag, bust, selected, s
       onChanged()
     } catch (e) { toast.error(`${e instanceof Error ? e.message : e}`) }
   }
-  const move = async (to: ApiLibrary) => {
-    try {
-      await api.moveBook(book.id, book.libraryId ?? 0, to.id)
-      toast.success(`Moved to ${to.name}`)
-      onChanged()
-    } catch (e) { toast.error(`${e instanceof Error ? e.message : e}`) }
-  }
+
   const autoGrab = async () => {
     if (!book.libraryId) { toast.error("Monitor this book into a library first"); return }
     toast(`Auto-grabbing ${book.title}…`)
@@ -133,10 +126,9 @@ function BookCell({ book, libraries, kindleDevices, seriesTag, bust, selected, s
   }
   const remove = async (mode: RemoveMode) => {
     if (!book.libraryId) return
-    if (!window.confirm(`${book.title}\n\n${removeModeLabel(mode)}?\n${removeModeDesc(mode)}`)) return
+    if (!window.confirm(`${book.title}\n\n${removeModeLabel(mode, isAdmin)}?\n${removeModeDesc(mode, isAdmin)}`)) return
     try {
-      await api.removeBook(book.libraryId, book.id, mode)
-      toast(`${book.title} removed`)
+      toast(removeOutcome(book.title, await api.removeBook(book.libraryId, book.id, mode)))
       onChanged()
     } catch (e) { toast.error(`Couldn't remove: ${e instanceof Error ? e.message : e}`) }
   }
@@ -209,18 +201,6 @@ function BookCell({ book, libraries, kindleDevices, seriesTag, bust, selected, s
             <DropdownMenuItem onClick={() => onSearch(book)} disabled={!book.libraryId}>
               <Search className="mr-2 h-3.5 w-3.5 text-muted-foreground" /> Search releases
             </DropdownMenuItem>
-            {isAdmin && otherLibs.length > 0 && (
-              <DropdownMenuSub>
-                <DropdownMenuSubTrigger>
-                  <FolderInput className="mr-2 h-3.5 w-3.5 text-muted-foreground" /> Move to library
-                </DropdownMenuSubTrigger>
-                <DropdownMenuSubContent className="rounded-xl">
-                  {otherLibs.map(l => (
-                    <DropdownMenuItem key={l.id} onClick={() => move(l)}>{l.name}</DropdownMenuItem>
-                  ))}
-                </DropdownMenuSubContent>
-              </DropdownMenuSub>
-            )}
             <DropdownMenuSeparator />
             <DropdownMenuSub>
               <DropdownMenuSubTrigger>
@@ -347,8 +327,10 @@ function SeriesStack({ books, onExpand, onOpenSeries, onOpenAuthor }: {
 
 export type { ScopeFilter } from "@/components/FilterRows"
 
-export function LibraryView({ library, scope, libraries, initialFilters, scopeTitle, onOpenBook, onOpenAuthor, onOpenSeries, onRead, onSelectLibrary }: {
+export function LibraryView({ library, tag, scope, libraries, initialFilters, scopeTitle, onOpenBook, onOpenAuthor, onOpenSeries, onRead, onSelectTag }: {
   library: ApiLibrary | null
+  /** narrow to the books one tag shares */
+  tag?: ApiTag | null
   scope: Scope
   libraries: ApiLibrary[]
   initialFilters?: ScopeFilter[]
@@ -357,7 +339,7 @@ export function LibraryView({ library, scope, libraries, initialFilters, scopeTi
   onOpenAuthor: (b: ApiBook) => void
   onOpenSeries: (b: ApiBook) => void
   onRead: (b: ApiBook) => void
-  onSelectLibrary?: (l: ApiLibrary | null) => void
+  onSelectTag?: (t: ApiTag | null) => void
 }) {
   const booksQuery = useApi(() => api.books(library ? { libraryId: library.id } : {}), 5_000)
   // fetched once for the whole grid — every cell's ⋯ menu shares the list
@@ -373,11 +355,12 @@ export function LibraryView({ library, scope, libraries, initialFilters, scopeTi
     if (library) return rows
     const byId = new Map<number, ApiBook>()
     for (const b of rows) {
+      if (tag && !(b.tagIds ?? []).includes(tag.id)) continue
       const seen = byId.get(b.id)
       if (!seen || (!seen.filePath && b.filePath)) byId.set(b.id, b)
     }
     return [...byId.values()]
-  }, [booksQuery.data, library])
+  }, [booksQuery.data, library, tag])
 
   const [stack, setStack] = useState(true)
   const [missingOnly, setMissingOnly] = useState(false)
@@ -505,7 +488,10 @@ export function LibraryView({ library, scope, libraries, initialFilters, scopeTi
   const onShelf = allBooks.filter(b => b.filePath).length
   const seriesCount = useMemo(() => new Set(allBooks.filter(b => b.seriesId).map(b => b.seriesId)).size, [allBooks])
   const sizeMB = allBooks.reduce((sum, b) => sum + (b.fileSize ?? 0), 0) / 1e6
-  const title = scopeTitle ?? (library && scope === "all" ? library.name : SCOPE_TITLES[scope])
+  const { tags: allTags } = useTags()
+  const { personalTagId } = useAccess()
+  const tagName = (t: ApiTag) => t.id === personalTagId ? "My shelf" : t.name
+  const title = scopeTitle ?? (tag && scope === "all" ? tagName(tag) : SCOPE_TITLES[scope])
   const changed = () => { setBust(Date.now()); booksQuery.reload() }
 
   return (
@@ -632,28 +618,28 @@ export function LibraryView({ library, scope, libraries, initialFilters, scopeTi
         }
       />
 
-      {/* phones have no sidebar, so the library list lives here: a chip row
-          for All + each library (and the smart scopes' reachable too) */}
-      {onSelectLibrary && libraries.length > 0 && (
+      {/* phones have no sidebar, so the tag list lives here: a chip row
+          for All + each tag the caller can filter by */}
+      {onSelectTag && allTags.length > 0 && (
         <div className="mb-4 flex flex-wrap items-center gap-1.5 md:hidden">
-          <button onClick={() => onSelectLibrary(null)}
+          <button onClick={() => onSelectTag(null)}
             className={cn(
-              "rounded-lg border px-2.5 py-1 text-[12px] font-medium",
-              !library && scope === "all" && !scopeTitle
+              "rounded-full border px-2.5 py-1 text-[12px] font-medium",
+              !tag && scope === "all" && !scopeTitle
                 ? "border-brass/50 bg-brass/15 text-brass"
                 : "text-muted-foreground"
             )}>
-            All libraries
+            All
           </button>
-          {libraries.map(l => (
-            <button key={l.id} onClick={() => onSelectLibrary(l)}
+          {allTags.map(t => (
+            <button key={t.id} onClick={() => onSelectTag(t)}
               className={cn(
-                "rounded-lg border px-2.5 py-1 text-[12px] font-medium",
-                library?.id === l.id
+                "rounded-full border px-2.5 py-1 text-[12px] font-medium",
+                tag?.id === t.id
                   ? "border-brass/50 bg-brass/15 text-brass"
                   : "text-muted-foreground"
               )}>
-              {l.name}
+              {tagName(t)}
             </button>
           ))}
         </div>
@@ -683,7 +669,9 @@ export function LibraryView({ library, scope, libraries, initialFilters, scopeTi
       {!booksQuery.loading && !booksQuery.error && allBooks.length === 0 && (
         <div className="max-w-[52ch] text-[13.5px] leading-relaxed text-muted-foreground">
           <p className="font-book mb-2 text-xl font-bold text-foreground">The shelf is empty.</p>
-          <p>Search for a book up top to add one, or scan an existing folder from the ⋯ menu on a library in the sidebar.</p>
+          <p>{tag
+            ? "Nothing shared through this tag yet."
+            : "Search for a book up top to add one, or scan the library folder from the sidebar."}</p>
         </div>
       )}
       {!booksQuery.loading && allBooks.length > 0 && books.length === 0 && scope === "upgrade" && (
@@ -701,7 +689,7 @@ export function LibraryView({ library, scope, libraries, initialFilters, scopeTi
               onOpenAuthor={() => onOpenAuthor(cell.books[0])} />
           ) : (
             <BookCell key={`${cell.book.id}-${cell.book.libraryId}`} book={cell.book}
-              libraries={libraries} kindleDevices={kindleDevices} bust={bust}
+              kindleDevices={kindleDevices} bust={bust}
               seriesTag={!!cell.book.seriesId}
               onOpenAuthor={onOpenAuthor}
               onOpenSeries={onOpenSeries}
@@ -720,7 +708,6 @@ export function LibraryView({ library, scope, libraries, initialFilters, scopeTi
 
       <SelectionBar
         books={[...selection.values()]}
-        libraries={libraries}
         onClear={() => setSelection(new Map())}
         onChanged={changed}
       />
