@@ -301,6 +301,9 @@ export function EditMetadataDialog({ open, onOpenChange, book, onSaved }: {
   )
 }
 
+// icon actions on the hero card: small, glassy, brass on hover
+const ICON_BTN = "h-8 w-8 rounded-lg border-linesoft bg-surface/75 backdrop-blur hover:border-brass/50 hover:text-brass"
+
 export function BookDetail({ book: initial, onBack, onChanged, onRead, onOpenSeries, onOpenAuthor }: {
   book: ApiBook
   onBack: () => void
@@ -424,199 +427,206 @@ export function BookDetail({ book: initial, onBack, onChanged, onRead, onOpenSer
     }
   }
 
+  const meta = [
+    book.releaseDate?.slice(0, 4),
+    ...(book.genres ?? []).slice(0, 3),
+  ].filter(Boolean)
+
   return (
     <section>
-      <button onClick={onBack} className="mono-label mb-5 flex items-center gap-1.5 text-muted-foreground hover:text-brass">
+      <button onClick={onBack} className="mono-label mb-4 flex items-center gap-1.5 text-muted-foreground hover:text-brass">
         <ArrowLeft className="h-3.5 w-3.5" /> Library
       </button>
 
-      {/* phones stack title above the action row so neither squeezes the
-          other; side-by-side returns at sm */}
-      <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between sm:gap-5">
-        <div className="min-w-0">
-          <div className="mono-label text-faint">
-            {book.seriesName && (
-              <>
-                {onOpenSeries
-                  ? <button className="hover:text-brass hover:underline" onClick={() => onOpenSeries(book)}>
-                      {book.seriesName} #{book.seriesNum}
-                    </button>
-                  : `${book.seriesName} #${book.seriesNum}`}
-                {" · "}
-              </>
-            )}
-            {book.releaseDate?.slice(0, 4) ?? ""}
+      {/* the hero: the book's own cover, blurred, lights the card behind it */}
+      <div className="relative overflow-hidden rounded-2xl border border-linesoft bg-surface">
+        <img src={coverUrl(book.id)} alt="" aria-hidden
+          className="pointer-events-none absolute inset-0 h-full w-full scale-125 object-cover opacity-30 blur-2xl"
+          onError={e => { e.currentTarget.style.display = "none" }} />
+        <div className="pointer-events-none absolute inset-0 bg-linear-to-r from-background/90 via-background/75 to-background/40" />
+
+        <div className="relative flex flex-col gap-5 p-5 sm:flex-row sm:gap-7 sm:p-6">
+          <div className="w-[120px] shrink-0 self-center sm:w-[170px] sm:self-start">
+            <Cover c1={c1} c2={c2} title={book.title} author={book.author}
+              src={coverUrl(book.id)} ribbon={bookRibbon(book)} />
           </div>
-          <h1 className="font-book mt-1 text-[26px] font-bold leading-tight tracking-tight text-balance sm:text-[32px]">{book.title}</h1>
-          <div className="mt-1 text-[15px] text-muted-foreground">
-            {onOpenAuthor
-              ? <button className="hover:text-brass hover:underline" onClick={() => onOpenAuthor(book)}>{book.author}</button>
-              : book.author}
-          </div>
-        </div>
-        <TooltipProvider delayDuration={150}>
-          <div className="flex shrink-0 gap-2 sm:pt-1.5">
-            {/* reading is the one consumer action here — everything else in
-                this row is librarian work, so Read leads and gets a label */}
-            {onRead && canRead(book) && (
-              <Button className="h-9 px-3.5 font-semibold" aria-label={`Read ${book.title}`}
-                onClick={() => onRead(book)}>
-                <BookOpenText className="mr-1.5 h-4 w-4" /> Read
+
+          <div className="min-w-0 flex-1">
+            {/* librarian actions ride the card's corner, out of the reading path */}
+            <TooltipProvider delayDuration={150}>
+              <div className="mb-3 flex flex-wrap gap-1.5 sm:float-right sm:mb-0 sm:ml-4">
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Button variant="outline" size="icon" className={ICON_BTN} aria-label="Auto-grab best release"
+              disabled={autoGrabbing} onClick={autoGrab}>
+              <Zap className="h-4 w-4" />
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent>Auto-grab the best release</TooltipContent>
+        </Tooltip>
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Button variant="outline" size="icon" className={ICON_BTN} aria-label="Search releases"
+              onClick={() => {
+                if (!book.libraryId) { toast.error("Monitor this book into a library first"); return }
+                setSearchOpen(true)
+              }}>
+              <Search className="h-4 w-4" />
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent>Search releases</TooltipContent>
+        </Tooltip>
+        {isAdmin && (
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button variant="outline" size="icon" className={ICON_BTN} aria-label="Manual import"
+                onClick={() => setImportOpen(true)}>
+                <FolderInput className="h-4 w-4" />
               </Button>
-            )}
+            </TooltipTrigger>
+            <TooltipContent>Manual import — deliver a file you already have</TooltipContent>
+          </Tooltip>
+        )}
+        {kindleSendable && kindleTargets.length === 1 && (
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button variant="outline" size="icon" className={ICON_BTN} aria-label="Send to Kindle"
+                disabled={sending} onClick={() => void sendToKindle(kindleTargets[0])}>
+                <Mail className="h-4 w-4" />
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent>Send to Kindle — {kindleTargets[0].name}</TooltipContent>
+          </Tooltip>
+        )}
+        {kindleSendable && kindleTargets.length > 1 && (
+          <DropdownMenu>
             <Tooltip>
               <TooltipTrigger asChild>
-                <Button variant="outline" size="icon" className="h-9 w-9" aria-label="Auto-grab best release"
-                  disabled={autoGrabbing} onClick={autoGrab}>
-                  <Zap className="h-4 w-4" />
-                </Button>
-              </TooltipTrigger>
-              <TooltipContent>Auto-grab the best release</TooltipContent>
-            </Tooltip>
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <Button variant="outline" size="icon" className="h-9 w-9" aria-label="Search releases"
-                  onClick={() => {
-                    if (!book.libraryId) { toast.error("Monitor this book into a library first"); return }
-                    setSearchOpen(true)
-                  }}>
-                  <Search className="h-4 w-4" />
-                </Button>
-              </TooltipTrigger>
-              <TooltipContent>Search releases</TooltipContent>
-            </Tooltip>
-            {isAdmin && (
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <Button variant="outline" size="icon" className="h-9 w-9" aria-label="Manual import"
-                    onClick={() => setImportOpen(true)}>
-                    <FolderInput className="h-4 w-4" />
-                  </Button>
-                </TooltipTrigger>
-                <TooltipContent>Manual import — deliver a file you already have</TooltipContent>
-              </Tooltip>
-            )}
-            {kindleSendable && kindleTargets.length === 1 && (
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <Button variant="outline" size="icon" className="h-9 w-9" aria-label="Send to Kindle"
-                    disabled={sending} onClick={() => void sendToKindle(kindleTargets[0])}>
+                <DropdownMenuTrigger asChild>
+                  <Button variant="outline" size="icon" className={ICON_BTN} aria-label="Send to Kindle" disabled={sending}>
                     <Mail className="h-4 w-4" />
                   </Button>
-                </TooltipTrigger>
-                <TooltipContent>Send to Kindle — {kindleTargets[0].name}</TooltipContent>
-              </Tooltip>
-            )}
-            {kindleSendable && kindleTargets.length > 1 && (
-              <DropdownMenu>
-                <Tooltip>
-                  <TooltipTrigger asChild>
-                    <DropdownMenuTrigger asChild>
-                      <Button variant="outline" size="icon" className="h-9 w-9" aria-label="Send to Kindle" disabled={sending}>
-                        <Mail className="h-4 w-4" />
-                      </Button>
-                    </DropdownMenuTrigger>
-                  </TooltipTrigger>
-                  <TooltipContent>Send to Kindle</TooltipContent>
-                </Tooltip>
-                <DropdownMenuContent align="end" className="rounded-xl">
-                  {kindleTargets.map(d => (
-                    <DropdownMenuItem key={d.id} onClick={() => void sendToKindle(d)}>
-                      {d.name} <span className="font-label ml-2 text-[10.5px] text-muted-foreground">{d.email}</span>
-                    </DropdownMenuItem>
-                  ))}
-                </DropdownMenuContent>
-              </DropdownMenu>
-            )}
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <Button variant="outline" size="icon" className="h-9 w-9" aria-label="Refresh metadata" onClick={refresh}>
-                  <RefreshCw className="h-4 w-4" />
-                </Button>
+                </DropdownMenuTrigger>
               </TooltipTrigger>
-              <TooltipContent>Refresh from Hardcover — matches &amp; adopts title, cover, series</TooltipContent>
+              <TooltipContent>Send to Kindle</TooltipContent>
             </Tooltip>
-            {/* editing the stored metadata and deleting books are the two
-                things a scoped user doesn't get — refreshing FROM the
-                providers, above, they do */}
-            {isAdmin && (
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <Button variant="outline" size="icon" className="h-9 w-9" aria-label="Edit metadata" onClick={() => setEditOpen(true)}>
-                    <Pencil className="h-4 w-4" />
-                  </Button>
-                </TooltipTrigger>
-                <TooltipContent>Edit metadata</TooltipContent>
-              </Tooltip>
-            )}
-            <DropdownMenu>
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <DropdownMenuTrigger asChild>
-                    <Button variant="outline" size="icon" className="h-9 w-9 text-want hover:border-want hover:text-want"
-                      aria-label="Delete book" disabled={!book.libraryId}>
-                      <Trash2 className="h-4 w-4" />
-                    </Button>
-                  </DropdownMenuTrigger>
-                </TooltipTrigger>
-                <TooltipContent>Delete book</TooltipContent>
-              </Tooltip>
-              <DropdownMenuContent align="end">
-                {removeModesFor(isAdmin).map(m => (
-                  <DropdownMenuItem key={m.mode} title={m.desc}
-                    onClick={() => remove(m.mode)} className="text-want">{m.label}</DropdownMenuItem>
-                ))}
-              </DropdownMenuContent>
-            </DropdownMenu>
-          </div>
-        </TooltipProvider>
-      </div>
+            <DropdownMenuContent align="end" className="rounded-xl">
+              {kindleTargets.map(d => (
+                <DropdownMenuItem key={d.id} onClick={() => void sendToKindle(d)}>
+                  {d.name} <span className="font-label ml-2 text-[10.5px] text-muted-foreground">{d.email}</span>
+                </DropdownMenuItem>
+              ))}
+            </DropdownMenuContent>
+          </DropdownMenu>
+        )}
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Button variant="outline" size="icon" className={ICON_BTN} aria-label="Refresh metadata" onClick={refresh}>
+              <RefreshCw className="h-4 w-4" />
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent>Refresh from Hardcover — matches &amp; adopts title, cover, series</TooltipContent>
+        </Tooltip>
+        {/* editing the stored metadata and deleting books are the two
+            things a scoped user doesn't get — refreshing FROM the
+            providers, above, they do */}
+        {isAdmin && (
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button variant="outline" size="icon" className={ICON_BTN} aria-label="Edit metadata" onClick={() => setEditOpen(true)}>
+                <Pencil className="h-4 w-4" />
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent>Edit metadata</TooltipContent>
+          </Tooltip>
+        )}
+        <DropdownMenu>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <DropdownMenuTrigger asChild>
+                <Button variant="outline" size="icon" className={cn(ICON_BTN, "text-want hover:border-want hover:text-want")}
+                  aria-label="Delete book" disabled={!book.libraryId}>
+                  <Trash2 className="h-4 w-4" />
+                </Button>
+              </DropdownMenuTrigger>
+            </TooltipTrigger>
+            <TooltipContent>Delete book</TooltipContent>
+          </Tooltip>
+          <DropdownMenuContent align="end">
+            {removeModesFor(isAdmin).map(m => (
+              <DropdownMenuItem key={m.mode} title={m.desc}
+                onClick={() => remove(m.mode)} className="text-want">{m.label}</DropdownMenuItem>
+            ))}
+          </DropdownMenuContent>
+        </DropdownMenu>
+              </div>
+            </TooltipProvider>
 
-      <div className="mt-6 flex flex-col gap-7 md:flex-row">
-        <div className="w-[170px] shrink-0">
-          <Cover c1={c1} c2={c2} title={book.title} author={book.author}
-            src={coverUrl(book.id)} ribbon={bookRibbon(book)} />
-        </div>
-        <div className="min-w-0 flex-1">
-          <div className="flex flex-wrap items-center gap-2">
-            {book.filePath && <Tag kind="good">On shelf</Tag>}
-            {!book.filePath && book.monitored && <Tag kind="want">Missing</Tag>}
-            {book.fileFormat && <Fmt>{book.fileFormat.toUpperCase()}</Fmt>}
-            {book.libraryId ? (
-              <span className="ml-2 flex items-center gap-2 text-xs text-muted-foreground">
-                Monitored <Switch checked={book.monitored} onCheckedChange={toggleMonitored} />
-              </span>
-            ) : (
-              <AddToLibraryButton libraries={libraries} label="Monitor" className="ml-2 h-8"
-                onPick={monitorInto} busy={monitoring} />
+            {book.seriesName && (
+              <div className="mono-label text-brass/90">
+                {onOpenSeries
+                  ? <button className="hover:underline" onClick={() => onOpenSeries(book)}>
+                      {book.seriesName} · Book {book.seriesNum}
+                    </button>
+                  : `${book.seriesName} · Book ${book.seriesNum}`}
+              </div>
             )}
-          </div>
-          <p className="mt-4 max-w-[62ch] text-[13.5px] leading-relaxed text-muted-foreground">
-            {book.description || "No description cached yet — it arrives with the next metadata refresh."}
-          </p>
-          {(book.genres?.length ?? 0) > 0 && (
-            <div className="mt-4 flex flex-wrap gap-1.5">
-              {book.genres!.map(g => <Tag key={g} kind="dim">{g}</Tag>)}
+            <h1 className="font-book mt-1 text-[26px] font-bold leading-tight tracking-tight text-balance sm:text-[32px]">{book.title}</h1>
+            <div className="mt-0.5 text-[15px] text-muted-foreground">
+              {onOpenAuthor
+                ? <button className="hover:text-brass hover:underline" onClick={() => onOpenAuthor(book)}>{book.author}</button>
+                : book.author}
             </div>
-          )}
-          <div className="mono-label mt-5 flex flex-wrap gap-x-5 gap-y-1 text-faint">
-            {(book.ratingsCount ?? 0) > 0 && <span>{book.ratingsCount!.toLocaleString()} ratings</span>}
-            {book.isbn13 && <span>isbn {book.isbn13}</span>}
-            {book.goodreadsId && <span>goodreads {book.goodreadsId}</span>}
-            {book.hardcoverId && <span>hardcover {book.hardcoverId}</span>}
-            {book.publisher && <span>{book.publisher}</span>}
+            {meta.length > 0 && <div className="mono-label mt-2 text-faint">{meta.join(" · ")}</div>}
+
+            <div className="mt-3 flex flex-wrap items-center gap-2">
+              {book.filePath && <Tag kind="good">On shelf{book.fileFormat ? ` · ${book.fileFormat.toUpperCase()}` : ""}</Tag>}
+              {!book.filePath && book.monitored && <Tag kind="want">Wanted</Tag>}
+              {!book.filePath && !book.monitored && book.libraryId && <Tag kind="dim">Not monitored</Tag>}
+              {book.fileSize ? <span className="text-xs text-muted-foreground">{(book.fileSize / 1e6).toFixed(1)} MB</span> : null}
+              {(book.ratingsCount ?? 0) > 0 && <span className="mono-label text-faint">{book.ratingsCount!.toLocaleString()} ratings</span>}
+            </div>
+
+            <p className="mt-4 max-w-[68ch] text-[13.5px] leading-relaxed text-muted-foreground">
+              {book.description || "No description cached yet — it arrives with the next metadata refresh."}
+            </p>
+
+            <div className="mt-5 flex flex-wrap items-center gap-x-5 gap-y-3">
+              {/* reading is the one consumer action, so it leads with a label */}
+              {onRead && canRead(book) && (
+                <Button className="h-9 px-4 font-semibold" aria-label={`Read ${book.title}`}
+                  onClick={() => onRead(book)}>
+                  <BookOpenText className="mr-1.5 h-4 w-4" /> Read
+                </Button>
+              )}
+              {book.libraryId ? (
+                <label className="flex items-center gap-2 text-[13px] text-muted-foreground">
+                  <Switch checked={book.monitored} onCheckedChange={toggleMonitored} /> Monitored
+                </label>
+              ) : (
+                <AddToLibraryButton libraries={libraries} label="Monitor" className="h-9"
+                  onPick={monitorInto} busy={monitoring} />
+              )}
+            </div>
+
+            <div className="mono-label mt-5 flex flex-wrap gap-x-5 gap-y-1 text-faint">
+              {book.isbn13 && <span>isbn {book.isbn13}</span>}
+              {book.goodreadsId && <span>goodreads {book.goodreadsId}</span>}
+              {book.hardcoverId && <span>hardcover {book.hardcoverId}</span>}
+              {book.publisher && <span>{book.publisher}</span>}
+            </div>
           </div>
         </div>
       </div>
 
       {book.filePath && (
         <>
-          <div className="mono-label mb-2 mt-9 text-faint">File</div>
-          <div className="border-t">
+          <div className="mono-label mb-2 mt-7 text-faint">File</div>
+          <div className="overflow-hidden rounded-2xl border border-linesoft bg-surface">
             {/* the file row opens the reader too — you're looking at the
                 file, tapping it should open it */}
             <div
-              className={cn("flex flex-wrap items-center gap-x-5 gap-y-1 border-b border-linesoft px-1 py-3",
+              className={cn("flex flex-wrap items-center gap-x-5 gap-y-1 px-4 py-3",
                 onRead && canRead(book) && "cursor-pointer hover:bg-surface2/60")}
               {...(onRead && canRead(book) ? {
                 role: "button", tabIndex: 0,

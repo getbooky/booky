@@ -170,7 +170,7 @@ function BookCell({ book, libraries, kindleDevices, seriesTag, bust, selected, s
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
             <button aria-label={`${book.title} options`} onClick={e => e.stopPropagation()}
-              className="absolute bottom-1.5 left-1.5 z-10 flex h-7 w-7 items-center justify-center rounded-lg bg-black/60 text-white/90 opacity-0 backdrop-blur-xs transition-opacity hover:bg-black/80 focus-visible:opacity-100 group-hover/cell:opacity-100 data-[state=open]:opacity-100 [@media(hover:none)]:opacity-100">
+              className="absolute bottom-2.5 left-1.5 z-10 flex h-7 w-7 items-center justify-center rounded-lg bg-black/60 text-white/90 opacity-0 backdrop-blur-xs transition-opacity hover:bg-black/80 focus-visible:opacity-100 group-hover/cell:opacity-100 data-[state=open]:opacity-100 [@media(hover:none)]:opacity-100">
               <MoreVertical className="h-4 w-4" />
             </button>
           </DropdownMenuTrigger>
@@ -365,7 +365,19 @@ export function LibraryView({ library, scope, libraries, initialFilters, scopeTi
   const kindleDevices = kindleQuery.data?.devices ?? []
   // The Library is only what the user curated: catalog-only bibliography
   // books (no library membership) live on author/series pages, not here.
-  const allBooks = useMemo(() => (booksQuery.data?.books ?? []).filter(b => b.libraryId), [booksQuery.data])
+  // The all-libraries view gets one row per library a book sits in; show each
+  // book once, preferring the copy that's on the shelf so its status reads
+  // "have" whenever any library has the file.
+  const allBooks = useMemo(() => {
+    const rows = (booksQuery.data?.books ?? []).filter(b => b.libraryId)
+    if (library) return rows
+    const byId = new Map<number, ApiBook>()
+    for (const b of rows) {
+      const seen = byId.get(b.id)
+      if (!seen || (!seen.filePath && b.filePath)) byId.set(b.id, b)
+    }
+    return [...byId.values()]
+  }, [booksQuery.data, library])
 
   const [stack, setStack] = useState(true)
   const [missingOnly, setMissingOnly] = useState(false)
@@ -424,7 +436,8 @@ export function LibraryView({ library, scope, libraries, initialFilters, scopeTi
   const wantedQuery = useApi(() => acquisition.wanted(), 10_000)
   const upgradeKeys = useMemo(() => {
     const set = new Set<string>()
-    for (const b of wantedQuery.data?.cutoffUnmet ?? []) set.add(`${b.id}-${b.libraryId}`)
+    // keyed per library, plus per book for the deduped all-libraries view
+    for (const b of wantedQuery.data?.cutoffUnmet ?? []) { set.add(`${b.id}-${b.libraryId}`); set.add(`${b.id}`) }
     return set
   }, [wantedQuery.data])
 
@@ -432,7 +445,7 @@ export function LibraryView({ library, scope, libraries, initialFilters, scopeTi
     let list = allBooks
     if (scope === "missing") list = list.filter(b => !b.filePath && b.monitored)
     if (scope === "recent") list = [...list].sort((a, b) => byAdded(b, a)).slice(0, 60)
-    if (scope === "upgrade") list = list.filter(b => upgradeKeys.has(`${b.id}-${b.libraryId}`))
+    if (scope === "upgrade") list = list.filter(b => upgradeKeys.has(library ? `${b.id}-${b.libraryId}` : `${b.id}`))
     if (missingOnly) list = list.filter(b => !b.filePath && b.monitored)
     const q = query.trim().toLowerCase()
     if (q) {
@@ -460,7 +473,7 @@ export function LibraryView({ library, scope, libraries, initialFilters, scopeTi
     const cmp = SORT_CMP[sort]
     const dir = sortAsc ? 1 : -1
     return [...list].sort((a, b) => dir * cmp(a, b))
-  }, [allBooks, scope, active, sort, sortAsc, query, upgradeKeys, missingOnly])
+  }, [allBooks, scope, active, sort, sortAsc, query, upgradeKeys, missingOnly, library])
 
   // group into stacks (series with 2+ books collapse unless expanded)
   const cells = useMemo(() => {

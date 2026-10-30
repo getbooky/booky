@@ -1,6 +1,6 @@
 import { useState } from "react"
 import {
-  Activity as ActivityIcon, Bookmark, CalendarDays, CheckCircle2, Clock, Heart, Layers,
+  Activity as ActivityIcon, Bookmark, CalendarDays, CheckCircle2, Clock, Heart, House, Layers,
   LibraryBig, MoreVertical, PanelLeftClose, PanelLeftOpen, Pencil,
   RefreshCw, Search, Trash2, TriangleAlert, Users, X,
 } from "lucide-react"
@@ -12,9 +12,10 @@ import type { ApiLibrary } from "@/api"
 import type { Scope } from "@/views/Library"
 import { cn } from "@/lib/utils"
 
-export type BrowseView = "library" | "series" | "author" | "calendar" | "wanted" | "activity"
+export type BrowseView = "home" | "library" | "series" | "author" | "calendar" | "wanted" | "activity"
 
 const BROWSE: { id: BrowseView; label: string; icon: React.ElementType; soon?: boolean }[] = [
+  { id: "home", label: "Home", icon: House },
   { id: "library", label: "Library", icon: LibraryBig },
   { id: "series", label: "Series", icon: Layers },
   { id: "author", label: "Authors", icon: Users },
@@ -22,6 +23,10 @@ const BROWSE: { id: BrowseView; label: string; icon: React.ElementType; soon?: b
   { id: "wanted", label: "Wanted", icon: Heart },
   { id: "activity", label: "Activity", icon: ActivityIcon },
 ]
+
+// the phone tab bar keeps five destinations; Calendar and Wanted are a tap
+// away from Home's "Coming soon" and "Still wanted" rows
+const PHONE_TABS: BrowseView[] = ["home", "library", "series", "author", "activity"]
 
 const SCOPES: { id: Scope; label: string; icon: React.ElementType }[] = [
   { id: "recent", label: "Recently added", icon: Clock },
@@ -52,7 +57,7 @@ export function BottomNav({ view, onBrowse }: {
 }) {
   return (
     <nav className="fixed inset-x-0 bottom-0 z-40 flex border-t border-linesoft bg-surface pb-[env(safe-area-inset-bottom)] md:hidden">
-      {BROWSE.map(n => (
+      {BROWSE.filter(n => PHONE_TABS.includes(n.id)).map(n => (
         <button key={n.id} onClick={() => onBrowse(n.id)} aria-label={n.label}
           className={cn(
             "flex min-w-0 flex-1 flex-col items-center gap-0.5 py-2 text-muted-foreground",

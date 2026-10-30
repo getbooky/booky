@@ -86,13 +86,16 @@ const RIB_BG: Record<RibbonKind, string> = {
   dim: "bg-faint",
 }
 
+// Status reads as a thin strip along the cover's bottom edge — green on the
+// shelf, amber wanted, faint when unmonitored — so the artwork stays clean.
 export function Ribbon({ kind, mini }: { kind: RibbonKind; mini?: boolean }) {
   return (
     <span
       className={cn(
-        "absolute z-10 [clip-path:polygon(0_0,100%_0,100%_100%,50%_82%,0_100%)] drop-shadow-sm",
+        "absolute inset-x-0 bottom-0 z-10",
         RIB_BG[kind],
-        mini ? "-top-0.5 right-[5px] h-[30%] w-[9px]" : "-top-1 right-[9%] h-[27%] w-[15px]"
+        kind === "dim" && "opacity-60",
+        mini ? "h-[3px]" : "h-1"
       )}
     />
   )
@@ -136,7 +139,7 @@ export function Cover({
         </div>
       )}
       {badge && (
-        <span className="font-label absolute bottom-1.5 right-1.5 rounded-sm px-1.5 py-0.5 text-[8.5px] font-bold tracking-[0.07em] text-white shadow-[0_1px_3px_rgba(0,0,0,0.5)]"
+        <span className="font-label absolute bottom-2.5 right-1.5 rounded-sm px-1.5 py-0.5 text-[8.5px] font-bold tracking-[0.07em] text-white shadow-[0_1px_3px_rgba(0,0,0,0.5)]"
           style={{ background: formatColor(badge) }}>
           {badge}
         </span>

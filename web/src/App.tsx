@@ -13,6 +13,7 @@ import { Sidebar, BottomNav } from "@/components/Sidebar"
 import type { BrowseView, CustomScope } from "@/components/Sidebar"
 import { AddScopeDialog } from "@/components/AddScopeDialog"
 import { LibraryView } from "@/views/Library"
+import { HomeView } from "@/views/Home"
 import type { Scope, ScopeFilter } from "@/views/Library"
 import { SeriesView } from "@/views/Series"
 import { SeriesDetailView } from "@/views/SeriesDetail"
@@ -51,7 +52,7 @@ type Nav = {
   reader: ApiBook | null
 }
 
-const HOME: Nav = { view: "library", scope: "all", library: null, customScope: null, book: null, author: null, series: null, review: null, reader: null }
+const HOME: Nav = { view: "home", scope: "all", library: null, customScope: null, book: null, author: null, series: null, review: null, reader: null }
 
 const routeFor = (n: Nav): string => {
   if (n.reader) return `#/read/${n.reader.id}`
@@ -74,6 +75,7 @@ const routeFor = (n: Nav): string => {
 const navFromHash = (): Nav => {
   const head = window.location.hash.replace(/^#\/?/, "").split("/")[0]
   switch (head) {
+    case "library": return { ...HOME, view: "library" }
     case "series": return { ...HOME, view: "series" }
     case "author": case "authors": return { ...HOME, view: "author" }
     case "calendar": case "wanted": case "activity": return { ...HOME, view: head as View }
@@ -307,6 +309,12 @@ function BookyApp({ user, usersExist, onLoggedOut }: { user: ApiUser | null; use
                     }}
                     onRead={openReader}
                     onSelectLibrary={l => go({ view: "library", library: l })} />)}
+              {nav.view === "home" && (
+                <HomeView key={refreshTick} libraries={libraries} userName={user?.username}
+                  onOpenBook={b => go({ view: "library", book: b })}
+                  onOpenLibrary={l => go({ view: "library", library: l })}
+                  onBrowse={v => go({ view: v })} />
+              )}
               {nav.view === "series" && (nav.series
                 ? <SeriesDetailView key={nav.series.id} series={nav.series}
                     onBack={back}
