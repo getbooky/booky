@@ -145,52 +145,57 @@ func TestUserTags(t *testing.T) {
 	}
 }
 
-// OPDS signs in with its own password, never the web one, and locks out
-// after repeated failures like the web login does — on a separate counter.
+// OPDS signs in with the account's own login, and locks out after repeated
+// failures like the web login does — on a separate counter.
 func TestOPDSLogin(t *testing.T) {
 	s := testStore(t)
 	id, err := s.CreateUser("sam", "web passphrase!", "user", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.OPDSLogin("sam", "web passphrase!", "1.2.3.4"); err == nil {
-		t.Fatal("OPDS must be off until an OPDS password is set — and never accept the web password")
-	}
-	if err := s.SetOPDSPassword(id, "reader-pass-1"); err != nil {
-		t.Fatal(err)
-	}
-	u, err := s.OPDSLogin("sam", "reader-pass-1", "1.2.3.4")
+	u, err := s.OPDSLogin("sam", "web passphrase!", "1.2.3.4")
 	if err != nil || u.ID != id {
 		t.Fatalf("OPDS login = %v, %v", u, err)
 	}
-	if _, err := s.OPDSLogin("sam", "web passphrase!", "1.2.3.4"); err == nil {
-		t.Fatal("the web password must not open OPDS")
+	if _, err := s.OPDSLogin("sam", "wrong passphrase", "1.2.3.4"); err == nil {
+		t.Fatal("a wrong password opened OPDS")
+	}
+	if _, err := s.OPDSLogin("nobody", "web passphrase!", "1.2.3.4"); err == nil {
+		t.Fatal("an unknown account opened OPDS")
 	}
 
-	// changing the password kills the cached sign-in at once
-	if err := s.SetOPDSPassword(id, "reader-pass-2"); err != nil {
+	// a changed password stops working at once, even while the old one sits
+	// in the sign-in cache
+	hash, err := HashPassword("new passphrase!")
+	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.OPDSLogin("sam", "reader-pass-1", "1.2.3.4"); err == nil {
-		t.Fatal("old OPDS password still works after a change")
+	if _, err := s.db.Exec(`UPDATE users SET password_hash = ? WHERE id = ?`, hash, id); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.OPDSLogin("sam", "web passphrase!", "1.2.3.4"); err == nil {
+		t.Fatal("old password still opens OPDS after a change")
+	}
+	if _, err := s.OPDSLogin("sam", "new passphrase!", "1.2.3.4"); err != nil {
+		t.Fatalf("new password refused: %v", err)
 	}
 
 	// lockout: after maxFailures the right password is refused too — even
 	// while it sits in the sign-in cache from a moment ago
-	if _, err := s.OPDSLogin("sam", "reader-pass-2", "5.6.7.8"); err != nil {
+	if _, err := s.OPDSLogin("sam", "new passphrase!", "5.6.7.8"); err != nil {
 		t.Fatal(err)
 	}
 	for i := 0; i < maxFailures; i++ {
 		_, _ = s.OPDSLogin("sam", "wrong", "5.6.7.8")
 	}
-	if _, err := s.OPDSLogin("sam", "reader-pass-2", "5.6.7.8"); err == nil {
+	if _, err := s.OPDSLogin("sam", "new passphrase!", "5.6.7.8"); err == nil {
 		t.Fatal("OPDS must lock out after repeated failures")
 	}
 	// ...but only for that IP, and the web login is a separate counter
-	if _, err := s.OPDSLogin("sam", "reader-pass-2", "1.2.3.4"); err != nil {
+	if _, err := s.OPDSLogin("sam", "new passphrase!", "1.2.3.4"); err != nil {
 		t.Fatalf("other IP locked out too: %v", err)
 	}
-	if _, _, err := s.Login("sam", "web passphrase!", "5.6.7.8"); err != nil {
+	if _, _, err := s.Login("sam", "new passphrase!", "5.6.7.8"); err != nil {
 		t.Fatalf("OPDS failures locked the web login: %v", err)
 	}
 }

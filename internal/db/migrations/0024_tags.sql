@@ -60,10 +60,6 @@ CREATE TABLE kindle_sent (
     PRIMARY KEY (device_id, book_id)
 );
 
--- OPDS signs in per account now. It gets its own password, separate from the
--- web login: e-reader apps store it in the clear, so a leaked reader config
--- must never be a way into the account itself. Empty means OPDS is off.
-ALTER TABLE users ADD COLUMN opds_password_hash TEXT NOT NULL DEFAULT '';
 
 -- ---- carry access over ----
 
@@ -141,8 +137,9 @@ INSERT OR IGNORE INTO series_libraries (series_id, library_id, added_at)
 SELECT series_id, (SELECT MIN(id) FROM libraries), MIN(added_at) FROM series_libraries GROUP BY series_id;
 DELETE FROM series_libraries WHERE library_id != (SELECT MIN(id) FROM libraries);
 
--- per-library OPDS logins go away with the libraries; the survivor's is
--- disabled so its old credentials stop working on upgrade day
+-- per-library OPDS logins go away with the libraries (OPDS signs in with
+-- each account's own login now); the survivor's is disabled so its old
+-- shared credentials stop working on upgrade day
 UPDATE libraries SET opds_password_hash = 'unset';
 DELETE FROM libraries WHERE id != (SELECT MIN(id) FROM libraries);
 UPDATE libraries SET name = 'Library';

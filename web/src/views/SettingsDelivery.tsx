@@ -58,15 +58,6 @@ function UserRow({ user, tags, onDelete, onChanged }: {
       toast.error(`Couldn't save: ${e instanceof Error ? e.message : e}`)
     }
   }
-  const opdsOff = async () => {
-    if (!window.confirm(`Turn off ${user.username}'s OPDS login?\n\nReader apps using it stop working until they set a new OPDS password.`)) return
-    try {
-      await delivery.clearUserOPDS(user.id)
-      toast(`${user.username}'s OPDS login turned off`)
-    } catch (e) {
-      toast.error(`Couldn't turn it off: ${e instanceof Error ? e.message : e}`)
-    }
-  }
   return (
     <div className="rounded-lg border border-linesoft bg-surface2 px-4 py-3">
       <div className="flex flex-wrap items-center gap-2.5">
@@ -89,10 +80,6 @@ function UserRow({ user, tags, onDelete, onChanged }: {
             {editing ? "Cancel" : "Tags"}
           </Button>
         )}
-        <Button variant="outline" className="h-8 text-faint" title="Switch off this account's OPDS password — a lost e-reader, say"
-          onClick={opdsOff}>
-          OPDS off
-        </Button>
         <Button variant="outline" size="icon" className="h-8 w-8 text-faint" aria-label={`Delete ${user.username}`}
           onClick={onDelete}>
           <X className="h-3.5 w-3.5" />
@@ -151,7 +138,7 @@ export function UsersPanel() {
           <Plus className="h-4 w-4" />
         </Button>
       }
-      desc="Web UI accounts. Until the first user exists Booky is open; creating one turns login on (the first account is always an admin). A 'user' sees the books shared with their tags plus whatever they add for themselves (their personal tag): they can browse, search and add books, refresh metadata and grab releases, but not edit metadata, delete files, change tags, or reach these settings. Each person sets their own OPDS password under Account; KoReader devices carry their own token.">
+      desc="Web UI accounts. Until the first user exists Booky is open; creating one turns login on (the first account is always an admin). A 'user' sees the books shared with their tags plus whatever they add for themselves (their personal tag): they can browse, search and add books, refresh metadata and grab releases, but not edit metadata, delete files, change tags, or reach these settings. OPDS reader apps sign in with the same login (the feed address is under Account); KoReader devices carry their own token.">
       {loading && <p className="mono-label text-faint">loading…</p>}
       {!loading && users.length === 0 && !adding && (
         <p className="text-[13px] text-muted-foreground">No accounts — anyone who can reach this page has full access. Add an admin to require login.</p>

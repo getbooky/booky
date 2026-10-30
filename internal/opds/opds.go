@@ -1,7 +1,6 @@
 // Package opds serves an OPDS 1.2 catalog per account. A reader app signs in
-// with the account's username and its OPDS password — a separate password
-// from the web login, since reader apps store it in plain text — and sees
-// exactly the books the account's tags cover. Any OPDS reader (KOReader,
+// with the account's own Booky username and password and sees exactly the
+// books the account's tags cover. Any OPDS reader (KOReader,
 // Moon+, Thorium…) can browse and download that shelf.
 package opds
 
@@ -46,13 +45,12 @@ func (h *Handler) Register(mux *http.ServeMux) {
 }
 
 func (h *Handler) handleMoved(w http.ResponseWriter, r *http.Request) {
-	http.Error(w, "This feed moved to /opds — sign in with your own username and OPDS password (Settings → Account in Booky).", http.StatusGone)
+	http.Error(w, "This feed moved to /opds — sign in with your own Booky username and password.", http.StatusGone)
 }
 
-// authorize checks the request's Basic credentials against an account's
-// OPDS password (with lockout after repeated failures) and returns the
-// account with its CURRENT tags. An account that never set an OPDS password
-// can't sign in — a feed must be opted into.
+// authorize checks the request's Basic credentials against the account's
+// own login (with lockout after repeated failures) and returns the account
+// with its CURRENT tags.
 func (h *Handler) authorize(w http.ResponseWriter, r *http.Request) (*auth.User, bool) {
 	user, pass, hasAuth := r.BasicAuth()
 	if hasAuth {

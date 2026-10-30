@@ -214,8 +214,8 @@ func (s *Server) handleDeleteUser(w http.ResponseWriter, r *http.Request) {
 
 // ---- OPDS ----
 
-// handleOPDSStatus tells the signed-in account whether its OPDS login is set
-// up and where the feed lives.
+// handleOPDSStatus tells the signed-in account where its feed lives. A reader
+// app signs in with the same username and password as the web UI.
 func (s *Server) handleOPDSStatus(w http.ResponseWriter, r *http.Request) {
 	u := s.sessionUser(r)
 	if u == nil {
@@ -223,52 +223,9 @@ func (s *Server) handleOPDSStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"username":   u.Username,
-		"configured": s.Auth.OPDSConfigured(u.ID),
-		"feedPath":   "/opds",
+		"username": u.Username,
+		"feedPath": "/opds",
 	})
-}
-
-// handleSetOwnOPDS sets the caller's own OPDS password — the one a reader app
-// stores. Empty turns OPDS off for the account. Each person manages their
-// own: the feed shows exactly their tagged books, so there is nothing for an
-// admin to configure on their behalf.
-func (s *Server) handleSetOwnOPDS(w http.ResponseWriter, r *http.Request) {
-	u := s.sessionUser(r)
-	if u == nil {
-		writeErr(w, http.StatusForbidden, errors.New("sign in first"))
-		return
-	}
-	var req struct {
-		Password string `json:"password"`
-	}
-	if err := decodeJSON(r, &req); err != nil {
-		writeErr(w, http.StatusBadRequest, err)
-		return
-	}
-	if err := s.Auth.SetOPDSPassword(u.ID, req.Password); err != nil {
-		writeErr(w, http.StatusBadRequest, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"configured": req.Password != ""})
-}
-
-// handleClearUserOPDS lets an admin switch off someone's OPDS login — a lost
-// e-reader, say — without touching their account.
-func (s *Server) handleClearUserOPDS(w http.ResponseWriter, r *http.Request) {
-	if !s.requireAdmin(w, r) {
-		return
-	}
-	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
-	if err != nil {
-		writeErr(w, http.StatusBadRequest, errors.New("bad id"))
-		return
-	}
-	if err := s.Auth.SetOPDSPassword(id, ""); err != nil {
-		writeErr(w, http.StatusNotFound, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"configured": false})
 }
 
 // ---- devices (KoReader) ----

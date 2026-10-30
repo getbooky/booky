@@ -1,8 +1,7 @@
 // Package auth owns accounts: local username/password users (admin/user
 // roles, bcrypt hashes), cookie sessions, the tags each account holds, and
-// login rate limiting. OPDS signs in per account but with its own password,
-// and KoReader with a per-device token — a stolen e-reader never exposes the
-// account's web login.
+// login rate limiting. OPDS signs in with the same username and password as
+// the web UI; KoReader devices use a per-device token.
 package auth
 
 import (
@@ -31,8 +30,9 @@ type Store struct {
 	// opdsOK remembers recent successful OPDS sign-ins, keyed by a hash of
 	// username+password. A reader app sends Basic credentials on every cover
 	// request, and a bcrypt per cover would make a 50-book feed take seconds.
-	// Entries hold only the user id; the account and its tags are re-read
-	// on every request either way.
+	// Entries hold the user id and the password hash they were checked
+	// against, so a changed password stops matching at once; the account and
+	// its tags are re-read on every request either way.
 	opdsMu sync.Mutex
 	opdsOK map[string]opdsHit
 
@@ -47,6 +47,7 @@ type failureState struct {
 
 type opdsHit struct {
 	userID int64
+	hash   string // the stored password hash this sign-in was checked against
 	until  time.Time
 }
 
@@ -271,52 +272,11 @@ func (s *Store) DeleteUser(id int64) error {
 	return err
 }
 
-// SetOPDSPassword sets (or, with "", clears) an account's OPDS password. It
-// is deliberately separate from the web password: reader apps keep it in
-// plain text on the device.
-func (s *Store) SetOPDSPassword(userID int64, password string) error {
-	hash := ""
-	if password != "" {
-		if len(password) < 8 {
-			return fmt.Errorf("OPDS password must be at least 8 characters")
-		}
-		h, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
-		if err != nil {
-			return err
-		}
-		hash = string(h)
-	}
-	res, err := s.db.Exec(`UPDATE users SET opds_password_hash = ? WHERE id = ?`, hash, userID)
-	if err != nil {
-		return err
-	}
-	if n, _ := res.RowsAffected(); n == 0 {
-		return fmt.Errorf("user not found")
-	}
-	// a changed password must stop working everywhere at once
-	s.opdsMu.Lock()
-	for k, hit := range s.opdsOK {
-		if hit.userID == userID {
-			delete(s.opdsOK, k)
-		}
-	}
-	s.opdsMu.Unlock()
-	return nil
-}
-
-// OPDSConfigured reports whether an account has an OPDS password set.
-func (s *Store) OPDSConfigured(userID int64) bool {
-	var hash string
-	if err := s.db.QueryRow(`SELECT opds_password_hash FROM users WHERE id = ?`, userID).Scan(&hash); err != nil {
-		return false
-	}
-	return hash != ""
-}
-
 // OPDSLogin checks Basic credentials from a reader app against the account's
-// OPDS password, with the same per-username+IP lockout as the web login (a
-// separate counter, so a misconfigured reader can't lock its owner out of the
-// web UI). It returns the account with its CURRENT tags.
+// own login — the same username and password as the web UI — with the same
+// per-username+IP lockout (a separate counter, so a misconfigured reader
+// can't lock its owner out of the web UI). It returns the account with its
+// CURRENT tags.
 func (s *Store) OPDSLogin(username, password, ip string) (*User, error) {
 	username = strings.TrimSpace(username)
 	// the lockout comes first, before even the cache: otherwise, while the
@@ -337,7 +297,9 @@ func (s *Store) OPDSLogin(username, password, ip string) (*User, error) {
 	hit, ok := s.opdsOK[cacheKey]
 	s.opdsMu.Unlock()
 	if ok && time.Now().Before(hit.until) {
-		if u := s.UserByID(hit.userID); u != nil && u.Username == username {
+		var current string
+		err := s.db.QueryRow(`SELECT password_hash FROM users WHERE id = ?`, hit.userID).Scan(&current)
+		if u := s.UserByID(hit.userID); err == nil && current == hit.hash && u != nil && u.Username == username {
 			return u, nil
 		}
 	}
@@ -356,10 +318,10 @@ func (s *Store) OPDSLogin(username, password, ip string) (*User, error) {
 
 	var id int64
 	var hash string
-	if err := s.db.QueryRow(`SELECT id, opds_password_hash FROM users WHERE username = ?`, username).
-		Scan(&id, &hash); err != nil || hash == "" {
-		// burn comparable time so a missing account (or one with OPDS off)
-		// isn't distinguishable from a wrong password
+	if err := s.db.QueryRow(`SELECT id, password_hash FROM users WHERE username = ?`, username).
+		Scan(&id, &hash); err != nil {
+		// burn comparable time so a missing account isn't distinguishable
+		// from a wrong password
 		_ = bcrypt.CompareHashAndPassword([]byte("$2a$10$7EqJtq98hPqEX7fNZaFWoOhi5B1Nl0jGVSyKyOaUmYQx1lWFZK1WS"), []byte(password))
 		return fail()
 	}
@@ -374,7 +336,7 @@ func (s *Store) OPDSLogin(username, password, ip string) (*User, error) {
 		return fail()
 	}
 	s.opdsMu.Lock()
-	s.opdsOK[cacheKey] = opdsHit{userID: id, until: time.Now().Add(opdsCacheTTL)}
+	s.opdsOK[cacheKey] = opdsHit{userID: id, hash: hash, until: time.Now().Add(opdsCacheTTL)}
 	s.opdsMu.Unlock()
 	return u, nil
 }

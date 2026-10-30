@@ -505,15 +505,11 @@ export const delivery = {
     request<ApiUser>(`/api/v1/users/${id}/tags`, {
       method: "PUT", body: JSON.stringify({ tagIds }),
     }),
-  clearUserOPDS: (id: number) => request(`/api/v1/users/${id}/opds`, { method: "DELETE" }),
   deleteUser: (id: number) => request(`/api/v1/users/${id}`, { method: "DELETE" }),
 
-  /** The signed-in account's own OPDS login. */
-  opds: () => request<{ username: string; configured: boolean; feedPath: string }>("/api/v1/auth/opds"),
-  setOPDSPassword: (password: string) =>
-    request<{ configured: boolean }>("/api/v1/auth/opds", {
-      method: "PUT", body: JSON.stringify({ password }),
-    }),
+  /** Where the signed-in account's OPDS feed lives; reader apps sign in
+   * with the account's usual login. */
+  opds: () => request<{ username: string; feedPath: string }>("/api/v1/auth/opds"),
 
   devices: () => request<{ devices: ApiDevice[] | null }>("/api/v1/devices"),
   createDevice: (name: string, tagIds: number[], autoTagIds: number[]) =>

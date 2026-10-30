@@ -189,19 +189,12 @@ func TestOPDSFeedAndDownload(t *testing.T) {
 	}
 	sam := login(t, h, "sam", "web passphrase")
 
-	// no OPDS password yet: refused — and the web password never works
-	if rec := opdsGet(h, "/opds", "sam", "web passphrase"); rec.Code != http.StatusUnauthorized {
-		t.Fatalf("OPDS before opting in: %d", rec.Code)
-	}
-	rec, _ = f.do(t, sam, "PUT", "/api/v1/auth/opds", map[string]any{"password": "reader-pass-1"})
-	if rec.Code != http.StatusOK {
-		t.Fatalf("set own OPDS password: %d %s", rec.Code, rec.Body)
-	}
-	if rec := opdsGet(h, "/opds", "sam", "web passphrase"); rec.Code != http.StatusUnauthorized {
-		t.Fatalf("the web password opened OPDS: %d", rec.Code)
+	// OPDS signs in with the account's own login; nothing else gets in
+	if rec := opdsGet(h, "/opds", "sam", "not the password"); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("a wrong password opened OPDS: %d", rec.Code)
 	}
 
-	rec = opdsGet(h, "/opds", "sam", "reader-pass-1")
+	rec = opdsGet(h, "/opds", "sam", "web passphrase")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("feed: %d %s", rec.Code, rec.Body)
 	}
@@ -216,13 +209,13 @@ func TestOPDSFeedAndDownload(t *testing.T) {
 		t.Fatal("the feed listed a book outside the account's tags")
 	}
 
-	rec = opdsGet(h, "/opds/download/"+intToStr(bookID), "sam", "reader-pass-1")
+	rec = opdsGet(h, "/opds/download/"+intToStr(bookID), "sam", "web passphrase")
 	if rec.Code != http.StatusOK || rec.Body.String() != "epub-bytes" {
 		t.Fatalf("download: %d %q", rec.Code, rec.Body.String())
 	}
 	// guessing another book's URL gets nothing
 	for _, path := range []string{"/opds/download/" + intToStr(other), "/opds/cover/" + intToStr(other)} {
-		if rec := opdsGet(h, path, "sam", "reader-pass-1"); rec.Code != http.StatusNotFound {
+		if rec := opdsGet(h, path, "sam", "web passphrase"); rec.Code != http.StatusNotFound {
 			t.Fatalf("%s outside the account's tags: %d %q", path, rec.Code, rec.Body.String())
 		}
 	}
@@ -236,13 +229,13 @@ func TestOPDSFeedAndDownload(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatal(rec.Body.String())
 	}
-	if rec := opdsGet(h, "/opds/download/"+intToStr(bookID), "sam", "reader-pass-1"); rec.Code != http.StatusNotFound {
+	if rec := opdsGet(h, "/opds/download/"+intToStr(bookID), "sam", "web passphrase"); rec.Code != http.StatusNotFound {
 		t.Fatalf("download after the tag was revoked: %d", rec.Code)
 	}
 
 	// the old per-library feed URLs say where OPDS went instead of serving
 	// the web app's HTML to a reader
-	if rec := opdsGet(h, "/opds/1", "sam", "reader-pass-1"); rec.Code != http.StatusGone {
+	if rec := opdsGet(h, "/opds/1", "sam", "web passphrase"); rec.Code != http.StatusGone {
 		t.Fatalf("old feed URL: %d", rec.Code)
 	}
 }
