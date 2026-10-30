@@ -38,15 +38,6 @@ func (s *Server) access(r *http.Request) access {
 
 func (a access) admin() bool { return a.open || a.user.IsAdmin() }
 
-// tags is what the caller holds; empty for the pre-auth wizard, which is
-// admin anyway.
-func (a access) tags() []int64 {
-	if a.user == nil {
-		return nil
-	}
-	return a.user.Tags
-}
-
 // mayLibrary only asks whether the caller may work in the library at all —
 // any signed-in account may, since there is just the one. What they may touch
 // inside it is decided per book.
@@ -297,13 +288,14 @@ func (a access) redactTags(books []catalog.Book) {
 		return
 	}
 	for i := range books {
+		b := &books[i]
 		kept := []int64{}
-		for _, t := range books[i].Tags {
+		for _, t := range b.Tags {
 			if a.user.HasTag(t) {
 				kept = append(kept, t)
 			}
 		}
-		books[i].Tags = kept
+		b.Tags = kept
 	}
 }
 

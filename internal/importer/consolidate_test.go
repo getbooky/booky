@@ -58,7 +58,7 @@ func TestConsolidateNeverLosesContent(t *testing.T) {
 	if err := cat.SetFile(lib, away, awayPath, "epub", 4); err != nil {
 		t.Fatal(err)
 	}
-	// 2. hardlinked duplicate → removed
+	// 2. hard-linked duplicate → removed
 	linked := book("Linked")
 	linkedPath := write(filepath.Join(root, "Emmett Hale", "Linked.epub"), "linked")
 	if err := cat.SetFile(lib, linked, linkedPath, "epub", 6); err != nil {
@@ -103,7 +103,7 @@ func TestConsolidateNeverLosesContent(t *testing.T) {
 		t.Error("moved file lost its content")
 	}
 	if _, err := os.Stat(linkCopy); !os.IsNotExist(err) {
-		t.Error("a hardlinked duplicate should be removed")
+		t.Error("a hard-linked duplicate should be removed")
 	}
 	if got, _ := os.ReadFile(linkedPath); string(got) != "linked" {
 		t.Error("removing a hardlink damaged the kept file")

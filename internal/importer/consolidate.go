@@ -203,7 +203,7 @@ func freePath(want, src string) string {
 }
 
 // sameContent reports whether two paths hold the same bytes: the same inode
-// (a hardlink — the usual case, since imports hardlinked across libraries) or
+// (a hardlink — the usual case, since imports hard-linked across libraries) or
 // byte-identical files.
 func sameContent(a, b string) bool {
 	ia, err1 := os.Stat(a)
