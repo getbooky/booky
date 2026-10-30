@@ -86,15 +86,15 @@ type HistoryItem struct {
 // way: a user has no business seeing activity for authors they can't see, and
 // everything they did themselves carries a library.
 func (s *Store) ListHistory(limit int, v *Visibility) ([]HistoryItem, error) {
-	ph, libArgs := idList(v.libraryIDs())
+	ph, tagArgs := idList(v.tagIDs())
 	args := []any{v.unscoped()}
-	args = append(args, libArgs...)
+	args = append(args, tagArgs...)
 	args = append(args, limit)
 	rows, err := s.db.Query(fmt.Sprintf( //nolint:gosec // G201: placeholders only, see idList
 		`SELECT h.id, COALESCE(h.book_id, 0), COALESCE(b.title, ''), COALESCE(h.library_id, 0),
 		        h.kind, h.detail, h.created_at
 		 FROM history h LEFT JOIN books b ON b.id = h.book_id
-		 WHERE (? = 1 OR h.library_id IN (%s))
+		 WHERE (? = 1 OR EXISTS (SELECT 1 FROM book_tags bt WHERE bt.book_id = h.book_id AND bt.tag_id IN (%s)))
 		 ORDER BY h.id DESC LIMIT ?`, ph), args...)
 	if err != nil {
 		return nil, err

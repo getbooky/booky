@@ -78,6 +78,7 @@ func testServer(t *testing.T) *Server {
 	covers := catalog.NewCoverCache(t.TempDir())
 	engine := acquire.New(conn, cat, cfg, imp, covers)
 	hc := metadata.NewHardcover(func() string { return cfg.Get("hardcover_token") })
+	accounts := auth.New(conn)
 	srv, err := New(Deps{
 		DB: conn, Version: "test",
 		Dist:     fstest.MapFS{"dist/index.html": {Data: []byte("<html>booky</html>")}},
@@ -88,11 +89,11 @@ func testServer(t *testing.T) *Server {
 		Settings: cfg,
 		Acquire:  engine,
 		Watcher:  watcher.New(conn, cat, chain, cfg, engine, covers, hc),
-		Auth:     auth.New(conn),
+		Auth:     accounts,
 		KoReader: koreader.New(conn, testKeeper(t)),
 		Kindle:   kindle.New(conn, testKeeper(t)),
 		Backups:  backup.New(conn, configDir),
-		OPDS:     opds.New(conn, cat, covers),
+		OPDS:     opds.New(conn, cat, covers, accounts),
 	})
 	if err != nil {
 		t.Fatal(err)

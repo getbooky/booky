@@ -22,9 +22,9 @@ func (s *Server) handleLibraryRefresh(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, errors.New("bad id"))
 		return
 	}
-	// re-pulling metadata from the providers is everyday work inside a
-	// library, so a scoped user may run it on theirs
-	if !s.requireLibrary(w, r, libraryID) {
+	// there is one library, so refreshing it is install-wide work — an
+	// admin's call. Anyone may still refresh a single book they can see.
+	if !s.requireAdmin(w, r) {
 		return
 	}
 	if _, loaded := s.refreshing.LoadOrStore(libraryID, true); loaded {

@@ -47,7 +47,24 @@ func seedShelf(t *testing.T, srv *Server) (int64, int64, string) {
 	if err := srv.Catalog.SetFile(libID, bookID, path, "epub", 10); err != nil {
 		t.Fatal(err)
 	}
+	tag, err := srv.Catalog.CreateTag("Shelf")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := srv.Catalog.AddBookTags(bookID, []int64{tag}); err != nil {
+		t.Fatal(err)
+	}
 	return libID, bookID, path
+}
+
+// shelfTag is the tag seedShelf shares its book through.
+func shelfTag(t *testing.T, srv *Server) int64 {
+	t.Helper()
+	var id int64
+	if err := srv.db.QueryRow(`SELECT id FROM tags WHERE name = 'Shelf'`).Scan(&id); err != nil {
+		t.Fatal(err)
+	}
+	return id
 }
 
 func TestAuthLifecycle(t *testing.T) {
@@ -104,8 +121,8 @@ func TestAuthLifecycle(t *testing.T) {
 	}
 
 	// OPDS keeps its own auth: still 401 with a session cookie but no basic auth
-	libID, _, _ := seedShelf(t, srv)
-	req = httptest.NewRequest("GET", "/opds/"+intToStr(libID), nil)
+	seedShelf(t, srv)
+	req = httptest.NewRequest("GET", "/opds", nil)
 	req.AddCookie(cookie[0])
 	rec2 = httptest.NewRecorder()
 	h.ServeHTTP(rec2, req)
@@ -116,70 +133,132 @@ func TestAuthLifecycle(t *testing.T) {
 
 func intToStr(v int64) string { return strconv.FormatInt(v, 10) }
 
+// opdsGet fetches an OPDS path with Basic credentials.
+func opdsGet(h http.Handler, path, user, pass string) *httptest.ResponseRecorder {
+	req := httptest.NewRequest("GET", path, nil)
+	if user != "" {
+		req.SetBasicAuth(user, pass)
+	}
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	return rec
+}
+
+// OPDS signs in per account with its own password and shows exactly the
+// account's tagged books — and every download and cover is checked against
+// the same rule, so a guessed URL for someone else's book is a 404.
 func TestOPDSFeedAndDownload(t *testing.T) {
 	srv := testServer(t)
 	h := srv.Handler()
-	libID, bookID, _ := seedShelf(t, srv)
-	base := "/opds/" + intToStr(libID)
+	_, bookID, _ := seedShelf(t, srv)
+	tag := shelfTag(t, srv)
 
-	// unset credentials refuse everything, even with a guess
-	req := httptest.NewRequest("GET", base, nil)
-	req.SetBasicAuth("shelf", "anything-goes")
-	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, req)
-	if rec.Code != http.StatusUnauthorized {
-		t.Fatalf("unset opds creds must refuse: %d", rec.Code)
+	// a second book, shared through a tag sam doesn't hold
+	other, err := srv.Catalog.UpsertBook(metadata.BookMeta{Provider: "test", Title: "Haze", Authors: []string{"Nora Vale"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := srv.Catalog.AddToLibrary(other, srv.Catalog.TheLibrary(), true); err != nil {
+		t.Fatal(err)
+	}
+	otherPath := filepath.Join(t.TempDir(), "haze.epub")
+	if err := os.WriteFile(otherPath, []byte("other-bytes"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := srv.Catalog.SetFile(srv.Catalog.TheLibrary(), other, otherPath, "epub", 11); err != nil {
+		t.Fatal(err)
+	}
+	private, err := srv.Catalog.CreateTag("Private")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := srv.Catalog.AddBookTags(other, []int64{private}); err != nil {
+		t.Fatal(err)
 	}
 
-	// set credentials, then fetch the feed
-	rec2, _ := doJSON(t, h, "PUT", "/api/v1/libraries/"+intToStr(libID)+"/opds",
-		map[string]string{"username": "alex-shelf", "password": "read my books"})
-	if rec2.Code != http.StatusOK {
-		t.Fatalf("set opds creds: %d %s", rec2.Code, rec2.Body)
+	f := &scopedFixture{srv: srv, h: h}
+	rec, _ := doJSON(t, h, "POST", "/api/v1/users", map[string]any{"username": "root", "password": "correct horse battery"})
+	if rec.Code != http.StatusCreated {
+		t.Fatal(rec.Body.String())
+	}
+	admin := login(t, h, "root", "correct horse battery")
+	rec, _ = f.do(t, admin, "POST", "/api/v1/users", map[string]any{
+		"username": "sam", "password": "web passphrase", "role": "user", "tagIds": []int64{tag}})
+	if rec.Code != http.StatusCreated {
+		t.Fatal(rec.Body.String())
+	}
+	sam := login(t, h, "sam", "web passphrase")
+
+	// no OPDS password yet: refused — and the web password never works
+	if rec := opdsGet(h, "/opds", "sam", "web passphrase"); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("OPDS before opting in: %d", rec.Code)
+	}
+	rec, _ = f.do(t, sam, "PUT", "/api/v1/auth/opds", map[string]any{"password": "reader-pass-1"})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("set own OPDS password: %d %s", rec.Code, rec.Body)
+	}
+	if rec := opdsGet(h, "/opds", "sam", "web passphrase"); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("the web password opened OPDS: %d", rec.Code)
 	}
 
-	req = httptest.NewRequest("GET", base, nil)
-	req.SetBasicAuth("alex-shelf", "read my books")
-	rec = httptest.NewRecorder()
-	h.ServeHTTP(rec, req)
+	rec = opdsGet(h, "/opds", "sam", "reader-pass-1")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("feed: %d %s", rec.Code, rec.Body)
 	}
 	feedXML := rec.Body.String()
 	for _, want := range []string{"<title>Burrow</title>", "Emmett Hale", "application/epub+zip",
-		base + "/download/" + intToStr(bookID), "Vault #1"} {
+		"/opds/download/" + intToStr(bookID), "Vault #1"} {
 		if !strings.Contains(feedXML, want) {
 			t.Fatalf("feed missing %q:\n%s", want, feedXML)
 		}
 	}
+	if strings.Contains(feedXML, "Haze") {
+		t.Fatal("the feed listed a book outside the account's tags")
+	}
 
-	// download with the right creds gets the bytes; wrong password refused
-	req = httptest.NewRequest("GET", base+"/download/"+intToStr(bookID), nil)
-	req.SetBasicAuth("alex-shelf", "read my books")
-	rec = httptest.NewRecorder()
-	h.ServeHTTP(rec, req)
+	rec = opdsGet(h, "/opds/download/"+intToStr(bookID), "sam", "reader-pass-1")
 	if rec.Code != http.StatusOK || rec.Body.String() != "epub-bytes" {
 		t.Fatalf("download: %d %q", rec.Code, rec.Body.String())
 	}
-	req = httptest.NewRequest("GET", base+"/download/"+intToStr(bookID), nil)
-	req.SetBasicAuth("alex-shelf", "wrong password")
-	rec = httptest.NewRecorder()
-	h.ServeHTTP(rec, req)
-	if rec.Code != http.StatusUnauthorized {
+	// guessing another book's URL gets nothing
+	for _, path := range []string{"/opds/download/" + intToStr(other), "/opds/cover/" + intToStr(other)} {
+		if rec := opdsGet(h, path, "sam", "reader-pass-1"); rec.Code != http.StatusNotFound {
+			t.Fatalf("%s outside the account's tags: %d %q", path, rec.Code, rec.Body.String())
+		}
+	}
+	if rec := opdsGet(h, "/opds/download/"+intToStr(bookID), "sam", "wrong password"); rec.Code != http.StatusUnauthorized {
 		t.Fatalf("wrong password must refuse download: %d", rec.Code)
+	}
+
+	// taking the tag away closes the feed's door at once
+	rec, _ = f.do(t, admin, "PUT", "/api/v1/users/"+intToStr(srv.Auth.SessionUser(sam.Value).ID)+"/tags",
+		map[string]any{"tagIds": []int64{}})
+	if rec.Code != http.StatusOK {
+		t.Fatal(rec.Body.String())
+	}
+	if rec := opdsGet(h, "/opds/download/"+intToStr(bookID), "sam", "reader-pass-1"); rec.Code != http.StatusNotFound {
+		t.Fatalf("download after the tag was revoked: %d", rec.Code)
+	}
+
+	// the old per-library feed URLs say where OPDS went instead of serving
+	// the web app's HTML to a reader
+	if rec := opdsGet(h, "/opds/1", "sam", "reader-pass-1"); rec.Code != http.StatusGone {
+		t.Fatalf("old feed URL: %d", rec.Code)
 	}
 }
 
 func TestKoReaderDeviceFlow(t *testing.T) {
 	srv := testServer(t)
 	h := srv.Handler()
-	libID, bookID, _ := seedShelf(t, srv)
+	_, bookID, _ := seedShelf(t, srv)
+	// the plugin's URLs carry the tag the sync named in its "libraryId" field
+	libID := shelfTag(t, srv)
 	if err := srv.Settings.Set("server_url", "http://booky.local:8787"); err != nil {
 		t.Fatal(err)
 	}
 
 	rec, out := doJSON(t, h, "POST", "/api/v1/devices", map[string]any{
-		"name": "Kobo", "libraryIds": []int64{libID}, "autoLibraryIds": []int64{libID}})
+		"name": "Kobo", "tagIds": []int64{libID}, "autoTagIds": []int64{libID}})
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("create device: %d %s", rec.Code, rec.Body)
 	}

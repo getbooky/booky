@@ -68,6 +68,11 @@ func (im *Importer) Scan(ctx context.Context, libraryID int64, rootPath string) 
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
+		// hidden folders hold Booky's own bookkeeping (.booky-duplicates) and
+		// other tools' — never books to import
+		if d.IsDir() && path != rootPath && strings.HasPrefix(d.Name(), ".") {
+			return filepath.SkipDir
+		}
 		if d.IsDir() || !bookExts[strings.ToLower(filepath.Ext(path))] {
 			return nil
 		}

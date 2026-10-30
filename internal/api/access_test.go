@@ -10,18 +10,20 @@ import (
 	"strconv"
 	"strings"
 	"testing"
-
-	"github.com/getbooky/booky/internal/metadata"
 )
 
-// scopedFixture builds the shape these tests all need: two libraries, an
-// admin, and a plain user who may reach only the first one.
+// scopedFixture builds the shape these tests all need: the one library, an
+// admin, two shared tags, and a plain user who holds only the first.
 type scopedFixture struct {
-	srv        *Server
-	h          http.Handler
-	mine, off  int64 // the user's library, and one they must never see
+	srv *Server
+	h   http.Handler
+	lib int64 // the library every book lives in
+	// mine is a tag the user holds; off is one they must never see through
+	mine, off  int64
 	adminCooke *http.Cookie
 	userCookie *http.Cookie
+	samID      int64
+	samTag     int64 // sam's personal tag
 }
 
 func newScopedFixture(t *testing.T) *scopedFixture {
@@ -30,19 +32,13 @@ func newScopedFixture(t *testing.T) *scopedFixture {
 	h := srv.Handler()
 	f := &scopedFixture{srv: srv, h: h}
 
-	// libraries first — while the API is still open, before any account
+	// the library first — while the API is still open, before any account
 	rec, out := doJSON(t, h, "POST", "/api/v1/libraries",
-		map[string]string{"name": "Alex", "rootPath": "/data/books/alex"})
+		map[string]string{"name": "Library", "rootPath": "/data/books"})
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("create library: %d %s", rec.Code, rec.Body)
 	}
-	f.mine = int64(out["id"].(float64))
-	rec, out = doJSON(t, h, "POST", "/api/v1/libraries",
-		map[string]string{"name": "Private", "rootPath": "/data/books/private"})
-	if rec.Code != http.StatusCreated {
-		t.Fatalf("create library: %d %s", rec.Code, rec.Body)
-	}
-	f.off = int64(out["id"].(float64))
+	f.lib = int64(out["id"].(float64))
 
 	// first account is forced to admin and turns login on
 	rec, _ = doJSON(t, h, "POST", "/api/v1/users", map[string]any{
@@ -52,16 +48,53 @@ func newScopedFixture(t *testing.T) *scopedFixture {
 	}
 	f.adminCooke = login(t, h, "root", "correct horse battery")
 
-	rec, _ = f.do(t, f.adminCooke, "POST", "/api/v1/users", map[string]any{
+	f.mine = f.createTag(t, "Alex")
+	f.off = f.createTag(t, "Private")
+
+	rec, out = f.do(t, f.adminCooke, "POST", "/api/v1/users", map[string]any{
 		"username": "sam", "password": "another passphrase", "role": "user",
-		"libraryIds": []int64{f.mine},
+		"tagIds": []int64{f.mine},
 	})
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("create scoped user: %d %s", rec.Code, rec.Body)
 	}
+	f.samID = int64(out["id"].(float64))
 	f.userCookie = login(t, h, "sam", "another passphrase")
+	f.samTag = srv.Auth.UserByID(f.samID).PersonalTag
 	return f
 }
+
+func (f *scopedFixture) createTag(t *testing.T, name string) int64 {
+	t.Helper()
+	rec, out := f.do(t, f.adminCooke, "POST", "/api/v1/tags", map[string]any{"name": name})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create tag %s: %d %s", name, rec.Code, rec.Body)
+	}
+	return int64(out["id"].(float64))
+}
+
+// addBook adds a book through the API as c, shared with tags (nil lets the
+// server pick: admin-only for an admin, the personal tag for a user).
+func (f *scopedFixture) addBook(t *testing.T, c *http.Cookie, meta map[string]any, tags []int64) map[string]any {
+	t.Helper()
+	if _, ok := meta["provider"]; !ok {
+		meta["provider"] = "stub"
+	}
+	if _, ok := meta["authors"]; !ok {
+		meta["authors"] = []string{"Emmett Hale"}
+	}
+	body := map[string]any{"meta": meta, "libraryId": f.lib}
+	if tags != nil {
+		body["tagIds"] = tags
+	}
+	rec, out := f.do(t, c, "POST", "/api/v1/books", body)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("add %v: %d %s", meta["title"], rec.Code, rec.Body)
+	}
+	return out
+}
+
+func idStr(v any) string { return strconv.FormatInt(int64(v.(float64)), 10) }
 
 func login(t *testing.T, h http.Handler, username, password string) *http.Cookie {
 	t.Helper()
@@ -101,12 +134,14 @@ func (f *scopedFixture) do(t *testing.T, c *http.Cookie, method, path string, bo
 	return rec, out
 }
 
-// A plain user must not reach anything that configures the install or edits
-// and deletes what's in it. Each of these was reachable before roles were
-// enforced — the whole point of the change.
+// A plain user must not reach anything that configures the install, edits
+// or deletes what's in it, or decides who sees what.
 func TestUserIsLockedOutOfAdminEndpoints(t *testing.T) {
 	f := newScopedFixture(t)
-	mine := strconv.FormatInt(f.mine, 10)
+	lib := strconv.FormatInt(f.lib, 10)
+	book := idStr(f.addBook(t, f.adminCooke, map[string]any{"title": "Burrow"}, []int64{f.mine})["id"])
+	off := strconv.FormatInt(f.off, 10)
+	sam := strconv.FormatInt(f.samID, 10)
 
 	forbidden := []struct {
 		method, path string
@@ -117,14 +152,16 @@ func TestUserIsLockedOutOfAdminEndpoints(t *testing.T) {
 	}{
 		{method: "GET", path: "/api/v1/users"},
 		{method: "POST", path: "/api/v1/users"},
+		{method: "PUT", path: "/api/v1/users/" + sam + "/tags"},
+		{method: "DELETE", path: "/api/v1/users/" + sam + "/opds", skipAdminCheck: true},
 		{method: "GET", path: "/api/v1/settings/prowlarr_url"},
 		{method: "PUT", path: "/api/v1/settings/naming_scheme"},
 		{method: "POST", path: "/api/v1/libraries"},
-		{method: "DELETE", path: "/api/v1/libraries/" + mine},
-		{method: "POST", path: "/api/v1/libraries/" + mine + "/scan"},
-		{method: "GET", path: "/api/v1/libraries/" + mine + "/review"},
-		{method: "PUT", path: "/api/v1/libraries/" + mine + "/opds"},
-		{method: "PUT", path: "/api/v1/libraries/" + mine + "/profile"},
+		{method: "DELETE", path: "/api/v1/libraries/" + lib},
+		{method: "POST", path: "/api/v1/libraries/" + lib + "/scan"},
+		{method: "POST", path: "/api/v1/libraries/" + lib + "/refresh", skipAdminCheck: true},
+		{method: "GET", path: "/api/v1/libraries/" + lib + "/review"},
+		{method: "PUT", path: "/api/v1/libraries/" + lib + "/profile"},
 		{method: "GET", path: "/api/v1/system/logs"},
 		{method: "GET", path: "/api/v1/system/health"},
 		{method: "GET", path: "/api/v1/profiles"},
@@ -136,6 +173,13 @@ func TestUserIsLockedOutOfAdminEndpoints(t *testing.T) {
 		{method: "GET", path: "/api/v1/lists"},
 		{method: "POST", path: "/api/v1/lists"},
 		{method: "PUT", path: "/api/v1/profiles/1"},
+		// sharing is the admin's call, end to end
+		{method: "POST", path: "/api/v1/tags"},
+		{method: "PATCH", path: "/api/v1/tags/" + off},
+		{method: "PUT", path: "/api/v1/tags/" + off + "/members"},
+		{method: "DELETE", path: "/api/v1/tags/" + off, skipAdminCheck: true},
+		{method: "PUT", path: "/api/v1/books/" + book + "/tags"},
+		{method: "POST", path: "/api/v1/tags/bulk"},
 	}
 	for _, tc := range forbidden {
 		rec, _ := f.do(t, f.userCookie, tc.method, tc.path, map[string]any{})
@@ -155,19 +199,16 @@ func TestUserIsLockedOutOfAdminEndpoints(t *testing.T) {
 }
 
 // The everyday work the role exists for has to keep working.
-func TestUserCanWorkInTheirLibrary(t *testing.T) {
+func TestUserCanWorkOnTheirShelf(t *testing.T) {
 	f := newScopedFixture(t)
-	mine := strconv.FormatInt(f.mine, 10)
+	lib := strconv.FormatInt(f.lib, 10)
 
-	rec, out := f.do(t, f.userCookie, "POST", "/api/v1/books", map[string]any{
-		"meta":      map[string]any{"provider": "stub", "title": "Burrow", "authors": []string{"Emmett Hale"}},
-		"libraryId": f.mine,
-		"monitored": false,
-	})
-	if rec.Code != http.StatusCreated {
-		t.Fatalf("user must be able to add a book to their library: %d %s", rec.Code, rec.Body)
+	out := f.addBook(t, f.userCookie, map[string]any{"title": "Burrow"}, nil)
+	bookID := idStr(out["id"])
+	// what a user adds for themselves lands on their personal tag
+	if tags := out["tagIds"].([]any); len(tags) != 1 || int64(tags[0].(float64)) != f.samTag {
+		t.Fatalf("a user's own add must carry their personal tag, got %v", tags)
 	}
-	bookID := strconv.FormatInt(int64(out["id"].(float64)), 10)
 
 	allowed := []struct {
 		method, path string
@@ -175,19 +216,20 @@ func TestUserCanWorkInTheirLibrary(t *testing.T) {
 	}{
 		{"GET", "/api/v1/books/" + bookID, nil},
 		{"POST", "/api/v1/books/" + bookID + "/refresh", nil},
-		{"PUT", "/api/v1/libraries/" + mine + "/books/" + bookID + "/monitored", map[string]any{"monitored": true}},
-		{"POST", "/api/v1/libraries/" + mine + "/refresh", nil},
-		{"POST", "/api/v1/libraries/" + mine + "/search", nil},
+		{"PUT", "/api/v1/libraries/" + lib + "/books/" + bookID + "/monitored", map[string]any{"monitored": true}},
+		{"POST", "/api/v1/libraries/" + lib + "/search", nil},
 		{"GET", "/api/v1/search?q=burrow", nil},
 		{"GET", "/api/v1/wanted", nil},
 		{"GET", "/api/v1/calendar", nil},
 		{"GET", "/api/v1/devices", nil},
+		{"GET", "/api/v1/tags", nil},
+		{"GET", "/api/v1/auth/opds", nil},
+		{"PUT", "/api/v1/auth/opds", map[string]any{"password": "reader-pass-1"}},
 		{"GET", "/api/v1/settings/user_scopes", nil},
 		{"PUT", "/api/v1/settings/user_scopes", map[string]any{"value": "[]"}},
 		{"GET", "/api/v1/settings/server_url", nil},
-		// a person who can shelve a series has to be able to unshelve it, or
-		// they accumulate a mess they can't clear. Files are untouched.
-		{"DELETE", "/api/v1/libraries/" + mine + "/books/" + bookID + "?mode=library", nil},
+		// a person who can add a book has to be able to unadd it
+		{"DELETE", "/api/v1/libraries/" + lib + "/books/" + bookID + "?mode=library", nil},
 	}
 	for _, tc := range allowed {
 		rec, _ := f.do(t, f.userCookie, tc.method, tc.path, tc.body)
@@ -196,7 +238,8 @@ func TestUserCanWorkInTheirLibrary(t *testing.T) {
 		}
 	}
 
-	// ...but not the two things the role explicitly withholds
+	// ...but not what the role explicitly withholds
+	bookID = idStr(f.addBook(t, f.userCookie, map[string]any{"title": "Drift"}, nil)["id"])
 	denied := []struct {
 		method, path string
 		body         any
@@ -204,8 +247,8 @@ func TestUserCanWorkInTheirLibrary(t *testing.T) {
 		{"PATCH", "/api/v1/books/" + bookID, map[string]any{"fields": map[string]string{"title": "Nope"}}},
 		{"PUT", "/api/v1/books/" + bookID + "/lock", map[string]any{"field": "title", "locked": true}},
 		{"PUT", "/api/v1/books/" + bookID + "/cover/custom", map[string]any{"url": "http://example.invalid/x.jpg"}},
-		{"DELETE", "/api/v1/libraries/" + mine + "/books/" + bookID + "?mode=file", nil},
-		{"DELETE", "/api/v1/libraries/" + mine + "/books/" + bookID + "?mode=block", nil},
+		{"DELETE", "/api/v1/libraries/" + lib + "/books/" + bookID + "?mode=file", nil},
+		{"DELETE", "/api/v1/libraries/" + lib + "/books/" + bookID + "?mode=block", nil},
 	}
 	for _, tc := range denied {
 		rec, _ := f.do(t, f.userCookie, tc.method, tc.path, tc.body)
@@ -215,88 +258,109 @@ func TestUserCanWorkInTheirLibrary(t *testing.T) {
 	}
 }
 
-// A library the user wasn't granted must be invisible, not merely read-only.
-func TestOtherLibrariesAreInvisible(t *testing.T) {
+// A book carrying none of the user's tags must be invisible, not merely
+// read-only — whether it's shared through a tag they don't hold or carries no
+// tag at all (admin-only).
+func TestBooksOutsideYourTagsAreInvisible(t *testing.T) {
 	f := newScopedFixture(t)
-	off := strconv.FormatInt(f.off, 10)
+	lib := strconv.FormatInt(f.lib, 10)
 
-	// seed a book into the off-limits library as the admin
-	rec, out := f.do(t, f.adminCooke, "POST", "/api/v1/books", map[string]any{
-		"meta":      map[string]any{"provider": "stub", "title": "Burrow", "authors": []string{"Emmett Hale"}},
-		"libraryId": f.off,
-		"monitored": false,
-	})
-	if rec.Code != http.StatusCreated {
-		t.Fatalf("seed private book: %d %s", rec.Code, rec.Body)
-	}
-	privateBook := strconv.FormatInt(int64(out["id"].(float64)), 10)
+	private := idStr(f.addBook(t, f.adminCooke, map[string]any{"title": "Burrow"}, []int64{f.off})["id"])
+	untagged := idStr(f.addBook(t, f.adminCooke, map[string]any{"title": "Haze"}, nil)["id"])
 
-	rec, out = f.do(t, f.userCookie, "GET", "/api/v1/libraries", nil)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("libraries: %d", rec.Code)
-	}
-	libs := list(out, "libraries")
-	if len(libs) != 1 {
-		t.Fatalf("user must see exactly their one library, got %d", len(libs))
-	}
-	if int64(libs[0].(map[string]any)["id"].(float64)) != f.mine {
-		t.Fatalf("user sees the wrong library: %v", libs[0])
-	}
-
-	// the book itself, its cover, its file and its progress are all closed
-	for _, path := range []string{
-		"/api/v1/books/" + privateBook,
-		"/api/v1/covers/" + privateBook,
-		"/api/v1/books/" + privateBook + "/file",
-		"/api/v1/books/" + privateBook + "/progress",
-	} {
-		rec, _ := f.do(t, f.userCookie, "GET", path, nil)
+	for _, book := range []string{private, untagged} {
+		// the book itself, its cover, its file and its progress are all closed
+		for _, path := range []string{
+			"/api/v1/books/" + book,
+			"/api/v1/covers/" + book,
+			"/api/v1/books/" + book + "/file",
+			"/api/v1/books/" + book + "/progress",
+			"/api/v1/books/" + book + "/releases?libraryId=" + lib,
+		} {
+			rec, _ := f.do(t, f.userCookie, "GET", path, nil)
+			if rec.Code != http.StatusForbidden {
+				t.Errorf("GET %s: got %d, want 403", path, rec.Code)
+			}
+		}
+		rec, _ := f.do(t, f.userCookie, "PUT", "/api/v1/libraries/"+lib+"/books/"+book+"/monitored",
+			map[string]any{"monitored": true})
 		if rec.Code != http.StatusForbidden {
-			t.Errorf("GET %s: got %d, want 403", path, rec.Code)
+			t.Errorf("monitor %s: got %d, want 403", book, rec.Code)
+		}
+		rec, _ = f.do(t, f.userCookie, "POST", "/api/v1/books/"+book+"/autograb?libraryId="+lib, nil)
+		if rec.Code != http.StatusForbidden {
+			t.Errorf("autograb %s: got %d, want 403", book, rec.Code)
 		}
 	}
 
-	// and it never shows up in a list
-	rec, out = f.do(t, f.userCookie, "GET", "/api/v1/books", nil)
+	// and they never show up in a list
+	rec, out := f.do(t, f.userCookie, "GET", "/api/v1/books", nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("books: %d", rec.Code)
 	}
 	for _, raw := range list(out, "books") {
-		b := raw.(map[string]any)
-		if int64(b["libraryId"].(float64)) == f.off {
-			t.Fatalf("a book from an off-limits library leaked into the list: %v", b)
+		if title := raw.(map[string]any)["title"]; title == "Burrow" || title == "Haze" {
+			t.Fatalf("a book outside the user's tags leaked into the list: %v", raw)
 		}
 	}
 
-	// asking for it by id is refused rather than silently widened
-	rec, _ = f.do(t, f.userCookie, "GET", "/api/v1/books?libraryId="+off, nil)
+	// a user can't hand a book a tag they don't hold
+	rec, _ = f.do(t, f.userCookie, "POST", "/api/v1/books", map[string]any{
+		"meta":   map[string]any{"provider": "stub", "title": "Drift", "authors": []string{"Emmett Hale"}},
+		"tagIds": []int64{f.off},
+	})
 	if rec.Code != http.StatusForbidden {
-		t.Errorf("books?libraryId=<other>: got %d, want 403", rec.Code)
+		t.Errorf("adding a book with a tag the user doesn't hold: got %d, want 403", rec.Code)
 	}
 
-	// as are the write paths into it
-	for _, tc := range []struct {
-		method, path string
-		body         any
-	}{
-		{"POST", "/api/v1/books", map[string]any{
-			"meta":      map[string]any{"provider": "stub", "title": "Drift", "authors": []string{"Emmett Hale"}},
-			"libraryId": f.off,
-		}},
-		{"POST", "/api/v1/libraries/" + off + "/refresh", nil},
-		{"POST", "/api/v1/libraries/" + off + "/search", nil},
-		{"PUT", "/api/v1/libraries/" + off + "/books/" + privateBook + "/monitored", map[string]any{"monitored": true}},
-		{"GET", "/api/v1/books/" + privateBook + "/releases?libraryId=" + off, nil},
-	} {
-		rec, _ := f.do(t, f.userCookie, tc.method, tc.path, tc.body)
-		if rec.Code != http.StatusForbidden {
-			t.Errorf("%s %s: got %d, want 403", tc.method, tc.path, rec.Code)
+	// search doesn't advertise what's on other people's shelves
+	rec, out = f.do(t, f.userCookie, "GET", "/api/v1/search?q=burrow", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("search: %d", rec.Code)
+	}
+	for _, raw := range list(out, "results") {
+		if raw.(map[string]any)["inLibrary"] == true {
+			t.Fatal("search told the user a book outside their tags is in the library")
 		}
 	}
 }
 
+// Which other audiences a book reaches — another person's personal tag above
+// all — is the admin's business. A user sees only the tags they hold.
+func TestOtherPeoplesTagsAreHidden(t *testing.T) {
+	f := newScopedFixture(t)
+	book := idStr(f.addBook(t, f.adminCooke, map[string]any{"title": "Burrow"}, []int64{f.mine, f.off})["id"])
+
+	rec, out := f.do(t, f.userCookie, "GET", "/api/v1/books/"+book, nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("book: %d %s", rec.Code, rec.Body)
+	}
+	tags := out["tagIds"].([]any)
+	if len(tags) != 1 || int64(tags[0].(float64)) != f.mine {
+		t.Fatalf("user sees tags %v, want only the one they hold", tags)
+	}
+	rec, out = f.do(t, f.userCookie, "GET", "/api/v1/tags", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("tags: %d", rec.Code)
+	}
+	for _, raw := range list(out, "tags") {
+		tg := raw.(map[string]any)
+		if int64(tg["id"].(float64)) == f.off {
+			t.Fatal("the tag list showed a tag the user doesn't hold")
+		}
+		if members, _ := tg["memberIds"].([]any); len(members) > 0 {
+			t.Fatal("a user must not see who else holds a tag")
+		}
+	}
+	// the admin sees both
+	rec, out = f.do(t, f.adminCooke, "GET", "/api/v1/books/"+book, nil)
+	if rec.Code != http.StatusOK || len(out["tagIds"].([]any)) != 2 {
+		t.Fatalf("admin tags: %d %v", rec.Code, out["tagIds"])
+	}
+}
+
 // A device's token bypasses session auth, so a user must not be able to mint
-// one that reaches a library they don't hold.
+// one that reaches a tag they don't hold.
 func TestDevicesAreScopedToTheirOwner(t *testing.T) {
 	f := newScopedFixture(t)
 	if err := f.srv.Settings.Set("server_url", "http://booky.local:8787"); err != nil {
@@ -304,27 +368,35 @@ func TestDevicesAreScopedToTheirOwner(t *testing.T) {
 	}
 
 	rec, _ := f.do(t, f.userCookie, "POST", "/api/v1/devices", map[string]any{
-		"name": "Sneaky Kobo", "libraryIds": []int64{f.off},
+		"name": "Sneaky Kobo", "tagIds": []int64{f.off},
 	})
 	if rec.Code != http.StatusForbidden {
-		t.Fatalf("pairing a device to an off-limits library: got %d, want 403", rec.Code)
+		t.Fatalf("pairing a device to a tag the user doesn't hold: got %d, want 403", rec.Code)
 	}
 
 	rec, out := f.do(t, f.userCookie, "POST", "/api/v1/devices", map[string]any{
-		"name": "Sam's Kobo", "libraryIds": []int64{f.mine},
+		"name": "Sam's Kobo", "tagIds": []int64{f.mine, f.samTag},
 	})
 	if rec.Code != http.StatusCreated {
-		t.Fatalf("pairing a device to their own library: %d %s", rec.Code, rec.Body)
+		t.Fatalf("pairing a device to their own tags: %d %s", rec.Code, rec.Body)
 	}
-	samDevice := strconv.FormatInt(int64(out["id"].(float64)), 10)
+	samDevice := idStr(out["id"])
 
 	rec, out = f.do(t, f.adminCooke, "POST", "/api/v1/devices", map[string]any{
-		"name": "Admin Kindle", "libraryIds": []int64{f.off},
+		"name": "Admin Kindle", "tagIds": []int64{f.off},
 	})
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("admin device: %d %s", rec.Code, rec.Body)
 	}
-	adminDevice := strconv.FormatInt(int64(out["id"].(float64)), 10)
+	adminDevice := idStr(out["id"])
+
+	// an admin editing sam's device can't widen it past sam
+	rec, _ = f.do(t, f.adminCooke, "PUT", "/api/v1/devices/"+samDevice, map[string]any{
+		"name": "Sam's Kobo", "tagIds": []int64{f.off},
+	})
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("admin widening a user's device past the user: got %d, want 403", rec.Code)
+	}
 
 	// the user sees only their own
 	rec, out = f.do(t, f.userCookie, "GET", "/api/v1/devices", nil)
@@ -372,133 +444,91 @@ func TestDevicesAreScopedToTheirOwner(t *testing.T) {
 	}
 }
 
-// Grants are read per request, so an admin taking a library away lands on the
-// user's next click — and cuts off the e-reader they already paired.
-func TestRevokingAccessTakesEffectImmediately(t *testing.T) {
+// Tags are read per request, so an admin taking one away lands on the user's
+// next click — same session, no re-login.
+func TestRevokingATagTakesEffectImmediately(t *testing.T) {
 	f := newScopedFixture(t)
-	mine := strconv.FormatInt(f.mine, 10)
+	book := idStr(f.addBook(t, f.adminCooke, map[string]any{"title": "Burrow"}, []int64{f.mine})["id"])
 
-	rec, _ := f.do(t, f.userCookie, "POST", "/api/v1/libraries/"+mine+"/refresh", nil)
-	if rec.Code == http.StatusForbidden {
-		t.Fatalf("baseline: the user should reach their own library")
-	}
-
-	rec, out := f.do(t, f.adminCooke, "GET", "/api/v1/users", nil)
+	rec, _ := f.do(t, f.userCookie, "GET", "/api/v1/books/"+book, nil)
 	if rec.Code != http.StatusOK {
-		t.Fatalf("users: %d", rec.Code)
-	}
-	var samID int64
-	for _, raw := range list(out, "users") {
-		u := raw.(map[string]any)
-		if u["username"] == "sam" {
-			samID = int64(u["id"].(float64))
-		}
-	}
-	if samID == 0 {
-		t.Fatal("sam not found")
+		t.Fatalf("baseline: the user should see a book shared with their tag, got %d", rec.Code)
 	}
 
-	rec, _ = f.do(t, f.adminCooke, "PUT", "/api/v1/users/"+strconv.FormatInt(samID, 10)+"/libraries",
-		map[string]any{"libraryIds": []int64{}})
+	rec, _ = f.do(t, f.adminCooke, "PUT", "/api/v1/users/"+strconv.FormatInt(f.samID, 10)+"/tags",
+		map[string]any{"tagIds": []int64{}})
 	if rec.Code != http.StatusOK {
 		t.Fatalf("revoke: %d %s", rec.Code, rec.Body)
 	}
 
-	// same session cookie, no re-login
-	rec, out = f.do(t, f.userCookie, "GET", "/api/v1/libraries", nil)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("libraries after revoke: %d", rec.Code)
-	}
-	if libs := list(out, "libraries"); len(libs) != 0 {
-		t.Fatalf("revoked user still sees %d libraries", len(libs))
-	}
-	rec, _ = f.do(t, f.userCookie, "POST", "/api/v1/libraries/"+mine+"/refresh", nil)
+	rec, _ = f.do(t, f.userCookie, "GET", "/api/v1/books/"+book, nil)
 	if rec.Code != http.StatusForbidden {
-		t.Fatalf("revoked user can still refresh: %d", rec.Code)
+		t.Fatalf("revoked user still opens the book: %d", rec.Code)
+	}
+	rec, out := f.do(t, f.userCookie, "GET", "/api/v1/books", nil)
+	if rec.Code != http.StatusOK || len(list(out, "books")) != 0 {
+		t.Fatalf("revoked user still lists books: %v", out)
+	}
+	// the personal tag survives a revoke — it's the account's own
+	if u := f.srv.Auth.UserByID(f.samID); !u.HasTag(f.samTag) {
+		t.Fatal("revoking shared tags took the personal tag with it")
 	}
 }
 
 // Authors and series follow the books: you see them because something of
-// theirs sits in a library you hold. These are the cases that rule has to get
-// right, including an admin filing a book into someone else's library.
+// theirs carries one of your tags.
 func TestAuthorAndSeriesVisibility(t *testing.T) {
 	f := newScopedFixture(t)
-
-	add := func(c *http.Cookie, title string, libID int64) int64 {
-		t.Helper()
-		rec, out := f.do(t, c, "POST", "/api/v1/books", map[string]any{
-			"meta": map[string]any{
-				"provider": "stub", "title": title, "authors": []string{"Emmett Hale"},
-				"seriesName": "Vault", "seriesIndex": 1,
-			},
-			"libraryId": libID,
-		})
-		if rec.Code != http.StatusCreated {
-			t.Fatalf("add %q: %d %s", title, rec.Code, rec.Body)
+	vault := map[string]any{"seriesName": "Vault", "seriesIndex": 1}
+	meta := func(title string) map[string]any {
+		m := map[string]any{"title": title}
+		for k, v := range vault {
+			m[k] = v
 		}
-		return int64(out["id"].(float64))
+		return m
 	}
-	authorNames := func(c *http.Cookie) []string {
+	names := func(c *http.Cookie, path, key string) []string {
 		t.Helper()
-		rec, out := f.do(t, c, "GET", "/api/v1/authors", nil)
+		rec, out := f.do(t, c, "GET", path, nil)
 		if rec.Code != http.StatusOK {
-			t.Fatalf("authors: %d %s", rec.Code, rec.Body)
+			t.Fatalf("%s: %d %s", path, rec.Code, rec.Body)
 		}
-		var names []string
-		for _, raw := range list(out, "authors") {
-			names = append(names, raw.(map[string]any)["name"].(string))
+		var got []string
+		for _, raw := range list(out, key) {
+			got = append(got, raw.(map[string]any)["name"].(string))
 		}
-		return names
-	}
-	seriesNames := func(c *http.Cookie) []string {
-		t.Helper()
-		rec, out := f.do(t, c, "GET", "/api/v1/series", nil)
-		if rec.Code != http.StatusOK {
-			t.Fatalf("series: %d %s", rec.Code, rec.Body)
-		}
-		var names []string
-		for _, raw := range list(out, "series") {
-			names = append(names, raw.(map[string]any)["name"].(string))
-		}
-		return names
+		return got
 	}
 
-	// the admin shelves a book in the library the user CANNOT reach
-	add(f.adminCooke, "Burrow", f.off)
-	if got := authorNames(f.userCookie); len(got) != 0 {
-		t.Fatalf("an author reachable only through an off-limits library leaked: %v", got)
+	f.addBook(t, f.adminCooke, meta("Burrow"), []int64{f.off})
+	if got := names(f.userCookie, "/api/v1/authors", "authors"); len(got) != 0 {
+		t.Fatalf("an author reachable only through someone else's tag leaked: %v", got)
 	}
-	if got := seriesNames(f.userCookie); len(got) != 0 {
-		t.Fatalf("a series reachable only through an off-limits library leaked: %v", got)
-	}
-
-	// ...and now the admin files one into the USER'S library. Same author,
-	// same series — the user must pick both up.
-	add(f.adminCooke, "Drift", f.mine)
-	if got := authorNames(f.userCookie); len(got) != 1 || got[0] != "Emmett Hale" {
-		t.Fatalf("a book added into the user's library must surface its author: %v", got)
-	}
-	if got := seriesNames(f.userCookie); len(got) != 1 || got[0] != "Vault" {
-		t.Fatalf("a book added into the user's library must surface its series: %v", got)
+	if got := names(f.userCookie, "/api/v1/series", "series"); len(got) != 0 {
+		t.Fatalf("a series reachable only through someone else's tag leaked: %v", got)
 	}
 
-	// the counts narrow too — the user must not be told about the copy they
-	// can't open
+	f.addBook(t, f.adminCooke, meta("Drift"), []int64{f.mine})
+	if got := names(f.userCookie, "/api/v1/authors", "authors"); len(got) != 1 || got[0] != "Emmett Hale" {
+		t.Fatalf("a book shared with the user must surface its author: %v", got)
+	}
+	if got := names(f.userCookie, "/api/v1/series", "series"); len(got) != 1 || got[0] != "Vault" {
+		t.Fatalf("a book shared with the user must surface its series: %v", got)
+	}
+
+	// the counts narrow too
 	rec, out := f.do(t, f.userCookie, "GET", "/api/v1/authors", nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("authors: %d", rec.Code)
 	}
-	author := list(out, "authors")[0].(map[string]any)
-	if n := int(author["bookCount"].(float64)); n != 1 {
-		t.Errorf("bookCount = %d, want 1 — only the book in the user's library counts", n)
+	if n := int(list(out, "authors")[0].(map[string]any)["bookCount"].(float64)); n != 1 {
+		t.Errorf("bookCount = %d, want 1 — only the book shared with the user counts", n)
 	}
-	// the admin still sees both
 	rec, out = f.do(t, f.adminCooke, "GET", "/api/v1/authors", nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("admin authors: %d", rec.Code)
 	}
-	author = list(out, "authors")[0].(map[string]any)
-	if n := int(author["bookCount"].(float64)); n != 2 {
+	if n := int(list(out, "authors")[0].(map[string]any)["bookCount"].(float64)); n != 2 {
 		t.Errorf("admin bookCount = %d, want 2", n)
 	}
 }
@@ -522,8 +552,6 @@ func TestAddedAuthorStaysVisibleToTheAdder(t *testing.T) {
 		t.Fatalf("the adder must still see the author they just added: %v", authors)
 	}
 
-	// an author added by someone else, with nothing shelved anywhere, is not
-	// this user's business
 	rec, _ = f.do(t, f.adminCooke, "POST", "/api/v1/authors", map[string]any{"name": "Nora Vale"})
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("admin add author: %d %s", rec.Code, rec.Body)
@@ -543,19 +571,11 @@ func TestAddedAuthorStaysVisibleToTheAdder(t *testing.T) {
 // one is — otherwise the list filter is decoration.
 func TestAuthorAndSeriesActionsAreGuarded(t *testing.T) {
 	f := newScopedFixture(t)
-
-	rec, out := f.do(t, f.adminCooke, "POST", "/api/v1/books", map[string]any{
-		"meta": map[string]any{
-			"provider": "stub", "title": "Burrow", "authors": []string{"Emmett Hale"},
-			"seriesName": "Vault", "seriesIndex": 1,
-		},
-		"libraryId": f.off,
-	})
-	if rec.Code != http.StatusCreated {
-		t.Fatalf("seed: %d %s", rec.Code, rec.Body)
-	}
-	authorID := strconv.FormatInt(int64(out["authorId"].(float64)), 10)
-	seriesID := strconv.FormatInt(int64(out["seriesId"].(float64)), 10)
+	out := f.addBook(t, f.adminCooke, map[string]any{
+		"title": "Burrow", "seriesName": "Vault", "seriesIndex": 1,
+	}, []int64{f.off})
+	authorID := idStr(out["authorId"])
+	seriesID := idStr(out["seriesId"])
 
 	for _, tc := range []struct {
 		method, path string
@@ -566,7 +586,7 @@ func TestAuthorAndSeriesActionsAreGuarded(t *testing.T) {
 		{"POST", "/api/v1/authors/" + authorID + "/search", nil},
 		{"DELETE", "/api/v1/authors/" + authorID, nil},
 		{"GET", "/api/v1/books?authorId=" + authorID, nil},
-		{"POST", "/api/v1/series/" + seriesID + "/library", map[string]any{"libraryId": f.mine}},
+		{"POST", "/api/v1/series/" + seriesID + "/library", map[string]any{"libraryId": f.lib}},
 		{"GET", "/api/v1/books?seriesId=" + seriesID, nil},
 	} {
 		rec, _ := f.do(t, f.userCookie, tc.method, tc.path, tc.body)
@@ -576,91 +596,58 @@ func TestAuthorAndSeriesActionsAreGuarded(t *testing.T) {
 	}
 }
 
-// Shelving a series names the library, so there is no target to guess and
-// nothing to reach past. The old toggle flipped a global flag whose cascade
-// hit every library holding any of those books, and whose fallback target was
-// "the first library" — which for a scoped user was often one they couldn't
-// even see.
-func TestAddSeriesToLibraryStaysInTheChosenLibrary(t *testing.T) {
+// Shelving a series shares its new entries with whoever the series already
+// reaches, plus the person shelving it — and never with anyone else.
+func TestShelvingASeriesKeepsItsAudience(t *testing.T) {
 	f := newScopedFixture(t)
-
-	rec, out := f.do(t, f.userCookie, "POST", "/api/v1/books", map[string]any{
-		"meta": map[string]any{
-			"provider": "stub", "title": "Burrow", "authors": []string{"Emmett Hale"},
-			"seriesName": "Vault", "seriesIndex": 1,
-		},
-		"libraryId": f.mine,
-	})
-	if rec.Code != http.StatusCreated {
-		t.Fatalf("seed: %d %s", rec.Code, rec.Body)
-	}
-	seriesID := strconv.FormatInt(int64(out["seriesId"].(float64)), 10)
+	out := f.addBook(t, f.adminCooke, map[string]any{
+		"title": "Burrow", "seriesName": "Vault", "seriesIndex": 1,
+	}, []int64{f.mine})
+	seriesID := idStr(out["seriesId"])
 
 	// a catalog-only sibling, in no library at all
-	if _, err := f.srv.db.Exec(`INSERT INTO books (author_id, series_id, series_num, title, description, language, publisher, genres)
-		VALUES ((SELECT author_id FROM series WHERE id = ?), ?, 2, 'Drift', '', '', '', '[]')`,
+	if _, err := f.srv.db.Exec(`INSERT INTO books (id, author_id, series_id, series_num, title, description, language, publisher, genres)
+		VALUES (500, (SELECT author_id FROM series WHERE id = ?), ?, 2, 'Drift', '', '', '', '[]')`,
 		seriesID, seriesID); err != nil {
 		t.Fatal(err)
 	}
 
-	// the user can't shelve it into a library they don't hold
-	rec, _ = f.do(t, f.userCookie, "POST", "/api/v1/series/"+seriesID+"/library",
-		map[string]any{"libraryId": f.off})
-	if rec.Code != http.StatusForbidden {
-		t.Fatalf("shelving into an off-limits library: got %d, want 403", rec.Code)
-	}
-
-	rec, out = f.do(t, f.userCookie, "POST", "/api/v1/series/"+seriesID+"/library",
-		map[string]any{"libraryId": f.mine})
+	rec, out := f.do(t, f.userCookie, "POST", "/api/v1/series/"+seriesID+"/library",
+		map[string]any{"libraryId": f.lib})
 	if rec.Code != http.StatusOK {
-		t.Fatalf("shelving into their own library: %d %s", rec.Code, rec.Body)
+		t.Fatalf("shelving the series: %d %s", rec.Code, rec.Body)
 	}
 	if added := int(out["added"].(float64)); added != 1 {
 		t.Fatalf("added = %d, want 1 (the catalog-only sibling)", added)
 	}
-
-	var stray int
-	if err := f.srv.db.QueryRow(`SELECT COUNT(*) FROM library_books WHERE library_id = ?`, f.off).Scan(&stray); err != nil {
+	tags, err := f.srv.Catalog.BookTags(500)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if stray != 0 {
-		t.Fatalf("shelving a series put %d book(s) in a library the user can't reach", stray)
+	if len(tags) != 1 || tags[0] != f.mine {
+		t.Fatalf("the new entry must inherit the series' audience and nothing else, got %v", tags)
 	}
-	var landed int
-	if err := f.srv.db.QueryRow(`SELECT COUNT(*) FROM library_books WHERE library_id = ? AND monitored = 1`,
-		f.mine).Scan(&landed); err != nil {
-		t.Fatal(err)
-	}
-	if landed != 2 {
-		t.Fatalf("the series should be shelved monitored in the user's library, got %d book(s)", landed)
+	rec, _ = f.do(t, f.userCookie, "GET", "/api/v1/books/500", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("the user can't open the entry they just shelved: %d", rec.Code)
 	}
 }
 
 // The JSON form of manual import names a path on the SERVER and copies it
-// into a library, from where it can be downloaded again. Unfenced, that is a
+// into the library, from where it can be downloaded again. Unfenced, that is a
 // read-any-file primitive; the fence is not an admin/user distinction, so it
 // is checked against the admin, who has the most reach of anyone.
 func TestManualImportPathIsFencedEvenForAdmins(t *testing.T) {
 	f := newScopedFixture(t)
+	bookID := idStr(f.addBook(t, f.adminCooke, map[string]any{"title": "Burrow"}, []int64{f.mine})["id"])
 
-	rec, out := f.do(t, f.adminCooke, "POST", "/api/v1/books", map[string]any{
-		"meta":      map[string]any{"provider": "stub", "title": "Burrow", "authors": []string{"Emmett Hale"}},
-		"libraryId": f.mine,
-	})
-	if rec.Code != http.StatusCreated {
-		t.Fatalf("seed: %d %s", rec.Code, rec.Body)
-	}
-	bookID := strconv.FormatInt(int64(out["id"].(float64)), 10)
-
-	// a real file, outside the media mount and outside every library root
 	outside := filepath.Join(t.TempDir(), "secrets.epub")
 	if err := os.WriteFile(outside, []byte("PK\x03\x04not really"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-
 	for _, path := range []string{outside, "/etc/passwd", "/etc/../etc/passwd"} {
 		rec, body := f.do(t, f.adminCooke, "POST", "/api/v1/books/"+bookID+"/import",
-			map[string]any{"libraryId": f.mine, "path": path})
+			map[string]any{"libraryId": f.lib, "path": path})
 		if rec.Code != http.StatusBadRequest {
 			t.Errorf("import %s: got %d, want 400 — the path is outside the fence", path, rec.Code)
 		}
@@ -671,39 +658,36 @@ func TestManualImportPathIsFencedEvenForAdmins(t *testing.T) {
 
 	// a symlink planted inside an allowed root must not tunnel back out
 	root := t.TempDir()
-	if _, err := f.srv.db.Exec(`UPDATE libraries SET root_path = ? WHERE id = ?`, root, f.mine); err != nil {
+	f.srv.mediaRoot = root
+	if _, err := f.srv.db.Exec(`UPDATE libraries SET root_path = ? WHERE id = ?`, root, f.lib); err != nil {
 		t.Fatal(err)
 	}
 	link := filepath.Join(root, "innocent.epub")
 	if err := os.Symlink(outside, link); err != nil {
 		t.Skipf("symlinks unavailable: %v", err)
 	}
-	rec, _ = f.do(t, f.adminCooke, "POST", "/api/v1/books/"+bookID+"/import",
-		map[string]any{"libraryId": f.mine, "path": link})
+	rec, _ := f.do(t, f.adminCooke, "POST", "/api/v1/books/"+bookID+"/import",
+		map[string]any{"libraryId": f.lib, "path": link})
 	if rec.Code != http.StatusBadRequest {
 		t.Errorf("import via symlink out of the root: got %d, want 400", rec.Code)
 	}
 
-	// and a real file inside the root is still importable — the fence must not
-	// break the feature it's protecting
 	inside := filepath.Join(root, "burrow.epub")
 	if err := os.WriteFile(inside, []byte("PK\x03\x04"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	rec, body := f.do(t, f.adminCooke, "POST", "/api/v1/books/"+bookID+"/import",
-		map[string]any{"libraryId": f.mine, "path": inside})
+		map[string]any{"libraryId": f.lib, "path": inside})
 	if msg, _ := body["error"].(string); rec.Code == http.StatusBadRequest && strings.Contains(msg, "outside") {
-		t.Errorf("a file inside a library root must be importable, got: %s", msg)
+		t.Errorf("a file inside the library root must be importable, got: %s", msg)
 	}
 
-	// non-book extensions are refused by name as well, so the database can't
-	// arrive wearing a book's clothes
 	db := filepath.Join(root, "booky.db")
 	if err := os.WriteFile(db, []byte("SQLite format 3\x00"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	rec, _ = f.do(t, f.adminCooke, "POST", "/api/v1/books/"+bookID+"/import",
-		map[string]any{"libraryId": f.mine, "path": db})
+		map[string]any{"libraryId": f.lib, "path": db})
 	if rec.Code != http.StatusBadRequest {
 		t.Errorf("importing a .db: got %d, want 400", rec.Code)
 	}
@@ -736,16 +720,15 @@ func TestSavedScopesDoNotClobberEachOther(t *testing.T) {
 	}
 }
 
-// Health lists every library by name and root path — the one endpoint that
-// enumerates them all regardless of the sidebar.
-func TestHealthDoesNotEnumerateLibraries(t *testing.T) {
+// Health names the library and its root path — admin-only.
+func TestHealthIsAdminOnly(t *testing.T) {
 	f := newScopedFixture(t)
 	rec, _ := f.do(t, f.userCookie, "GET", "/api/v1/system/health", nil)
 	if rec.Code != http.StatusForbidden {
 		t.Fatalf("health: got %d, want 403", rec.Code)
 	}
-	if strings.Contains(rec.Body.String(), "Private") || strings.Contains(rec.Body.String(), "/data/books/private") {
-		t.Fatal("health leaked an off-limits library's name or root path")
+	if strings.Contains(rec.Body.String(), "/data/books") {
+		t.Fatal("health leaked the library root")
 	}
 	rec, _ = f.do(t, f.adminCooke, "GET", "/api/v1/system/health", nil)
 	if rec.Code == http.StatusForbidden {
@@ -753,25 +736,21 @@ func TestHealthDoesNotEnumerateLibraries(t *testing.T) {
 	}
 }
 
-// A catalog-only book — a bibliography entry sitting in no library — follows
-// its author. An author you can see brings their whole bibliography; one you
-// can't must not leak titles through the unfiltered book list.
-//
-// The fixture is built in SQL rather than through "Add author": that endpoint
-// kicks off a bibliography sync in the background, and a hand-written book row
-// carrying no identifiers is exactly what the sync's dedupe logic adopts, so
-// the test would race its own setup.
+// A catalog-only book — a bibliography entry nobody has shelved — follows its
+// author. An author you can see brings their whole bibliography; one you can't
+// must not leak titles. Following an author is for browsing only: there is no
+// file to fetch.
 func TestCatalogOnlyBooksFollowTheirAuthor(t *testing.T) {
 	f := newScopedFixture(t)
-
-	if _, err := f.srv.db.Exec(`INSERT INTO authors (id, name, sort_name) VALUES (7, 'Ghost Writer', 'Writer, Ghost')`); err != nil {
-		t.Fatal(err)
+	exec := func(q string, args ...any) {
+		t.Helper()
+		if _, err := f.srv.db.Exec(q, args...); err != nil {
+			t.Fatal(err)
+		}
 	}
-	// two books by them, neither in any library yet
-	if _, err := f.srv.db.Exec(`INSERT INTO books (id, author_id, title, description, language, publisher, genres)
-		VALUES (70, 7, 'Gravel', '', '', '', '[]'), (71, 7, 'Ridges', '', '', '', '[]')`); err != nil {
-		t.Fatal(err)
-	}
+	exec(`INSERT INTO authors (id, name, sort_name) VALUES (7, 'Ghost Writer', 'Writer, Ghost')`)
+	exec(`INSERT INTO books (id, author_id, title, description, language, publisher, genres)
+		VALUES (70, 7, 'Gravel', '', '', '', '[]'), (71, 7, 'Ridges', '', '', '', '[]')`)
 
 	titles := func(c *http.Cookie) map[string]bool {
 		t.Helper()
@@ -793,36 +772,24 @@ func TestCatalogOnlyBooksFollowTheirAuthor(t *testing.T) {
 		t.Fatal("the admin must see every catalog-only book")
 	}
 
-	// shelving ONE of their books in the user's library makes the author
-	// visible — and the rest of the bibliography with them, which is what the
-	// author page is built from
-	if _, err := f.srv.db.Exec(`INSERT INTO library_books (library_id, book_id, monitored) VALUES (?, 71, 0)`,
-		f.mine); err != nil {
-		t.Fatal(err)
-	}
+	// shelving ONE of their books for the user makes the author visible —
+	// and the rest of the bibliography with them
+	exec(`INSERT INTO library_books (library_id, book_id, monitored) VALUES (?, 71, 0)`, f.lib)
+	exec(`INSERT INTO book_tags (book_id, tag_id) VALUES (71, ?)`, f.mine)
 	if !titles(f.userCookie)["Gravel"] {
 		t.Fatal("a visible author's bibliography must stay whole — the author page depends on it")
 	}
 
-	// the same book by an author reachable only through the off-limits
-	// library stays hidden
-	if _, err := f.srv.db.Exec(`INSERT INTO authors (id, name, sort_name) VALUES (8, 'Private Writer', 'Writer, Private')`); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := f.srv.db.Exec(`INSERT INTO books (id, author_id, title, description, language, publisher, genres)
-		VALUES (80, 8, 'Hidden Backlist', '', '', '', '[]'), (81, 8, 'Shelved Elsewhere', '', '', '', '[]')`); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := f.srv.db.Exec(`INSERT INTO library_books (library_id, book_id, monitored) VALUES (?, 81, 0)`,
-		f.off); err != nil {
-		t.Fatal(err)
-	}
+	exec(`INSERT INTO authors (id, name, sort_name) VALUES (8, 'Private Writer', 'Writer, Private')`)
+	exec(`INSERT INTO books (id, author_id, title, description, language, publisher, genres)
+		VALUES (80, 8, 'Hidden Backlist', '', '', '', '[]'), (81, 8, 'Shelved Elsewhere', '', '', '', '[]')`)
+	exec(`INSERT INTO library_books (library_id, book_id, monitored) VALUES (?, 81, 0)`, f.lib)
+	exec(`INSERT INTO book_tags (book_id, tag_id) VALUES (81, ?)`, f.off)
 	got := titles(f.userCookie)
 	if got["Hidden Backlist"] || got["Shelved Elsewhere"] {
 		t.Fatalf("an off-limits author's books leaked: %v", got)
 	}
 
-	// and the single-book check agrees with the list
 	rec, _ := f.do(t, f.userCookie, "GET", "/api/v1/books/80", nil)
 	if rec.Code != http.StatusForbidden {
 		t.Errorf("GET a catalog-only book of an invisible author: got %d, want 403", rec.Code)
@@ -831,39 +798,36 @@ func TestCatalogOnlyBooksFollowTheirAuthor(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Errorf("GET a catalog-only book of a visible author: got %d, want 200", rec.Code)
 	}
+	// browsing it is fine; there's no file to give
+	rec, _ = f.do(t, f.userCookie, "GET", "/api/v1/books/70/file", nil)
+	if rec.Code != http.StatusForbidden {
+		t.Errorf("GET the file of a catalog-only book: got %d, want 403", rec.Code)
+	}
 }
 
 // Activity has to narrow in the query, not after it. Both views read a fixed
 // number of recent rows, so filtering afterwards would hand a scoped user
-// whatever fraction of a busy neighbour's day happened to be theirs — and
-// could show them an empty page while their own imports scrolled past just
-// out of reach.
+// whatever fraction of a busy neighbour's day happened to be theirs.
 func TestActivityIsScopedBeforeTheLimit(t *testing.T) {
 	f := newScopedFixture(t)
+	mine := int64(f.addBook(t, f.adminCooke, map[string]any{"title": "Burrow"}, []int64{f.mine})["id"].(float64))
+	theirs := int64(f.addBook(t, f.adminCooke, map[string]any{"title": "Haze"}, []int64{f.off})["id"].(float64))
 
-	bookID, err := f.srv.Catalog.UpsertBook(metadata.BookMeta{
-		Provider: "stub", Title: "Burrow", Authors: []string{"Emmett Hale"},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	// one event of the user's own, then a flood in the library they can't see
-	if err := f.srv.Catalog.AddHistory(bookID, f.mine, "added", "the user's own import"); err != nil {
+	if err := f.srv.Catalog.AddHistory(mine, f.lib, "imported", "the user's own import"); err != nil {
 		t.Fatal(err)
 	}
 	for i := 0; i < 250; i++ {
-		if err := f.srv.Catalog.AddHistory(bookID, f.off, "added", "someone else's busy day"); err != nil {
+		if err := f.srv.Catalog.AddHistory(theirs, f.lib, "imported", "someone else's busy day"); err != nil {
 			t.Fatal(err)
 		}
 	}
-	// ...and the same shape in the queue
 	if _, err := f.srv.db.Exec(`INSERT INTO queue (book_id, library_id, release_title, source, protocol, status)
-		VALUES (?, ?, 'Burrow.epub', 'stub', 'directdl', 'done')`, bookID, f.mine); err != nil {
+		VALUES (?, ?, 'Burrow.epub', 'stub', 'directdl', 'done')`, mine, f.lib); err != nil {
 		t.Fatal(err)
 	}
 	for i := 0; i < 250; i++ {
 		if _, err := f.srv.db.Exec(`INSERT INTO queue (book_id, library_id, release_title, source, protocol, status)
-			VALUES (?, ?, 'Elsewhere.epub', 'stub', 'directdl', 'done')`, bookID, f.off); err != nil {
+			VALUES (?, ?, 'Elsewhere.epub', 'stub', 'directdl', 'done')`, theirs, f.lib); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -872,12 +836,19 @@ func TestActivityIsScopedBeforeTheLimit(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("history: %d %s", rec.Code, rec.Body)
 	}
-	hist := list(out, "history")
-	if len(hist) != 1 {
-		t.Fatalf("history should hold the user's single event, got %d", len(hist))
+	for _, raw := range list(out, "history") {
+		if detail := raw.(map[string]any)["detail"].(string); strings.Contains(detail, "busy day") || strings.Contains(detail, "Haze") {
+			t.Fatalf("history showed someone else's event: %q", detail)
+		}
 	}
-	if detail := hist[0].(map[string]any)["detail"].(string); detail != "the user's own import" {
-		t.Fatalf("history showed someone else's event: %q", detail)
+	found := false
+	for _, raw := range list(out, "history") {
+		if raw.(map[string]any)["detail"] == "the user's own import" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("the user's own event scrolled out behind someone else's")
 	}
 
 	rec, out = f.do(t, f.userCookie, "GET", "/api/v1/queue", nil)
@@ -885,25 +856,19 @@ func TestActivityIsScopedBeforeTheLimit(t *testing.T) {
 		t.Fatalf("queue: %d %s", rec.Code, rec.Body)
 	}
 	queue := list(out, "queue")
-	if len(queue) != 1 {
-		t.Fatalf("queue should hold the user's single item, got %d", len(queue))
-	}
-	if title := queue[0].(map[string]any)["releaseTitle"].(string); title != "Burrow.epub" {
-		t.Fatalf("queue showed someone else's download: %q", title)
+	if len(queue) != 1 || queue[0].(map[string]any)["releaseTitle"] != "Burrow.epub" {
+		t.Fatalf("queue should hold the user's single item, got %v", queue)
 	}
 
-	// the admin still sees the lot (capped by the query's own limits)
 	rec, out = f.do(t, f.adminCooke, "GET", "/api/v1/history", nil)
 	if rec.Code != http.StatusOK || len(list(out, "history")) < 100 {
 		t.Fatalf("admin history: %d, %d rows", rec.Code, len(list(out, "history")))
 	}
 }
 
-// A bibliography sync writes a history row with no library — "3 new book(s) in
-// <author>'s bibliography". Once syncs stopped shelving anything, that became
-// EVERY such row, so a passthrough for library-less events would have named
-// authors a scoped user can't otherwise see.
-func TestLibrarylessHistoryStaysWithAdmins(t *testing.T) {
+// A bibliography sync writes a history row with no book — "3 new book(s) in
+// <author>'s bibliography". It must stay with admins.
+func TestBooklessHistoryStaysWithAdmins(t *testing.T) {
 	f := newScopedFixture(t)
 	if err := f.srv.Catalog.AddHistory(0, 0, "backlist", "3 new book(s) in Nora Vale's bibliography"); err != nil {
 		t.Fatal(err)
@@ -918,7 +883,6 @@ func TestLibrarylessHistoryStaysWithAdmins(t *testing.T) {
 			t.Fatal("an install-wide sync event named an author the user can't see")
 		}
 	}
-
 	rec, out = f.do(t, f.adminCooke, "GET", "/api/v1/history", nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("admin history: %d", rec.Code)
@@ -934,69 +898,51 @@ func TestLibrarylessHistoryStaysWithAdmins(t *testing.T) {
 	}
 }
 
-// Emptying a library is per-account. If Tommy removes the last book he holds
-// by an author, that author and their series leave HIS pages — while anyone
-// else still holding one keeps seeing them. The rule is the same one that
-// puts them there: it counts only books in libraries you can reach.
-func TestEmptyingOneLibraryOnlyClearsThatAccountsPages(t *testing.T) {
+// "Remove" for a plain user means off MY shelf: their personal tag comes off,
+// and nothing else changes — not the book, not its file, not anyone else's
+// access. A book that still reaches them through a shared tag stays, and the
+// answer says why.
+func TestRemovingOnlyTakesItOffYourShelf(t *testing.T) {
 	f := newScopedFixture(t)
+	lib := strconv.FormatInt(f.lib, 10)
 
-	// the same series shelved in both libraries
-	var bookIDs []int64
-	for _, lib := range []int64{f.mine, f.off} {
-		rec, out := f.do(t, f.adminCooke, "POST", "/api/v1/books", map[string]any{
-			"meta": map[string]any{
-				"provider": "stub", "title": "Burrow", "authors": []string{"Emmett Hale"},
-				"seriesName": "Vault", "seriesIndex": 1,
-			},
-			"libraryId": lib,
-		})
-		if rec.Code != http.StatusCreated {
-			t.Fatalf("seed %d: %d %s", lib, rec.Code, rec.Body)
-		}
-		bookIDs = append(bookIDs, int64(out["id"].(float64)))
+	own := idStr(f.addBook(t, f.userCookie, map[string]any{"title": "Burrow", "seriesName": "Vault", "seriesIndex": 1}, nil)["id"])
+	shared := idStr(f.addBook(t, f.adminCooke, map[string]any{"title": "Haze", "authors": []string{"Nora Vale"}}, []int64{f.mine, f.off})["id"])
+
+	rec, out := f.do(t, f.userCookie, "DELETE", "/api/v1/libraries/"+lib+"/books/"+own+"?mode=library", nil)
+	if rec.Code != http.StatusOK || out["status"] != "removed" {
+		t.Fatalf("remove own: %d %v", rec.Code, out)
 	}
-
-	names := func(c *http.Cookie, path, key string) []string {
-		t.Helper()
-		rec, out := f.do(t, c, "GET", path, nil)
-		if rec.Code != http.StatusOK {
-			t.Fatalf("%s: %d %s", path, rec.Code, rec.Body)
-		}
-		var got []string
-		for _, raw := range list(out, key) {
-			got = append(got, raw.(map[string]any)["name"].(string))
-		}
-		return got
+	rec, _ = f.do(t, f.userCookie, "GET", "/api/v1/books/"+own, nil)
+	if rec.Code != http.StatusForbidden {
+		t.Errorf("a book taken off the user's shelf is still open to them: %d", rec.Code)
+	}
+	rec, out = f.do(t, f.userCookie, "GET", "/api/v1/series", nil)
+	if rec.Code != http.StatusOK || len(list(out, "series")) != 0 {
+		t.Errorf("series still on the user's page with nothing of theirs shelved: %v", out)
+	}
+	// still in the library for the admin — a user's remove deletes nothing
+	var n int
+	if err := f.srv.db.QueryRow(`SELECT COUNT(*) FROM library_books WHERE book_id = ?`, own).Scan(&n); err != nil || n != 1 {
+		t.Errorf("a user's remove took the book out of the library: %d %v", n, err)
 	}
 
-	if got := names(f.userCookie, "/api/v1/authors", "authors"); len(got) != 1 {
-		t.Fatalf("baseline authors for the user: %v", got)
+	// a shared book can't be unshared by a user
+	rec, out = f.do(t, f.userCookie, "DELETE", "/api/v1/libraries/"+lib+"/books/"+shared+"?mode=library", nil)
+	if rec.Code != http.StatusOK || out["status"] != "shared" {
+		t.Fatalf("remove shared: %d %v", rec.Code, out)
 	}
-	if got := names(f.userCookie, "/api/v1/series", "series"); len(got) != 1 {
-		t.Fatalf("baseline series for the user: %v", got)
+	tags, _ := f.srv.Catalog.BookTags(int64(mustAtoi(t, shared)))
+	if len(tags) != 2 {
+		t.Errorf("a user's remove changed a shared book's tags: %v", tags)
 	}
+}
 
-	// the user clears their own copy — files untouched, other library untouched
-	rec, _ := f.do(t, f.userCookie, "DELETE",
-		"/api/v1/libraries/"+strconv.FormatInt(f.mine, 10)+
-			"/books/"+strconv.FormatInt(bookIDs[0], 10)+"?mode=library", nil)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("remove from own library: %d %s", rec.Code, rec.Body)
+func mustAtoi(t *testing.T, s string) int {
+	t.Helper()
+	n, err := strconv.Atoi(s)
+	if err != nil {
+		t.Fatal(err)
 	}
-
-	if got := names(f.userCookie, "/api/v1/authors", "authors"); len(got) != 0 {
-		t.Errorf("author still on the user's page with nothing of theirs shelved: %v", got)
-	}
-	if got := names(f.userCookie, "/api/v1/series", "series"); len(got) != 0 {
-		t.Errorf("series still on the user's page with nothing of theirs shelved: %v", got)
-	}
-
-	// the other library still holds a copy, so the admin's pages are unchanged
-	if got := names(f.adminCooke, "/api/v1/authors", "authors"); len(got) != 1 {
-		t.Errorf("one account clearing its library changed another's authors: %v", got)
-	}
-	if got := names(f.adminCooke, "/api/v1/series", "series"); len(got) != 1 {
-		t.Errorf("one account clearing its library changed another's series: %v", got)
-	}
+	return n
 }

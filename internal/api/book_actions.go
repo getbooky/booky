@@ -390,7 +390,10 @@ func (s *Server) handleBookManualImport(w http.ResponseWriter, r *http.Request) 
 		}
 	}
 
-	if !s.requireLibrary(w, r, libraryID) {
+	if libraryID == 0 {
+		libraryID = s.Catalog.TheLibrary()
+	}
+	if !s.requireLibrary(w, r, libraryID) || !s.requireBook(w, r, id) {
 		return
 	}
 	dst, err := s.Importer.Deliver(id, libraryID, src, s.Acquire.NamingSettings(id))
@@ -398,6 +401,7 @@ func (s *Server) handleBookManualImport(w http.ResponseWriter, r *http.Request) 
 		writeErr(w, http.StatusBadRequest, err)
 		return
 	}
+	s.shelveFor(s.access(r), id)
 	if queueID > 0 {
 		s.Acquire.MarkDone(queueID)
 	}

@@ -65,12 +65,13 @@ func TestRevokeDeviceRecordsHistory(t *testing.T) {
 	srv := testServer(t)
 	h := srv.Handler()
 	libID, _, _ := seedShelf(t, srv)
+	tag := shelfTag(t, srv)
 	if err := srv.Settings.Set("server_url", "http://booky.local:8787"); err != nil {
 		t.Fatal(err)
 	}
 
 	rec, out := doJSON(t, h, "POST", "/api/v1/devices", map[string]any{
-		"name": "Kobo", "libraryIds": []int64{libID}, "autoLibraryIds": []int64{libID}})
+		"name": "Kobo", "tagIds": []int64{tag}, "autoTagIds": []int64{tag}})
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("create device: %d %s", rec.Code, rec.Body)
 	}
@@ -84,7 +85,6 @@ func TestRevokeDeviceRecordsHistory(t *testing.T) {
 	if !strings.Contains(it.Detail, `"Kobo"`) {
 		t.Errorf("detail = %q, want the device name", it.Detail)
 	}
-	// scoped to one of the device's own libraries, so the owner sees it
 	if it.LibraryID != libID {
 		t.Errorf("library id = %d, want %d — an install-wide row hides from the owner", it.LibraryID, libID)
 	}
@@ -115,21 +115,6 @@ func TestDeleteListRecordsHistory(t *testing.T) {
 	}
 	if it.LibraryID != libID {
 		t.Errorf("library id = %d, want %d", it.LibraryID, libID)
-	}
-}
-
-func TestDeleteLibraryRecordsHistory(t *testing.T) {
-	srv := testServer(t)
-	h := srv.Handler()
-	libID, _ := addLibraryWithBook(t, srv, h)
-
-	rec, _ := doJSON(t, h, "DELETE", "/api/v1/libraries/"+intToStr(libID)+"?mode=files", nil)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("delete library: %d %s", rec.Code, rec.Body)
-	}
-	it := findHistory(t, srv, "removed", "library")
-	if !strings.Contains(it.Detail, `"Alex"`) || !strings.Contains(it.Detail, "1 file(s) deleted") {
-		t.Errorf("detail = %q, want the library name and the file count", it.Detail)
 	}
 }
 

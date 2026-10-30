@@ -26,7 +26,7 @@ func (s *Server) handleReleases(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, errors.New("libraryId required"))
 		return
 	}
-	if !s.requireLibrary(w, r, libraryID) {
+	if !s.requireLibrary(w, r, libraryID) || !s.requireBook(w, r, bookID) {
 		return
 	}
 	rels, sources, err := s.Acquire.SearchDetailed(r.Context(), bookID, libraryID, 0)
@@ -50,13 +50,16 @@ func (s *Server) handleAutoGrab(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, errors.New("libraryId required"))
 		return
 	}
-	if !s.requireLibrary(w, r, libraryID) {
+	if !s.requireLibrary(w, r, libraryID) || !s.requireBook(w, r, bookID) {
 		return
 	}
 	grabbed, err := s.Acquire.AutoGrab(r.Context(), bookID, libraryID, 0)
 	if err != nil {
 		writeErr(w, http.StatusBadGateway, err)
 		return
+	}
+	if grabbed {
+		s.shelveFor(s.access(r), bookID)
 	}
 	if grabbed {
 		s.Acquire.DeliverPending()
@@ -84,7 +87,7 @@ func (s *Server) handleGrab(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, errors.New("libraryId and release required"))
 		return
 	}
-	if !s.requireLibrary(w, r, req.LibraryID) {
+	if !s.requireLibrary(w, r, req.LibraryID) || !s.requireBook(w, r, bookID) {
 		return
 	}
 	queueID, err := s.Acquire.Grab(r.Context(), bookID, req.LibraryID, req.Release)
@@ -92,6 +95,7 @@ func (s *Server) handleGrab(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadGateway, err)
 		return
 	}
+	s.shelveFor(s.access(r), bookID)
 	// direct downloads are already on disk — deliver into the library now
 	s.Acquire.DeliverPending()
 	writeJSON(w, http.StatusOK, map[string]any{"queueId": queueID})
@@ -120,8 +124,8 @@ func (s *Server) handleQueueCancel(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, errors.New("bad id"))
 		return
 	}
-	var libID int64
-	switch err := s.db.QueryRow(`SELECT library_id FROM queue WHERE id = ?`, id).Scan(&libID); {
+	var bookID int64
+	switch err := s.db.QueryRow(`SELECT book_id FROM queue WHERE id = ?`, id).Scan(&bookID); {
 	case errors.Is(err, sql.ErrNoRows):
 		writeErr(w, http.StatusNotFound, errors.New("queue item not found"))
 		return
@@ -129,7 +133,9 @@ func (s *Server) handleQueueCancel(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, err)
 		return
 	}
-	if !s.requireLibrary(w, r, libID) {
+	// a download is the book's business: whoever may see the book may
+	// cancel or retry it
+	if !s.requireBook(w, r, bookID) {
 		return
 	}
 	if err := s.Acquire.Cancel(r.Context(), id); err != nil {
@@ -150,8 +156,8 @@ func (s *Server) handleQueueRetry(w http.ResponseWriter, r *http.Request) {
 	}
 	// look the row up directly rather than scanning the recent-items list —
 	// a failed import worth retrying may well have scrolled past 200 rows ago
-	var libID int64
-	switch err := s.db.QueryRow(`SELECT library_id FROM queue WHERE id = ?`, id).Scan(&libID); {
+	var bookID int64
+	switch err := s.db.QueryRow(`SELECT book_id FROM queue WHERE id = ?`, id).Scan(&bookID); {
 	case errors.Is(err, sql.ErrNoRows):
 		writeErr(w, http.StatusNotFound, errors.New("queue item not found"))
 		return
@@ -159,7 +165,9 @@ func (s *Server) handleQueueRetry(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, err)
 		return
 	}
-	if !s.requireLibrary(w, r, libID) {
+	// a download is the book's business: whoever may see the book may
+	// cancel or retry it
+	if !s.requireBook(w, r, bookID) {
 		return
 	}
 	if err := s.Acquire.RetryImport(r.Context(), id); err != nil {
@@ -184,22 +192,22 @@ func (s *Server) handleWanted(w http.ResponseWriter, r *http.Request) {
 			wanted = append(wanted, b)
 		}
 	}
-	unmet, unmetLibs, err := s.Acquire.CutoffUnmet()
+	unmet, _, err := s.Acquire.CutoffUnmet()
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err)
 		return
 	}
 	if a.scoped() {
-		// CutoffUnmet returns library ids alongside the books, so the pair has
-		// to be filtered together rather than through filterBooks
 		mine := unmet[:0:0]
-		for i, b := range unmet {
-			if a.mayLibrary(unmetLibs[i]) {
+		for _, b := range unmet {
+			if s.mayFile(a, b.ID) {
 				mine = append(mine, b)
 			}
 		}
 		unmet = mine
 	}
+	a.redactTags(wanted)
+	a.redactTags(unmet)
 	writeJSON(w, http.StatusOK, map[string]any{"books": wanted, "cutoffUnmet": unmet})
 }
 

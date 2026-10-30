@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/getbooky/booky/internal/catalog"
 	"log"
 	"net/http"
 	"strconv"
@@ -93,7 +94,7 @@ func (s *Server) handleBookMonitor(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, errors.New("bad id"))
 		return
 	}
-	if !s.requireLibrary(w, r, libID) {
+	if !s.requireLibrary(w, r, libID) || !s.requireBook(w, r, bookID) {
 		return
 	}
 	var req monitorRequest
@@ -104,6 +105,9 @@ func (s *Server) handleBookMonitor(w http.ResponseWriter, r *http.Request) {
 	if err := s.Catalog.SetMonitored(libID, bookID, req.Monitored); err != nil {
 		writeErr(w, http.StatusInternalServerError, err)
 		return
+	}
+	if req.Monitored {
+		s.shelveFor(s.access(r), bookID)
 	}
 	// monitoring a missing book is a request to go get it — search in the
 	// background rather than waiting for the weekly backlog pass
@@ -166,6 +170,19 @@ func (s *Server) handleSeriesAddToLibrary(w http.ResponseWriter, r *http.Request
 		writeErr(w, http.StatusInternalServerError, err)
 		return
 	}
+	// the books that just joined reach whoever the series already reaches,
+	// and the person shelving it
+	if err := s.Catalog.InheritSeriesTags(seriesID, 0); err != nil {
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+	if a := s.access(r); !a.admin() {
+		if books, err := s.Catalog.ListBooks(0, req.LibraryID, seriesID); err == nil {
+			for _, b := range books {
+				s.shelveFor(a, b.ID)
+			}
+		}
+	}
 	// go get the ones that aren't on the shelf, in this library only
 	queued := 0
 	if books, err := s.Catalog.ListBooks(0, req.LibraryID, seriesID); err == nil {
@@ -210,16 +227,16 @@ func quoteName(name string, id int64) string {
 	return strconv.Quote(name)
 }
 
-// handleBookRemove takes a book off a shelf. mode=library drops the
-// membership and leaves every file alone, which anyone may do to their own
-// library — a person who can add a series has to be able to unadd it, or they
-// accumulate a mess they can't clear.
+// handleBookRemove takes a book off a shelf.
 //
-// The other two modes stay with the admin. mode=file deletes this library's
-// copy; hard-linked copies elsewhere keep their own directory entries, so the
-// data survives, but it is still a delete. mode=block additionally blocklists
-// the book install-wide, which really does reach every library — that one is
-// nobody's to press but an admin's.
+// For a plain user, mode=library means "off MY shelf": their personal tag
+// comes off the book and nothing else changes — the book, its file and every
+// other person it's shared with are untouched. A person who can add a book
+// has to be able to unadd it; they can't unshare it from anyone else.
+//
+// For an admin, mode=library takes the book out of the library altogether
+// (file kept, all tags dropped). mode=file also deletes the file, and
+// mode=block additionally blocklists the book install-wide — both admin-only.
 func (s *Server) handleBookRemove(w http.ResponseWriter, r *http.Request) {
 	libID, err1 := pathID(r, "id")
 	bookID, err2 := pathID(r, "bookId")
@@ -230,7 +247,11 @@ func (s *Server) handleBookRemove(w http.ResponseWriter, r *http.Request) {
 	mode := r.URL.Query().Get("mode")
 	switch mode {
 	case "library":
-		if !s.requireLibrary(w, r, libID) {
+		if !s.requireLibrary(w, r, libID) || !s.requireBook(w, r, bookID) {
+			return
+		}
+		if a := s.access(r); !a.admin() {
+			s.removeFromMyShelf(w, a, bookID)
 			return
 		}
 	case "file", "block":
@@ -306,4 +327,24 @@ func (s *Server) handleReviewMatch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, book)
+}
+
+// removeFromMyShelf takes the caller's personal tag off a book. If the book
+// still reaches them through a shared tag, say so — it stays on their shelf
+// and only an admin can change that.
+func (s *Server) removeFromMyShelf(w http.ResponseWriter, a access, bookID int64) {
+	ch, err := s.Catalog.RemoveBookTags(bookID, []int64{a.user.PersonalTag})
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+	s.tagsChanged([]catalog.TagChange{ch}, true)
+	if s.Catalog.BookVisible(bookID, a.user.Tags) {
+		writeJSON(w, http.StatusOK, map[string]string{
+			"status": "shared",
+			"detail": "Still on your shelf — it's shared with you through a tag. Ask an admin to change that.",
+		})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "removed"})
 }

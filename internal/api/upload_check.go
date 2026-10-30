@@ -64,17 +64,12 @@ func (s *Server) importRoots(a access) ([]string, error) {
 		dir = "/data/downloads/booky"
 	}
 	roots := []string{dir}
+	// The library root holds everyone's books in one tree, so only an admin
+	// may import from it (or anywhere else on the mount) — a plain user
+	// reading another person's file out of the shared folder would be a way
+	// around tags. Their own uploads land in the downloads folder.
 	if a.admin() {
 		roots = append(roots, s.mediaRoot)
-	}
-	libs, err := s.Catalog.ListLibraries()
-	if err != nil {
-		return nil, err
-	}
-	for _, l := range libs {
-		if l.RootPath != "" && a.mayLibrary(l.ID) {
-			roots = append(roots, l.RootPath)
-		}
 	}
 	return roots, nil
 }

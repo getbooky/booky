@@ -26,43 +26,48 @@ func New(database *sql.DB, keeper *secrets.Keeper) *Store {
 }
 
 // Device is one Kindle destination, addressed by its @kindle.com email.
+//
+// What it may receive is its owner's business: a manual send takes anything
+// the owner can see right now. AutoTagIDs are the tags it auto-sends — a
+// book is emailed once, the moment it is both on disk and carrying one of
+// them (send on import, send on tag), and only while the owner still holds
+// that tag.
 type Device struct {
-	ID        int64   `json:"id"`
-	Name      string  `json:"name"`
-	Email     string  `json:"email"`
-	Libraries []int64 `json:"libraryIds"`     // libraries the device draws from
-	AutoIDs   []int64 `json:"autoLibraryIds"` // auto-send new arrivals
-	CreatedAt string  `json:"createdAt"`
-	LastSent  string  `json:"lastSent,omitempty"`
+	ID         int64   `json:"id"`
+	Name       string  `json:"name"`
+	Email      string  `json:"email"`
+	AutoTagIDs []int64 `json:"autoTagIds"`
+	CreatedAt  string  `json:"createdAt"`
+	LastSent   string  `json:"lastSent,omitempty"`
 	// OwnerID is the account that paired the device — sends always go
 	// through this account's SMTP configuration.
 	OwnerID int64 `json:"ownerId"`
 }
 
-const deviceColumns = `id, owner_user_id, name, email, library_ids, auto_ids, created_at, COALESCE(last_sent, '')`
+// auto_ids held library ids before migration 0024; libraries became tags of
+// the same id, so the column carries over as the auto-send tag list.
+const deviceColumns = `id, owner_user_id, name, email, auto_ids, created_at, COALESCE(last_sent, '')`
 
-// CreateDevice registers a device. Auto libraries must be a subset of the
-// device's libraries; the caller has already verified the owner may reach
-// every library listed.
-func (s *Store) CreateDevice(ownerID int64, name, email string, libraries, autoIDs []int64) (*Device, error) {
+func validDevice(name, email string) (string, string, error) {
 	name, email = strings.TrimSpace(name), strings.TrimSpace(email)
-	if name == "" || email == "" || len(libraries) == 0 {
-		return nil, fmt.Errorf("name, kindle email, and at least one library required")
+	if name == "" || email == "" {
+		return "", "", fmt.Errorf("name and kindle email required")
 	}
 	if !strings.Contains(email, "@") {
-		return nil, fmt.Errorf("%q doesn't look like an email address", email)
+		return "", "", fmt.Errorf("%q doesn't look like an email address", email)
 	}
-	allowed := map[int64]bool{}
-	for _, id := range libraries {
-		allowed[id] = true
+	return name, email, nil
+}
+
+// CreateDevice registers a device. The caller has already verified the owner
+// holds every auto-send tag listed.
+func (s *Store) CreateDevice(ownerID int64, name, email string, autoTagIDs []int64) (*Device, error) {
+	name, email, err := validDevice(name, email)
+	if err != nil {
+		return nil, err
 	}
-	for _, id := range autoIDs {
-		if !allowed[id] {
-			return nil, fmt.Errorf("auto-send library %d is not in the device's library list", id)
-		}
-	}
-	res, err := s.db.Exec(`INSERT INTO kindle_devices (owner_user_id, name, email, library_ids, auto_ids)
-		VALUES (?, ?, ?, ?, ?)`, ownerID, name, email, idsJSON(libraries), idsJSON(autoIDs))
+	res, err := s.db.Exec(`INSERT INTO kindle_devices (owner_user_id, name, email, auto_ids)
+		VALUES (?, ?, ?, ?)`, ownerID, name, email, idsJSON(autoTagIDs))
 	if err != nil {
 		return nil, err
 	}
@@ -70,29 +75,16 @@ func (s *Store) CreateDevice(ownerID int64, name, email string, libraries, autoI
 	return s.GetDevice(id)
 }
 
-// UpdateDevice rewrites a device's name, email, and library lists in place —
-// owner, creation time, and send history stay put. Same validation as
-// CreateDevice; the caller has already verified the OWNER may reach every
-// library listed.
-func (s *Store) UpdateDevice(id int64, name, email string, libraries, autoIDs []int64) (*Device, error) {
-	name, email = strings.TrimSpace(name), strings.TrimSpace(email)
-	if name == "" || email == "" || len(libraries) == 0 {
-		return nil, fmt.Errorf("name, kindle email, and at least one library required")
+// UpdateDevice rewrites a device's name, email and auto-send tags in place —
+// owner, creation time and send history stay put. The caller has already
+// verified the OWNER holds every tag listed.
+func (s *Store) UpdateDevice(id int64, name, email string, autoTagIDs []int64) (*Device, error) {
+	name, email, err := validDevice(name, email)
+	if err != nil {
+		return nil, err
 	}
-	if !strings.Contains(email, "@") {
-		return nil, fmt.Errorf("%q doesn't look like an email address", email)
-	}
-	allowed := map[int64]bool{}
-	for _, lid := range libraries {
-		allowed[lid] = true
-	}
-	for _, lid := range autoIDs {
-		if !allowed[lid] {
-			return nil, fmt.Errorf("auto-send library %d is not in the device's library list", lid)
-		}
-	}
-	res, err := s.db.Exec(`UPDATE kindle_devices SET name = ?, email = ?, library_ids = ?, auto_ids = ? WHERE id = ?`,
-		name, email, idsJSON(libraries), idsJSON(autoIDs), id)
+	res, err := s.db.Exec(`UPDATE kindle_devices SET name = ?, email = ?, auto_ids = ? WHERE id = ?`,
+		name, email, idsJSON(autoTagIDs), id)
 	if err != nil {
 		return nil, err
 	}
@@ -129,11 +121,11 @@ func (s *Store) scanDevice(row *sql.Row) (*Device, error) {
 
 func scanDeviceRow(scan func(...any) error) (*Device, error) {
 	var d Device
-	var libs, autos string
-	if err := scan(&d.ID, &d.OwnerID, &d.Name, &d.Email, &libs, &autos, &d.CreatedAt, &d.LastSent); err != nil {
+	var autos string
+	if err := scan(&d.ID, &d.OwnerID, &d.Name, &d.Email, &autos, &d.CreatedAt, &d.LastSent); err != nil {
 		return nil, err
 	}
-	d.Libraries, d.AutoIDs = parseIDs(libs), parseIDs(autos)
+	d.AutoTagIDs = parseIDs(autos)
 	d.CreatedAt, d.LastSent = db.SQLTime(d.CreatedAt), db.SQLTime(d.LastSent)
 	return &d, nil
 }
@@ -154,22 +146,75 @@ func (s *Store) TouchSent(id int64) {
 	_, _ = s.db.Exec(`UPDATE kindle_devices SET last_sent = datetime('now') WHERE id = ?`, id)
 }
 
-func (d *Device) MayAccess(libraryID int64) bool {
-	for _, id := range d.Libraries {
-		if id == libraryID {
-			return true
+// AutoFor reports whether the device auto-sends any of tagIDs.
+func (d *Device) AutoFor(tagIDs []int64) bool {
+	for _, want := range d.AutoTagIDs {
+		for _, id := range tagIDs {
+			if id == want {
+				return true
+			}
 		}
 	}
 	return false
 }
 
-func (d *Device) AutoFor(libraryID int64) bool {
-	for _, id := range d.AutoIDs {
-		if id == libraryID {
-			return true
-		}
+// ---- send log ----
+//
+// kindle_sent holds every book a device has been emailed. A send CLAIMS its
+// row before the mail goes out and gives it back if the mail fails, so two
+// triggers racing (an import landing while someone tags the book) can never
+// both send.
+
+// ClaimSend records that bookID is going to deviceID. False means it was
+// already sent (or is being sent right now) — the caller must not send.
+func (s *Store) ClaimSend(deviceID, bookID int64) bool {
+	res, err := s.db.Exec(`INSERT OR IGNORE INTO kindle_sent (device_id, book_id) VALUES (?, ?)`, deviceID, bookID)
+	if err != nil {
+		return false
 	}
-	return false
+	n, _ := res.RowsAffected()
+	return n > 0
+}
+
+// ReleaseSend gives back a claim whose mail failed, so the book can go out on
+// a later trigger.
+func (s *Store) ReleaseSend(deviceID, bookID int64) {
+	_, _ = s.db.Exec(`DELETE FROM kindle_sent WHERE device_id = ? AND book_id = ?`, deviceID, bookID)
+}
+
+// WasSent reports whether bookID has gone to deviceID.
+func (s *Store) WasSent(deviceID, bookID int64) bool {
+	var n int
+	_ = s.db.QueryRow(`SELECT COUNT(*) FROM kindle_sent WHERE device_id = ? AND book_id = ?`, deviceID, bookID).Scan(&n)
+	return n > 0
+}
+
+// Sent is one entry of a book's send record.
+type Sent struct {
+	DeviceID int64  `json:"deviceId"`
+	Device   string `json:"device"`
+	OwnerID  int64  `json:"ownerId"`
+	SentAt   string `json:"sentAt"`
+}
+
+// SentFor lists the devices a book has been emailed to.
+func (s *Store) SentFor(bookID int64) ([]Sent, error) {
+	rows, err := s.db.Query(`SELECT d.id, d.name, d.owner_user_id, ks.sent_at FROM kindle_sent ks
+		JOIN kindle_devices d ON d.id = ks.device_id WHERE ks.book_id = ? ORDER BY ks.sent_at`, bookID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []Sent{}
+	for rows.Next() {
+		var x Sent
+		if err := rows.Scan(&x.DeviceID, &x.Device, &x.OwnerID, &x.SentAt); err != nil {
+			return nil, err
+		}
+		x.SentAt = db.SQLTime(x.SentAt)
+		out = append(out, x)
+	}
+	return out, rows.Err()
 }
 
 // ---- per-account outgoing email ----

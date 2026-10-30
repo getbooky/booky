@@ -14,10 +14,11 @@ import (
 // quality profiles, watched lists, backups, accounts, and anything that edits
 // metadata by hand or deletes something. A plain user never sees any of it.
 //
-// Library scope decides where a plain user may work: the libraries assigned
-// to their account when it was created. Inside those they do the everyday
-// things — browse, search and add books, refresh metadata from the providers,
-// monitor authors and series, grab releases, pair a KoReader device.
+// Tags decide what a plain user may see. There is one library; a shelved book
+// is visible to an account when it carries one of the account's tags (their
+// personal tag included), and a book with no tags is admin-only. Within what
+// they can see, users do the everyday things — browse, search and add books,
+// refresh metadata from the providers, grab releases, pair a device.
 //
 // Before the first account exists the whole API is open so the setup wizard
 // can run; every check here answers yes in that state.
@@ -37,14 +38,26 @@ func (s *Server) access(r *http.Request) access {
 
 func (a access) admin() bool { return a.open || a.user.IsAdmin() }
 
-func (a access) mayLibrary(libraryID int64) bool { return a.open || a.user.MayAccess(libraryID) }
+// tags is what the caller holds; empty for the pre-auth wizard, which is
+// admin anyway.
+func (a access) tags() []int64 {
+	if a.user == nil {
+		return nil
+	}
+	return a.user.Tags
+}
+
+// mayLibrary only asks whether the caller may work in the library at all —
+// any signed-in account may, since there is just the one. What they may touch
+// inside it is decided per book.
+func (a access) mayLibrary(libraryID int64) bool { return a.open || a.user != nil }
 
 // scoped reports whether list results have to be filtered before going out.
 // Admins and the pre-auth wizard see everything, so most handlers can skip
 // the work entirely.
 func (a access) scoped() bool { return !a.admin() }
 
-var errForbidden = errors.New("you don't have access to this library")
+var errForbidden = errors.New("you don't have access to this")
 
 // requireAdmin guards install-wide configuration and anything destructive.
 func (s *Server) requireAdmin(w http.ResponseWriter, r *http.Request) bool {
@@ -64,7 +77,7 @@ func (s *Server) requireLibrary(w http.ResponseWriter, r *http.Request, libraryI
 	return false
 }
 
-// requireBook guards a per-book action, resolving the book's libraries first.
+// requireBook guards a per-book action.
 func (s *Server) requireBook(w http.ResponseWriter, r *http.Request, bookID int64) bool {
 	if s.mayBook(s.access(r), bookID) {
 		return true
@@ -73,31 +86,40 @@ func (s *Server) requireBook(w http.ResponseWriter, r *http.Request, bookID int6
 	return false
 }
 
-// mayBook reports whether the caller may see a book. A book with no library
-// membership is catalog-only — a bibliography entry nobody has shelved — and
-// follows its author, so the author pages a user may browse stay whole while
-// an author they can't see doesn't leak titles.
+// mayBook reports whether the caller may see a book. A shelved book needs one
+// of the caller's tags. A book that isn't shelved is catalog-only — a
+// bibliography entry nobody has added — and follows its author, so the author
+// pages a user may browse stay whole while an author they can't see doesn't
+// leak titles.
 func (s *Server) mayBook(a access, bookID int64) bool {
 	if a.admin() {
 		return true
 	}
-	libs, err := s.bookLibraries(bookID)
-	if err != nil {
+	if a.user == nil {
 		return false
 	}
-	if len(libs) == 0 {
+	var shelved int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM library_books WHERE book_id = ?`, bookID).Scan(&shelved); err != nil {
+		return false
+	}
+	if shelved == 0 {
 		var authorID int64
 		if err := s.db.QueryRow(`SELECT author_id FROM books WHERE id = ?`, bookID).Scan(&authorID); err != nil {
 			return false
 		}
 		return s.mayAuthor(a, authorID)
 	}
-	for _, id := range libs {
-		if a.mayLibrary(id) {
-			return true
-		}
+	return s.Catalog.BookVisible(bookID, a.user.Tags)
+}
+
+// mayFile reports whether the caller may download a book's file. Stricter
+// than mayBook: a catalog-only book has no file to give, and a shelved one
+// must carry the caller's tag — following the author is for browsing only.
+func (s *Server) mayFile(a access, bookID int64) bool {
+	if a.admin() {
+		return true
 	}
-	return false
+	return a.user != nil && s.Catalog.BookVisible(bookID, a.user.Tags)
 }
 
 // visibility renders the caller's access into the filter the catalog layer
@@ -108,15 +130,15 @@ func (s *Server) visibility(a access) *catalog.Visibility {
 	}
 	v := &catalog.Visibility{}
 	if a.user != nil {
-		v.LibraryIDs = a.user.Libraries
+		v.TagIDs = a.user.Tags
 		v.UserID = a.user.ID
 	}
 	return v
 }
 
 // mayAuthor mirrors the rule ListAuthors applies: an author belongs to an
-// account when one of their books sits in one of that account's libraries, or
-// the account added the author by hand. Acting on an author you can't see —
+// account when one of their books carries one of the account's tags, or the
+// account added the author by hand. Acting on an author you can't see —
 // monitoring them, re-syncing their bibliography, searching their backlist —
 // is refused the same way reading them is.
 func (s *Server) mayAuthor(a access, authorID int64) bool {
@@ -131,8 +153,8 @@ func (s *Server) mayAuthor(a access, authorID int64) bool {
 		a.user.ID, authorID).Scan(&added); err == nil && added > 0 {
 		return true
 	}
-	return s.anyLibraryAllowed(a, `SELECT DISTINCT lb.library_id FROM library_books lb
-		JOIN books b ON b.id = lb.book_id WHERE b.author_id = ?`, authorID)
+	return s.anyTagAllowed(a, `SELECT DISTINCT bt.tag_id FROM book_tags bt
+		JOIN books b ON b.id = bt.book_id WHERE b.author_id = ?`, authorID)
 }
 
 // maySeries is the same rule one level down: a series the account can reach
@@ -150,25 +172,25 @@ func (s *Server) maySeries(a access, seriesID int64) bool {
 		WHERE ua.user_id = ? AND sr.id = ?`, a.user.ID, seriesID).Scan(&added); err == nil && added > 0 {
 		return true
 	}
-	return s.anyLibraryAllowed(a, `SELECT DISTINCT lb.library_id FROM library_books lb
-		JOIN books b ON b.id = lb.book_id WHERE b.series_id = ?`, seriesID)
+	return s.anyTagAllowed(a, `SELECT DISTINCT bt.tag_id FROM book_tags bt
+		JOIN books b ON b.id = bt.book_id WHERE b.series_id = ?`, seriesID)
 }
 
-// anyLibraryAllowed reports whether any library id the query returns is one
-// the caller holds. The membership check stays in Go so the query itself has
-// no id list spliced into it.
-func (s *Server) anyLibraryAllowed(a access, query string, arg int64) bool {
+// anyTagAllowed reports whether any tag id the query returns is one the
+// caller holds. The membership check stays in Go so the query itself has no
+// id list spliced into it.
+func (s *Server) anyTagAllowed(a access, query string, arg int64) bool {
 	rows, err := s.db.Query(query, arg)
 	if err != nil {
 		return false
 	}
 	defer rows.Close()
 	for rows.Next() {
-		var libID int64
-		if err := rows.Scan(&libID); err != nil {
+		var tagID int64
+		if err := rows.Scan(&tagID); err != nil {
 			return false
 		}
-		if a.mayLibrary(libID) {
+		if a.user.HasTag(tagID) {
 			return true
 		}
 	}
@@ -191,23 +213,6 @@ func (s *Server) requireSeries(w http.ResponseWriter, r *http.Request, seriesID 
 	return false
 }
 
-func (s *Server) bookLibraries(bookID int64) ([]int64, error) {
-	rows, err := s.db.Query(`SELECT library_id FROM library_books WHERE book_id = ?`, bookID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var out []int64
-	for rows.Next() {
-		var id int64
-		if err := rows.Scan(&id); err != nil {
-			return nil, err
-		}
-		out = append(out, id)
-	}
-	return out, rows.Err()
-}
-
 // bookScope filters book lists for one request. It preloads the authors the
 // account can see, because judging a catalog-only row needs that answer and
 // asking per row would be a query per book.
@@ -225,17 +230,17 @@ func (s *Server) bookScope(a access) bookScope {
 	if a.user == nil {
 		return sc
 	}
-	// authors reached through the account's libraries...
-	rows, err := s.db.Query(`SELECT DISTINCT b.author_id, lb.library_id
-		FROM books b JOIN library_books lb ON lb.book_id = b.id`)
+	// authors reached through the account's tags...
+	rows, err := s.db.Query(`SELECT DISTINCT b.author_id, bt.tag_id
+		FROM books b JOIN book_tags bt ON bt.book_id = b.id`)
 	if err == nil {
 		defer rows.Close()
 		for rows.Next() {
-			var authorID, libID int64
-			if err := rows.Scan(&authorID, &libID); err != nil {
+			var authorID, tagID int64
+			if err := rows.Scan(&authorID, &tagID); err != nil {
 				break
 			}
-			if a.mayLibrary(libID) {
+			if a.user.HasTag(tagID) {
 				sc.authors[authorID] = true
 			}
 		}
@@ -255,9 +260,8 @@ func (s *Server) bookScope(a access) bookScope {
 	return sc
 }
 
-// filter drops rows the caller may not see. ListBooks emits one row per
-// library membership, so a book shelved in both an allowed and a denied
-// library keeps only the allowed row — which is what the UI should show.
+// filter drops rows the caller may not see: a shelved book needs one of the
+// caller's tags.
 //
 // LibraryID 0 is a catalog-only row: a bibliography entry sitting in no
 // library at all. Those follow their author, matching the Authors page — an
@@ -275,11 +279,32 @@ func (sc bookScope) filter(books []catalog.Book) []catalog.Book {
 			}
 			continue
 		}
-		if sc.mayLibrary(b.LibraryID) {
-			out = append(out, b)
+		for _, t := range b.Tags {
+			if sc.user.HasTag(t) {
+				out = append(out, b)
+				break
+			}
 		}
 	}
 	return out
+}
+
+// redactTags hides tags a plain user doesn't hold: which other audiences a
+// book reaches — another person's personal tag above all — is the admin's
+// business, not theirs.
+func (a access) redactTags(books []catalog.Book) {
+	if a.admin() {
+		return
+	}
+	for i := range books {
+		kept := []int64{}
+		for _, t := range books[i].Tags {
+			if a.user.HasTag(t) {
+				kept = append(kept, t)
+			}
+		}
+		books[i].Tags = kept
+	}
 }
 
 // filterLibraries narrows the library list to what the caller may reach.
@@ -294,4 +319,21 @@ func (a access) filterLibraries(libs []catalog.Library) []catalog.Library {
 		}
 	}
 	return out
+}
+
+// shelveFor makes sure a book a plain user just pulled into the library —
+// added, monitored, grabbed — is one they can see: if none of their tags is on
+// it yet, it gets their personal tag. Without this a user's own grab would
+// land as an admin-only book. Admins see everything and tag deliberately, so
+// nothing is added for them.
+func (s *Server) shelveFor(a access, bookID int64) {
+	if a.admin() || a.user == nil || a.user.PersonalTag == 0 {
+		return
+	}
+	if s.Catalog.BookVisible(bookID, a.user.Tags) {
+		return
+	}
+	if ch, err := s.Catalog.AddBookTags(bookID, []int64{a.user.PersonalTag}); err == nil {
+		s.tagsChanged([]catalog.TagChange{ch}, true)
+	}
 }

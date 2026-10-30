@@ -2,6 +2,7 @@ package api
 
 import (
 	"errors"
+	"github.com/getbooky/booky/internal/opds"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -19,11 +20,14 @@ func (s *Server) handleBookFile(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, errors.New("bad id"))
 		return
 	}
-	if !s.requireBook(w, r, bookID) {
+	// the file needs the book's tag — following an author lets you browse
+	// their catalog, never download it
+	if !s.mayFile(s.access(r), bookID) {
+		writeErr(w, http.StatusForbidden, errors.New("you don't have access to this book"))
 		return
 	}
-	path := s.Catalog.AnyFilePath(bookID)
-	if path == "" {
+	path, _, err := s.shelfFile(bookID)
+	if err != nil {
 		http.NotFound(w, r)
 		return
 	}
@@ -33,7 +37,7 @@ func (s *Server) handleBookFile(w http.ResponseWriter, r *http.Request) {
 	}
 	// inline, keeping the real filename so the reader can sniff the format
 	// from the extension (and a plain save keeps a sensible name)
-	w.Header().Set("Content-Disposition", `inline; filename="`+filepath.Base(path)+`"`)
+	w.Header().Set("Content-Disposition", `inline; filename="`+opds.SanitizeFilename(filepath.Base(path))+`"`)
 	http.ServeFile(w, r, path)
 }
 

@@ -395,14 +395,14 @@ type QueueItem struct {
 // reason as history: filtering a global "last 200" afterwards would show a
 // scoped user only the leftovers of someone else's busy day.
 func (e *Engine) Queue(v *catalog.Visibility) ([]QueueItem, error) {
-	ph, libArgs := catalog.IDPlaceholders(v)
+	ph, tagArgs := catalog.IDPlaceholders(v)
 	args := []any{catalog.UnscopedFlag(v)}
-	args = append(args, libArgs...)
+	args = append(args, tagArgs...)
 	rows, err := e.db.Query(fmt.Sprintf( //nolint:gosec // G201: placeholders only, see catalog.IDPlaceholders
 		`SELECT q.id, q.book_id, q.library_id, b.title, q.release_title, q.source,
 		        q.protocol, q.status, q.external_id, q.detail, q.created_at, q.updated_at
 		 FROM queue q JOIN books b ON b.id = q.book_id
-		 WHERE (? = 1 OR q.library_id IN (%s))
+		 WHERE (? = 1 OR EXISTS (SELECT 1 FROM book_tags bt WHERE bt.book_id = q.book_id AND bt.tag_id IN (%s)))
 		 ORDER BY q.id DESC LIMIT 200`, ph), args...)
 	if err != nil {
 		return nil, err

@@ -1,6 +1,8 @@
-// Package opds serves one OPDS 1.2 catalog per library, guarded by that
-// library's own HTTP basic credentials — never a user account. Any OPDS
-// reader (KOReader, Moon+, Thorium…) can browse and download the shelf.
+// Package opds serves an OPDS 1.2 catalog per account. A reader app signs in
+// with the account's username and its OPDS password — a separate password
+// from the web login, since reader apps store it in plain text — and sees
+// exactly the books the account's tags cover. Any OPDS reader (KOReader,
+// Moon+, Thorium…) can browse and download that shelf.
 package opds
 
 import (
@@ -8,6 +10,7 @@ import (
 	"encoding/xml"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -23,42 +26,62 @@ type Handler struct {
 	db      *sql.DB
 	catalog *catalog.Store
 	covers  *catalog.CoverCache
+	auth    *auth.Store
 }
 
-func New(db *sql.DB, cat *catalog.Store, covers *catalog.CoverCache) *Handler {
-	return &Handler{db: db, catalog: cat, covers: covers}
+func New(db *sql.DB, cat *catalog.Store, covers *catalog.CoverCache, accounts *auth.Store) *Handler {
+	return &Handler{db: db, catalog: cat, covers: covers, auth: accounts}
 }
 
 // Register mounts the OPDS routes on mux.
 func (h *Handler) Register(mux *http.ServeMux) {
-	mux.HandleFunc("GET /opds/{libraryId}", h.handleFeed)
-	mux.HandleFunc("GET /opds/{libraryId}/download/{bookId}", h.handleDownload)
-	mux.HandleFunc("GET /opds/{libraryId}/cover/{bookId}", h.handleCover)
+	mux.HandleFunc("GET /opds", h.handleFeed)
+	mux.HandleFunc("GET /opds/download/{bookId}", h.handleDownload)
+	mux.HandleFunc("GET /opds/cover/{bookId}", h.handleCover)
+	// the per-library feeds that came before tags: answer reader apps still
+	// pointed at them with a reason, not the web app's HTML
+	mux.HandleFunc("GET /opds/{libraryId}", h.handleMoved)
+	mux.HandleFunc("GET /opds/{libraryId}/download/{bookId}", h.handleMoved)
+	mux.HandleFunc("GET /opds/{libraryId}/cover/{bookId}", h.handleMoved)
 }
 
-// authorize checks the request's basic auth against the library's OPDS
-// credentials. Libraries whose password was never set (hash "unset") refuse
-// everything — a feed must be opted into.
-func (h *Handler) authorize(w http.ResponseWriter, r *http.Request) (libraryID int64, ok bool) {
-	libraryID, err := strconv.ParseInt(r.PathValue("libraryId"), 10, 64)
-	if err != nil {
-		http.NotFound(w, r)
-		return 0, false
-	}
-	var wantUser, hash string
-	err = h.db.QueryRow(`SELECT opds_username, opds_password_hash FROM libraries WHERE id = ?`, libraryID).
-		Scan(&wantUser, &hash)
-	if err != nil {
-		http.NotFound(w, r)
-		return 0, false
-	}
+func (h *Handler) handleMoved(w http.ResponseWriter, r *http.Request) {
+	http.Error(w, "This feed moved to /opds — sign in with your own username and OPDS password (Settings → Account in Booky).", http.StatusGone)
+}
+
+// authorize checks the request's Basic credentials against an account's
+// OPDS password (with lockout after repeated failures) and returns the
+// account with its CURRENT tags. An account that never set an OPDS password
+// can't sign in — a feed must be opted into.
+func (h *Handler) authorize(w http.ResponseWriter, r *http.Request) (*auth.User, bool) {
 	user, pass, hasAuth := r.BasicAuth()
-	if hash == "unset" || !hasAuth || user != wantUser || !auth.CheckPassword(hash, pass) {
-		w.Header().Set("WWW-Authenticate", `Basic realm="booky"`)
-		http.Error(w, "authentication required", http.StatusUnauthorized)
-		return 0, false
+	if hasAuth {
+		ip := r.RemoteAddr
+		if host, _, err := net.SplitHostPort(ip); err == nil {
+			ip = host
+		}
+		u, err := h.auth.OPDSLogin(user, pass, ip)
+		if err == nil {
+			return u, true
+		}
 	}
-	return libraryID, true
+	w.Header().Set("WWW-Authenticate", `Basic realm="booky"`)
+	http.Error(w, "authentication required", http.StatusUnauthorized)
+	return nil, false
+}
+
+// mayRead is the per-book rule: admins read everything on the shelf, anyone
+// else needs one of the book's tags.
+func (h *Handler) mayRead(u *auth.User, b *catalog.Book) bool {
+	if u.IsAdmin() {
+		return true
+	}
+	for _, t := range b.Tags {
+		if u.HasTag(t) {
+			return true
+		}
+	}
+	return false
 }
 
 // ---- feed rendering ----
@@ -119,28 +142,23 @@ func mimeFor(format string) string {
 }
 
 func (h *Handler) handleFeed(w http.ResponseWriter, r *http.Request) {
-	libraryID, ok := h.authorize(w, r)
+	u, ok := h.authorize(w, r)
 	if !ok {
 		return
 	}
-	var libName string
-	if err := h.db.QueryRow(`SELECT name FROM libraries WHERE id = ?`, libraryID).Scan(&libName); err != nil {
-		http.NotFound(w, r)
-		return
-	}
-	books, err := h.catalog.ListBooks(0, libraryID, 0)
+	books, err := h.catalog.ListBooks(0, 0, 0)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		http.Error(w, "feed unavailable", http.StatusInternalServerError)
 		return
 	}
 
-	self := fmt.Sprintf("/opds/%d", libraryID)
+	self := "/opds"
 	now := time.Now().UTC().Format(time.RFC3339)
 	f := feed{
 		Xmlns:   "http://www.w3.org/2005/Atom",
 		XmlnsDC: "http://purl.org/dc/terms/",
-		ID:      "urn:booky:library:" + strconv.FormatInt(libraryID, 10),
-		Title:   libName + " — Booky",
+		ID:      "urn:booky:user:" + strconv.FormatInt(u.ID, 10),
+		Title:   u.Username + "'s books — Booky",
 		Updated: now,
 		Links: []link{
 			{Rel: "self", Href: self, Type: "application/atom+xml;profile=opds-catalog;kind=acquisition"},
@@ -150,6 +168,9 @@ func (h *Handler) handleFeed(w http.ResponseWriter, r *http.Request) {
 	for _, b := range books {
 		if b.FilePath == "" {
 			continue // shelf only — wanted books aren't downloadable
+		}
+		if !h.mayRead(u, &b) {
+			continue
 		}
 		e := entry{
 			ID:       fmt.Sprintf("urn:booky:book:%d", b.ID),
@@ -195,20 +216,19 @@ func (h *Handler) handleFeed(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// fileFor returns the library's file for a book, guarding against rows from
-// other libraries.
-func (h *Handler) fileFor(libraryID, bookID int64) (path, format string, err error) {
-	var p, f sql.NullString
-	err = h.db.QueryRow(`SELECT file_path, file_format FROM library_books
-		WHERE library_id = ? AND book_id = ?`, libraryID, bookID).Scan(&p, &f)
-	if err != nil || !p.Valid || p.String == "" {
+// fileFor returns a book's file if the account may read it. Every download
+// and cover request comes through here, so a guessed URL for someone else's
+// book gets the same 404 as one that doesn't exist.
+func (h *Handler) fileFor(u *auth.User, bookID int64) (path, format string, err error) {
+	b, err := h.catalog.GetBook(bookID)
+	if err != nil || b.FilePath == "" || !h.mayRead(u, b) {
 		return "", "", fmt.Errorf("no file")
 	}
-	return p.String, f.String, nil
+	return b.FilePath, b.FileFormat, nil
 }
 
 func (h *Handler) handleDownload(w http.ResponseWriter, r *http.Request) {
-	libraryID, ok := h.authorize(w, r)
+	u, ok := h.authorize(w, r)
 	if !ok {
 		return
 	}
@@ -217,7 +237,7 @@ func (h *Handler) handleDownload(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	path, format, err := h.fileFor(libraryID, bookID)
+	path, format, err := h.fileFor(u, bookID)
 	if err != nil {
 		http.NotFound(w, r)
 		return
@@ -227,12 +247,12 @@ func (h *Handler) handleDownload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", mimeFor(format))
-	w.Header().Set("Content-Disposition", `attachment; filename="`+sanitizeFilename(filepath.Base(path))+`"`)
+	w.Header().Set("Content-Disposition", `attachment; filename="`+SanitizeFilename(filepath.Base(path))+`"`)
 	http.ServeFile(w, r, path)
 }
 
 func (h *Handler) handleCover(w http.ResponseWriter, r *http.Request) {
-	libraryID, ok := h.authorize(w, r)
+	u, ok := h.authorize(w, r)
 	if !ok {
 		return
 	}
@@ -241,8 +261,8 @@ func (h *Handler) handleCover(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	// only books actually in this library expose covers on its feed
-	if _, _, err := h.fileFor(libraryID, bookID); err != nil {
+	// only books on the account's shelf expose covers on its feed
+	if _, _, err := h.fileFor(u, bookID); err != nil {
 		http.NotFound(w, r)
 		return
 	}
@@ -255,8 +275,8 @@ func (h *Handler) handleCover(w http.ResponseWriter, r *http.Request) {
 	http.ServeFile(w, r, path)
 }
 
-// sanitizeFilename keeps header injection out of Content-Disposition.
-func sanitizeFilename(name string) string {
+// SanitizeFilename keeps header injection out of Content-Disposition.
+func SanitizeFilename(name string) string {
 	return strings.Map(func(r rune) rune {
 		if r == '"' || r == '\\' || r < 0x20 {
 			return '_'

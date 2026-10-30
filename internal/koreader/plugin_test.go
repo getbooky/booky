@@ -37,7 +37,7 @@ func TestStaticPluginLuaCompiles(t *testing.T) {
 // rather than the constants behind it — that covers any file added later.
 func TestBuiltPluginZipIsValidLua(t *testing.T) {
 	var buf bytes.Buffer
-	d := &Device{ID: 1, Name: "Kobo Libra", Token: "tok-123", Libraries: []int64{1, 2}, AutoIDs: []int64{2}}
+	d := &Device{ID: 1, Name: "Kobo Libra", Token: "tok-123", TagIDs: []int64{1, 2}, AutoIDs: []int64{2}}
 	if err := (&Store{}).BuildPlugin(&buf, d, "https://booky.example.com/"); err != nil {
 		t.Fatalf("BuildPlugin: %v", err)
 	}
@@ -85,7 +85,7 @@ func TestConfigLuaSurvivesAwkwardDeviceNames(t *testing.T) {
 	}
 	for label, name := range names {
 		t.Run(label, func(t *testing.T) {
-			d := &Device{ID: 1, Name: name, Token: "tok\"123\\", Libraries: []int64{7}, AutoIDs: nil}
+			d := &Device{ID: 1, Name: name, Token: "tok\"123\\", TagIDs: []int64{7}, AutoIDs: nil}
 			src := configLua(d, "https://booky.example.com")
 
 			// config.lua is pure data (a `return {…}` table with no requires),

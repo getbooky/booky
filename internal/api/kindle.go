@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/getbooky/booky/internal/auth"
 	"github.com/getbooky/booky/internal/kindle"
 	"github.com/getbooky/booky/internal/mailer"
 )
@@ -41,16 +42,40 @@ func (s *Server) ownsKindleDevice(a access, d *kindle.Device) bool {
 	return a.user != nil && a.user.ID == d.OwnerID
 }
 
-// deviceOwnerMayLibrary caps a device's libraries by its OWNER's grants. An
-// admin may edit anyone's device, but the device must never reach past the
-// account it belongs to — its sends always run as that owner. Owner 0 (a
-// device paired pre-auth, which only admins can touch) falls back to the
-// caller's own access.
-func (s *Server) deviceOwnerMayLibrary(ownerID int64, a access, libraryID int64) bool {
-	if ownerID == 0 {
-		return a.mayLibrary(libraryID)
+// ownerHoldsTags caps a device's auto-send tags by its OWNER's tags. An admin
+// may edit anyone's device, but the device must never reach past the account
+// it belongs to — its sends always run as that owner. An admin owner may
+// pick any tag, since they see every book anyway.
+//
+// Owner 0 is a KoReader device paired before accounts existed: only an admin
+// can reach it (see ownsDevice), so any existing tag will do.
+func (s *Server) ownerHoldsTags(ownerID int64, tagIDs []int64) error {
+	var owner *auth.User
+	if ownerID != 0 {
+		if owner = s.Auth.UserByID(ownerID); owner == nil {
+			return errors.New("the device's owner no longer exists")
+		}
 	}
-	return s.Auth.UserByID(ownerID).MayAccess(libraryID)
+	for _, id := range tagIDs {
+		if _, err := s.Catalog.GetTag(id); err != nil {
+			return fmt.Errorf("tag %d not found", id)
+		}
+		if owner != nil && !owner.IsAdmin() && !owner.HasTag(id) {
+			return fmt.Errorf("%s doesn't hold tag %d", owner.Username, id)
+		}
+	}
+	return nil
+}
+
+// ownerMayBook is the per-book rule run as the device's owner — not as
+// whoever pressed the button. An admin sending to someone's Kindle still
+// can't push them a book their tags don't cover.
+func (s *Server) ownerMayBook(ownerID, bookID int64) bool {
+	owner := s.Auth.UserByID(ownerID)
+	if owner == nil {
+		return false
+	}
+	return owner.IsAdmin() || s.Catalog.BookVisible(bookID, owner.Tags)
 }
 
 // ---- outgoing email (per-account) ----
@@ -190,24 +215,20 @@ func (s *Server) handleKindleCreateDevice(w http.ResponseWriter, r *http.Request
 		return
 	}
 	var req struct {
-		Name           string  `json:"name"`
-		Email          string  `json:"email"`
-		LibraryIDs     []int64 `json:"libraryIds"`
-		AutoLibraryIDs []int64 `json:"autoLibraryIds"`
+		Name       string  `json:"name"`
+		Email      string  `json:"email"`
+		AutoTagIDs []int64 `json:"autoTagIds"`
 	}
 	if err := decodeJSON(r, &req); err != nil {
 		writeErr(w, http.StatusBadRequest, err)
 		return
 	}
-	// the device may only draw from libraries its owner can reach
-	a := s.access(r)
-	for _, id := range req.LibraryIDs {
-		if !a.mayLibrary(id) {
-			writeErr(w, http.StatusForbidden, errForbidden)
-			return
-		}
+	// the device may only auto-send tags its owner holds
+	if err := s.ownerHoldsTags(owner, req.AutoTagIDs); err != nil {
+		writeErr(w, http.StatusForbidden, err)
+		return
 	}
-	device, err := s.Kindle.CreateDevice(owner, req.Name, req.Email, req.LibraryIDs, req.AutoLibraryIDs)
+	device, err := s.Kindle.CreateDevice(owner, req.Name, req.Email, req.AutoTagIDs)
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, err)
 		return
@@ -215,8 +236,10 @@ func (s *Server) handleKindleCreateDevice(w http.ResponseWriter, r *http.Request
 	writeJSON(w, http.StatusCreated, device)
 }
 
-// handleKindleUpdateDevice edits a device in place — add a library, flip
-// auto-send, fix a typo'd address — without re-pairing.
+// handleKindleUpdateDevice edits a device in place — change its auto-send
+// tags, fix a typo'd address — without re-pairing. Adding an auto-send tag
+// doesn't email the backlog: only books that gain the tag (or land on disk
+// with it) from here on go out.
 func (s *Server) handleKindleUpdateDevice(w http.ResponseWriter, r *http.Request) {
 	if _, ok := s.kindleOwner(w, r); !ok {
 		return
@@ -233,22 +256,20 @@ func (s *Server) handleKindleUpdateDevice(w http.ResponseWriter, r *http.Request
 		return
 	}
 	var req struct {
-		Name           string  `json:"name"`
-		Email          string  `json:"email"`
-		LibraryIDs     []int64 `json:"libraryIds"`
-		AutoLibraryIDs []int64 `json:"autoLibraryIds"`
+		Name       string  `json:"name"`
+		Email      string  `json:"email"`
+		AutoTagIDs []int64 `json:"autoTagIds"`
 	}
 	if err := decodeJSON(r, &req); err != nil {
 		writeErr(w, http.StatusBadRequest, err)
 		return
 	}
-	for _, libID := range req.LibraryIDs {
-		if !s.deviceOwnerMayLibrary(device.OwnerID, a, libID) {
-			writeErr(w, http.StatusForbidden, errForbidden)
-			return
-		}
+	if err := s.ownerHoldsTags(device.OwnerID, req.AutoTagIDs); err != nil {
+		writeErr(w, http.StatusForbidden, err)
+		return
 	}
-	updated, err := s.Kindle.UpdateDevice(id, req.Name, req.Email, req.LibraryIDs, req.AutoLibraryIDs)
+	s.markBacklogSent(device, req.AutoTagIDs)
+	updated, err := s.Kindle.UpdateDevice(id, req.Name, req.Email, req.AutoTagIDs)
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, err)
 		return
@@ -315,35 +336,21 @@ func (s *Server) handleKindleDeviceTest(w http.ResponseWriter, r *http.Request) 
 
 // ---- sending a book ----
 
-// sendableFile finds the book's file in a library the device may draw from.
-func (s *Server) sendableFile(bookID int64, device *kindle.Device) (path, format string, libraryID int64, err error) {
-	rows, qerr := s.db.Query(`SELECT library_id, file_path, COALESCE(file_format, '')
-		FROM library_books WHERE book_id = ? AND file_path IS NOT NULL AND file_path != ''`, bookID)
-	if qerr != nil {
-		return "", "", 0, qerr
+// shelfFile returns the book's file, if it has one on disk.
+func (s *Server) shelfFile(bookID int64) (path, format string, err error) {
+	err = s.db.QueryRow(`SELECT file_path, COALESCE(file_format, '') FROM library_books
+		WHERE book_id = ? AND file_path IS NOT NULL AND file_path != '' LIMIT 1`, bookID).Scan(&path, &format)
+	if err != nil {
+		return "", "", errors.New("this book has no file on the shelf yet")
 	}
-	defer rows.Close()
-	found := false
-	for rows.Next() {
-		var lib int64
-		var p, f string
-		if err := rows.Scan(&lib, &p, &f); err != nil {
-			continue
-		}
-		found = true
-		if device.MayAccess(lib) {
-			return p, f, lib, nil
-		}
-	}
-	if !found {
-		return "", "", 0, errors.New("this book has no file on the shelf yet")
-	}
-	return "", "", 0, errors.New("the book's file isn't in any of this device's libraries")
+	return path, format, nil
 }
 
 // POST /books/{id}/send — email the book's file to one of the caller's
-// Kindle devices (any device, for an admin). The message is minimal: the
-// title as subject, no body, the file attached.
+// Kindle devices (any device, for an admin). The book must be one the
+// device's OWNER can see right now. The message is minimal: the title as
+// subject, no body, the file attached. A manual send always goes, even if
+// the book went to this device before — asking twice is the person's call.
 func (s *Server) handleBookSendToKindle(w http.ResponseWriter, r *http.Request) {
 	if _, ok := s.kindleOwner(w, r); !ok {
 		return
@@ -368,49 +375,60 @@ func (s *Server) handleBookSendToKindle(w http.ResponseWriter, r *http.Request) 
 		writeErr(w, http.StatusNotFound, errors.New("device not found"))
 		return
 	}
-	book, err := s.Catalog.GetBook(id)
-	if err != nil {
-		writeErr(w, http.StatusNotFound, errors.New("book not found"))
+	if !s.ownerMayBook(device.OwnerID, id) {
+		writeErr(w, http.StatusForbidden, errors.New("this book isn't shared with the device's owner"))
 		return
 	}
-	path, format, libraryID, err := s.sendableFile(id, device)
-	if err != nil {
+	if err := s.sendToKindle(r.Context(), device, id, false); err != nil {
 		writeErr(w, http.StatusBadRequest, err)
 		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "sent"})
+}
+
+// sendToKindle emails one book to one device through the owner's account.
+// auto marks a send-on-import/tag: those are recorded as "auto" and given
+// back to the send log if the mail fails, so a later trigger can retry.
+func (s *Server) sendToKindle(ctx context.Context, device *kindle.Device, bookID int64, auto bool) error {
+	lib := s.Catalog.TheLibrary()
+	book, err := s.Catalog.GetBook(bookID)
+	if err != nil {
+		return errors.New("book not found")
+	}
+	path, format, err := s.shelfFile(bookID)
+	if err != nil {
+		return err
 	}
 	ct, ok := mailer.ContentTypeFor(format)
 	if !ok {
-		writeErr(w, http.StatusBadRequest, fmt.Errorf("this file is %s — Amazon only accepts EPUB and PDF by email", strings.ToUpper(format)))
-		return
+		return fmt.Errorf("%q is %s — Amazon only accepts EPUB and PDF by email", book.Title, strings.ToUpper(format))
 	}
 	acc, err := s.Kindle.ResolveAccount(device.OwnerID)
 	if err != nil {
-		writeErr(w, http.StatusBadRequest, err)
-		return
+		return err
 	}
-
 	f, err := os.Open(path) //nolint:gosec // the path came from library_books, not the request
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, fmt.Errorf("can't read the book file: %w", err))
-		return
+		return fmt.Errorf("can't read the book file: %w", err)
 	}
 	defer f.Close()
 	if info, err := f.Stat(); err == nil && info.Size() > mailer.MaxAttachmentBytes {
-		writeErr(w, http.StatusBadRequest, fmt.Errorf("%.0f MB is over Amazon's 50 MB email limit", float64(info.Size())/1e6))
-		return
+		return fmt.Errorf("%q is %.0f MB — over Amazon's 50 MB email limit", book.Title, float64(info.Size())/1e6)
 	}
-
-	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Minute)
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
 	att := &mailer.Attachment{Filename: kindleFilename(book.Title, book.Author, format), ContentType: ct, Content: f}
 	if err := acc.Send(ctx, device.Email, book.Title, "", att); err != nil {
-		_ = s.Catalog.AddHistory(id, libraryID, "warning", fmt.Sprintf("send to kindle failed: %q → %s: %v", book.Title, device.Name, err))
-		writeErr(w, http.StatusBadGateway, err)
-		return
+		_ = s.Catalog.AddHistory(bookID, lib, "warning", fmt.Sprintf("send to kindle failed: %q → %s: %v", book.Title, device.Name, err))
+		return err
 	}
 	s.Kindle.TouchSent(device.ID)
-	_ = s.Catalog.AddHistory(id, libraryID, "sent", fmt.Sprintf("%q → %s (%s)", book.Title, device.Name, device.Email))
-	writeJSON(w, http.StatusOK, map[string]string{"status": "sent"})
+	how := ""
+	if auto {
+		how = ", auto"
+	}
+	_ = s.Catalog.AddHistory(bookID, lib, "sent", fmt.Sprintf("%q → %s (%s)%s", book.Title, device.Name, device.Email, how))
+	return nil
 }
 
 // kindleFilename names the attachment "Title - Author.ext" with filesystem
@@ -435,69 +453,192 @@ func kindleFilename(title, author, format string) string {
 	return name + "." + strings.ToLower(strings.TrimPrefix(format, "."))
 }
 
-// ---- auto-send on import ----
+// ---- auto-send: on import and on tag ----
+//
+// A device auto-sends a book once, the first moment all of these hold:
+//   - the book is on disk;
+//   - it carries one of the device's auto-send tags;
+//   - the device's owner holds that tag (checked again right before sending,
+//     so taking a tag away stops anything still queued);
+//   - the send log has no record of it going to this device.
+//
+// Sends go through one paced worker: a bulk tag edit or an import burst
+// never hits a mail server with dozens of messages at once.
 
-// KindleAutoSend emails a freshly delivered file to every device that
-// auto-sends for its library. Wired into the importer's OnFileAdded hook and
-// run in the background: a slow mail server must never stall a delivery.
-// Scan-matched backlogs never come through here — only new arrivals do, so
-// pairing a device doesn't flood a Kindle with an existing shelf.
-func (s *Server) KindleAutoSend(bookID, libraryID int64, path, format string) {
+// kindlePace spaces auto-send emails; a var so tests can run unpaced.
+var kindlePace = 3 * time.Second
+
+type kindleJob struct {
+	deviceID int64
+	bookID   int64
+}
+
+// autoTargets lists the devices that should receive bookID because it
+// carries tags (the triggering ones, or all of the book's), and haven't yet.
+func (s *Server) autoTargets(bookID int64, tags []int64) []kindle.Device {
 	devices, err := s.Kindle.ListDevices()
 	if err != nil {
 		log.Printf("kindle auto-send: list devices: %v", err)
-		return
+		return nil
 	}
-	var targets []kindle.Device
+	var out []kindle.Device
 	for _, d := range devices {
-		if d.AutoFor(libraryID) {
-			targets = append(targets, d)
+		if s.autoEligible(&d, bookID, tags) && !s.Kindle.WasSent(d.ID, bookID) {
+			out = append(out, d)
 		}
 	}
-	if len(targets) == 0 {
+	return out
+}
+
+// autoEligible: the device auto-sends one of tags, and its owner holds that
+// tag right now. A device whose owner is gone (or never existed — owner 0)
+// sends nothing.
+func (s *Server) autoEligible(d *kindle.Device, bookID int64, tags []int64) bool {
+	owner := s.Auth.UserByID(d.OwnerID)
+	if owner == nil {
+		return false
+	}
+	bookTags, err := s.Catalog.BookTags(bookID)
+	if err != nil {
+		return false
+	}
+	carried := map[int64]bool{}
+	for _, t := range bookTags {
+		carried[t] = true
+	}
+	for _, t := range tags {
+		if !carried[t] || !d.AutoFor([]int64{t}) {
+			continue
+		}
+		if owner.IsAdmin() || owner.HasTag(t) {
+			return true
+		}
+	}
+	return false
+}
+
+// KindleOnImport runs when a file lands: every device auto-sending one of the
+// book's tags gets it. Wired into the importer's OnFileAdded hook.
+func (s *Server) KindleOnImport(bookID int64) {
+	tags, err := s.Catalog.BookTags(bookID)
+	if err != nil || len(tags) == 0 {
 		return
 	}
-	book, err := s.Catalog.GetBook(bookID)
+	for _, d := range s.autoTargets(bookID, tags) {
+		s.enqueueKindle(kindleJob{deviceID: d.ID, bookID: bookID})
+	}
+}
+
+// KindleOnTagged runs when a book gains tags. A book not on disk yet waits:
+// KindleOnImport catches it when the file lands. send=false records the
+// sends as handled without emailing — the person declined a bulk send.
+func (s *Server) KindleOnTagged(bookID int64, added []int64, send bool) {
+	if _, _, err := s.shelfFile(bookID); err != nil {
+		return
+	}
+	for _, d := range s.autoTargets(bookID, added) {
+		if !send {
+			if s.Kindle.ClaimSend(d.ID, bookID) {
+				_ = s.Catalog.AddHistory(bookID, s.Catalog.TheLibrary(), "info",
+					fmt.Sprintf("%s: not sent to %s (declined when tagging)", s.bookTitle(bookID), d.Name))
+			}
+			continue
+		}
+		s.enqueueKindle(kindleJob{deviceID: d.ID, bookID: bookID})
+	}
+}
+
+// kindleTagPreview counts the emails tagging bookIDs with tagIDs would set
+// off, and across how many devices — the bulk prompt's numbers.
+func (s *Server) kindleTagPreview(bookIDs, tagIDs []int64) (sends, devices int) {
+	all, err := s.Kindle.ListDevices()
+	if err != nil {
+		return 0, 0
+	}
+	hit := map[int64]bool{}
+	for _, bookID := range bookIDs {
+		if _, _, err := s.shelfFile(bookID); err != nil {
+			continue
+		}
+		for _, d := range all {
+			if !d.AutoFor(tagIDs) || s.Kindle.WasSent(d.ID, bookID) {
+				continue
+			}
+			owner := s.Auth.UserByID(d.OwnerID)
+			if owner == nil {
+				continue
+			}
+			ok := false
+			for _, t := range tagIDs {
+				if d.AutoFor([]int64{t}) && (owner.IsAdmin() || owner.HasTag(t)) {
+					ok = true
+				}
+			}
+			if ok {
+				sends++
+				hit[d.ID] = true
+			}
+		}
+	}
+	return sends, len(hit)
+}
+
+// markBacklogSent: when a device gains an auto-send tag, the books already
+// carrying it count as sent. Adding "Kids" to a Kindle means "send new Kids
+// books", not "email the whole Kids shelf right now".
+func (s *Server) markBacklogSent(d *kindle.Device, newAuto []int64) {
+	old := map[int64]bool{}
+	for _, t := range d.AutoTagIDs {
+		old[t] = true
+	}
+	for _, t := range newAuto {
+		if old[t] {
+			continue
+		}
+		_, _ = s.db.Exec(`INSERT OR IGNORE INTO kindle_sent (device_id, book_id)
+			SELECT ?, bt.book_id FROM book_tags bt
+			JOIN library_books lb ON lb.book_id = bt.book_id
+			WHERE bt.tag_id = ? AND lb.file_path IS NOT NULL AND lb.file_path != ''`, d.ID, t)
+	}
+}
+
+func (s *Server) enqueueKindle(j kindleJob) {
+	s.kindleOnce.Do(func() {
+		s.kindleJobs = make(chan kindleJob, 4096)
+		go s.kindleWorker()
+	})
+	select {
+	case s.kindleJobs <- j:
+	default:
+		log.Printf("kindle auto-send: queue full, dropping book %d → device %d (it goes on the next trigger)", j.bookID, j.deviceID)
+	}
+}
+
+func (s *Server) kindleWorker() {
+	for j := range s.kindleJobs {
+		s.runKindleJob(j)
+		time.Sleep(kindlePace)
+	}
+}
+
+// runKindleJob re-checks everything at send time — the owner may have lost
+// the tag, the device may be gone — then claims the send log row, sends, and
+// gives the claim back if the mail fails.
+func (s *Server) runKindleJob(j kindleJob) {
+	d, err := s.Kindle.GetDevice(j.deviceID)
 	if err != nil {
 		return
 	}
-	ct, ok := mailer.ContentTypeFor(format)
-	if !ok {
-		_ = s.Catalog.AddHistory(bookID, libraryID, "warning",
-			fmt.Sprintf("auto-send skipped: Amazon only accepts EPUB and PDF by email — %q arrived as %s", book.Title, strings.ToUpper(format)))
+	tags, err := s.Catalog.BookTags(j.bookID)
+	if err != nil || !s.autoEligible(d, j.bookID, tags) {
 		return
 	}
-	if info, err := os.Stat(path); err != nil || info.Size() > mailer.MaxAttachmentBytes {
-		_ = s.Catalog.AddHistory(bookID, libraryID, "warning",
-			fmt.Sprintf("auto-send skipped: %q is over Amazon's 50 MB email limit", book.Title))
-		return
+	if !s.Kindle.ClaimSend(d.ID, j.bookID) {
+		return // already sent, or another trigger is sending it
 	}
-
-	for _, d := range targets {
-		acc, err := s.Kindle.ResolveAccount(d.OwnerID)
-		if err != nil {
-			_ = s.Catalog.AddHistory(bookID, libraryID, "warning",
-				fmt.Sprintf("auto-send to %s skipped: %v", d.Name, err))
-			continue
-		}
-		f, err := os.Open(path) //nolint:gosec // library-owned path from the importer
-		if err != nil {
-			_ = s.Catalog.AddHistory(bookID, libraryID, "warning",
-				fmt.Sprintf("auto-send to %s failed: %v", d.Name, err))
-			continue
-		}
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-		att := &mailer.Attachment{Filename: kindleFilename(book.Title, book.Author, format), ContentType: ct, Content: f}
-		err = acc.Send(ctx, d.Email, book.Title, "", att)
-		cancel()
-		f.Close()
-		if err != nil {
-			_ = s.Catalog.AddHistory(bookID, libraryID, "warning",
-				fmt.Sprintf("auto-send to %s failed: %v", d.Name, err))
-			continue
-		}
-		s.Kindle.TouchSent(d.ID)
-		_ = s.Catalog.AddHistory(bookID, libraryID, "sent",
-			fmt.Sprintf("%q → %s (%s), auto", book.Title, d.Name, d.Email))
+	if err := s.sendToKindle(context.Background(), d, j.bookID, true); err != nil {
+		s.Kindle.ReleaseSend(d.ID, j.bookID)
+		_ = s.Catalog.AddHistory(j.bookID, s.Catalog.TheLibrary(), "warning",
+			fmt.Sprintf("auto-send to %s skipped: %v", d.Name, err))
 	}
 }

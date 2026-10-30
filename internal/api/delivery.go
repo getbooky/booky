@@ -141,9 +141,10 @@ func (s *Server) handleCreateUser(w http.ResponseWriter, r *http.Request) {
 		Username string `json:"username"`
 		Password string `json:"password"`
 		Role     string `json:"role"`
-		// LibraryIDs scopes a 'user' account: the libraries they may browse,
-		// add books to, and monitor. Ignored for admins.
-		LibraryIDs []int64 `json:"libraryIds"`
+		// TagIDs are the shared tags the account joins. Its personal tag is
+		// created with it; an account with no shared tags sees only what it
+		// adds for itself.
+		TagIDs []int64 `json:"tagIds"`
 	}
 	if err := decodeJSON(r, &req); err != nil {
 		writeErr(w, http.StatusBadRequest, err)
@@ -156,11 +157,7 @@ func (s *Server) handleCreateUser(w http.ResponseWriter, r *http.Request) {
 	if !s.Auth.Enabled() {
 		req.Role = "admin"
 	}
-	if req.Role == "user" && len(req.LibraryIDs) == 0 {
-		writeErr(w, http.StatusBadRequest, errors.New("pick at least one library this user may access"))
-		return
-	}
-	id, err := s.Auth.CreateUser(req.Username, req.Password, req.Role, req.LibraryIDs)
+	id, err := s.Auth.CreateUser(req.Username, req.Password, req.Role, req.TagIDs)
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, err)
 		return
@@ -168,11 +165,11 @@ func (s *Server) handleCreateUser(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, map[string]int64{"id": id})
 }
 
-// handleSetUserLibraries re-scopes an existing account, so access can be
-// granted or taken away without deleting and recreating the user. It takes
-// effect on the user's next request — grants are read per request, not baked
-// into the session.
-func (s *Server) handleSetUserLibraries(w http.ResponseWriter, r *http.Request) {
+// handleSetUserTags changes which shared tags an account holds, so access can
+// be granted or taken away without recreating the user. It takes effect on
+// the account's next request and on its devices' next sync — tags are read
+// per request, never baked into a session or a device.
+func (s *Server) handleSetUserTags(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAdmin(w, r) {
 		return
 	}
@@ -182,33 +179,21 @@ func (s *Server) handleSetUserLibraries(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	var req struct {
-		LibraryIDs []int64 `json:"libraryIds"`
+		TagIDs []int64 `json:"tagIds"`
 	}
 	if err := decodeJSON(r, &req); err != nil {
 		writeErr(w, http.StatusBadRequest, err)
 		return
 	}
-	users, err := s.Auth.ListUsers()
-	if err != nil {
-		writeErr(w, http.StatusInternalServerError, err)
+	if s.Auth.UserByID(id) == nil {
+		writeErr(w, http.StatusNotFound, errors.New("user not found"))
 		return
 	}
-	for _, u := range users {
-		if u.ID != id {
-			continue
-		}
-		if u.Role == "admin" {
-			writeErr(w, http.StatusBadRequest, errors.New("admins already reach every library"))
-			return
-		}
-		if err := s.Auth.SetUserLibraries(id, req.LibraryIDs); err != nil {
-			writeErr(w, http.StatusBadRequest, err)
-			return
-		}
-		writeJSON(w, http.StatusOK, map[string]any{"libraryIds": req.LibraryIDs})
+	if err := s.Auth.SetUserTags(id, req.TagIDs); err != nil {
+		writeErr(w, http.StatusBadRequest, err)
 		return
 	}
-	writeErr(w, http.StatusNotFound, errors.New("user not found"))
+	writeJSON(w, http.StatusOK, s.Auth.UserByID(id))
 }
 
 func (s *Server) handleDeleteUser(w http.ResponseWriter, r *http.Request) {
@@ -227,47 +212,63 @@ func (s *Server) handleDeleteUser(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
-// ---- library OPDS credentials ----
+// ---- OPDS ----
 
-func (s *Server) handleSetOPDS(w http.ResponseWriter, r *http.Request) {
-	// OPDS credentials are shared by everyone pointing a reader at the feed —
-	// library configuration, not something a scoped user changes.
-	if !s.requireAdmin(w, r) {
+// handleOPDSStatus tells the signed-in account whether its OPDS login is set
+// up and where the feed lives.
+func (s *Server) handleOPDSStatus(w http.ResponseWriter, r *http.Request) {
+	u := s.sessionUser(r)
+	if u == nil {
+		writeErr(w, http.StatusForbidden, errors.New("sign in first"))
 		return
 	}
-	libraryID, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
-	if err != nil {
-		writeErr(w, http.StatusBadRequest, errors.New("bad id"))
+	writeJSON(w, http.StatusOK, map[string]any{
+		"username":   u.Username,
+		"configured": s.Auth.OPDSConfigured(u.ID),
+		"feedPath":   "/opds",
+	})
+}
+
+// handleSetOwnOPDS sets the caller's own OPDS password — the one a reader app
+// stores. Empty turns OPDS off for the account. Each person manages their
+// own: the feed shows exactly their tagged books, so there is nothing for an
+// admin to configure on their behalf.
+func (s *Server) handleSetOwnOPDS(w http.ResponseWriter, r *http.Request) {
+	u := s.sessionUser(r)
+	if u == nil {
+		writeErr(w, http.StatusForbidden, errors.New("sign in first"))
 		return
 	}
 	var req struct {
-		Username string `json:"username"`
 		Password string `json:"password"`
 	}
 	if err := decodeJSON(r, &req); err != nil {
 		writeErr(w, http.StatusBadRequest, err)
 		return
 	}
-	if strings.TrimSpace(req.Username) == "" || len(req.Password) < 8 {
-		writeErr(w, http.StatusBadRequest, errors.New("username required and password must be at least 8 characters"))
+	if err := s.Auth.SetOPDSPassword(u.ID, req.Password); err != nil {
+		writeErr(w, http.StatusBadRequest, err)
 		return
 	}
-	hash, err := auth.HashPassword(req.Password)
+	writeJSON(w, http.StatusOK, map[string]any{"configured": req.Password != ""})
+}
+
+// handleClearUserOPDS lets an admin switch off someone's OPDS login — a lost
+// e-reader, say — without touching their account.
+func (s *Server) handleClearUserOPDS(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAdmin(w, r) {
+		return
+	}
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, err)
+		writeErr(w, http.StatusBadRequest, errors.New("bad id"))
 		return
 	}
-	res, err := s.db.Exec(`UPDATE libraries SET opds_username = ?, opds_password_hash = ? WHERE id = ?`,
-		strings.TrimSpace(req.Username), hash, libraryID)
-	if err != nil {
-		writeErr(w, http.StatusConflict, fmt.Errorf("save credentials: %w", err))
+	if err := s.Auth.SetOPDSPassword(id, ""); err != nil {
+		writeErr(w, http.StatusNotFound, err)
 		return
 	}
-	if n, _ := res.RowsAffected(); n == 0 {
-		writeErr(w, http.StatusNotFound, errors.New("library not found"))
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]string{"feedUrl": fmt.Sprintf("/opds/%d", libraryID)})
+	writeJSON(w, http.StatusOK, map[string]any{"configured": false})
 }
 
 // ---- devices (KoReader) ----
@@ -336,9 +337,9 @@ func (s *Server) handleDevices(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleCreateDevice(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Name      string  `json:"name"`
-		Libraries []int64 `json:"libraryIds"`
-		AutoIDs   []int64 `json:"autoLibraryIds"`
+		Name    string  `json:"name"`
+		TagIDs  []int64 `json:"tagIds"`
+		AutoIDs []int64 `json:"autoTagIds"`
 	}
 	if err := decodeJSON(r, &req); err != nil {
 		writeErr(w, http.StatusBadRequest, err)
@@ -351,21 +352,24 @@ func (s *Server) handleCreateDevice(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// A device's token bypasses session auth by design, so a user must not be
-	// able to mint one that reaches past their own libraries. Both lists are
-	// checked; auto-download is a subset of browsable, but check it anyway
-	// rather than depend on that invariant holding elsewhere.
+	// able to mint one that reaches past their own tags. Both lists are
+	// checked; auto-download is a subset of the device's tags, but check it
+	// anyway rather than depend on that invariant holding elsewhere.
+	// Before the first account exists (the setup wizard) a device is paired
+	// unowned, as it always was; only an admin can see or edit it later.
 	a := s.access(r)
-	for _, libID := range append(append([]int64{}, req.Libraries...), req.AutoIDs...) {
-		if !a.mayLibrary(libID) {
-			writeErr(w, http.StatusForbidden, errForbidden)
-			return
-		}
-	}
 	var ownerID int64
 	if a.user != nil {
 		ownerID = a.user.ID
+	} else if !a.open {
+		writeErr(w, http.StatusForbidden, errors.New("sign in first — devices belong to an account"))
+		return
 	}
-	device, err := s.KoReader.Create(strings.TrimSpace(req.Name), req.Libraries, req.AutoIDs, ownerID)
+	if err := s.ownerHoldsTags(ownerID, append(append([]int64{}, req.TagIDs...), req.AutoIDs...)); err != nil {
+		writeErr(w, http.StatusForbidden, err)
+		return
+	}
+	device, err := s.KoReader.Create(strings.TrimSpace(req.Name), req.TagIDs, req.AutoIDs, ownerID)
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, err)
 		return
@@ -373,7 +377,7 @@ func (s *Server) handleCreateDevice(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, device)
 }
 
-// handleUpdateDevice edits a KoReader device in place: name, libraries,
+// handleUpdateDevice edits a KoReader device in place: name, tags,
 // auto-download flags. The token survives, so the plugin already on the
 // device keeps syncing against the NEW lists immediately (sync responses are
 // computed server-side) — only the zip's own baked lists go stale, fixed by
@@ -391,9 +395,9 @@ func (s *Server) handleUpdateDevice(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
-		Name      string  `json:"name"`
-		Libraries []int64 `json:"libraryIds"`
-		AutoIDs   []int64 `json:"autoLibraryIds"`
+		Name    string  `json:"name"`
+		TagIDs  []int64 `json:"tagIds"`
+		AutoIDs []int64 `json:"autoTagIds"`
 	}
 	if err := decodeJSON(r, &req); err != nil {
 		writeErr(w, http.StatusBadRequest, err)
@@ -401,13 +405,11 @@ func (s *Server) handleUpdateDevice(w http.ResponseWriter, r *http.Request) {
 	}
 	// same rule as pairing, capped by the device's OWNER: its token bypasses
 	// session auth, so it must never reach past the account it belongs to
-	for _, libID := range append(append([]int64{}, req.Libraries...), req.AutoIDs...) {
-		if !s.deviceOwnerMayLibrary(device.OwnerID, a, libID) {
-			writeErr(w, http.StatusForbidden, errForbidden)
-			return
-		}
+	if err := s.ownerHoldsTags(device.OwnerID, append(append([]int64{}, req.TagIDs...), req.AutoIDs...)); err != nil {
+		writeErr(w, http.StatusForbidden, err)
+		return
 	}
-	updated, err := s.KoReader.Update(id, strings.TrimSpace(req.Name), req.Libraries, req.AutoIDs)
+	updated, err := s.KoReader.Update(id, strings.TrimSpace(req.Name), req.TagIDs, req.AutoIDs)
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, err)
 		return
@@ -436,14 +438,7 @@ func (s *Server) handleRevokeDevice(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusNotFound, err)
 		return
 	}
-	// Recorded against one of the device's own libraries so it lands in the
-	// owner's Activity rather than an admin-only install-wide feed — the
-	// person who revokes a reader is usually the person who paired it.
-	var libraryID int64
-	if len(device.Libraries) > 0 {
-		libraryID = device.Libraries[0]
-	}
-	_ = s.Catalog.AddHistory(0, libraryID, "removed",
+	_ = s.Catalog.AddHistory(0, s.Catalog.TheLibrary(), "removed",
 		fmt.Sprintf("device %s revoked — its token stops working immediately", quoteName(device.Name, id)))
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
@@ -486,20 +481,39 @@ func (s *Server) handlePluginZip(w http.ResponseWriter, r *http.Request) {
 
 // ---- KoReader device API (bearer token, no session) ----
 
-// deviceMayAccess re-checks a device's stored libraries against its owner's
-// CURRENT grants. A device token skips session auth entirely, so without this
-// a user whose library access was revoked would keep syncing that library
-// from their e-reader forever. Devices paired before accounts existed carry
-// owner 0 and keep working; a device whose owner was deleted stops.
-func (s *Server) deviceMayAccess(d *koreader.Device, libraryID int64) bool {
-	if !d.MayAccess(libraryID) {
-		return false
-	}
+// deviceTags is what a device may reach RIGHT NOW: its own tags, narrowed to
+// the ones its owner still holds. A device token skips session auth entirely,
+// so without this a person whose tag was taken away would keep syncing those
+// books from their e-reader forever. A device whose owner was deleted
+// reaches nothing. Devices paired before accounts existed carry owner 0 and
+// keep their own tags, as they always have — only an admin can see or edit
+// them.
+func (s *Server) deviceTags(d *koreader.Device) []int64 {
 	if d.OwnerID == 0 || !s.Auth.Enabled() {
-		return true
+		return d.TagIDs
 	}
 	owner := s.Auth.UserByID(d.OwnerID)
-	return owner != nil && owner.MayAccess(libraryID)
+	if owner == nil {
+		return nil
+	}
+	out := []int64{}
+	for _, t := range d.TagIDs {
+		if owner.IsAdmin() || owner.HasTag(t) {
+			out = append(out, t)
+		}
+	}
+	return out
+}
+
+// deviceReach reports whether a device may fetch bookID through tagID: the
+// device carries the tag, its owner holds it, and the book carries it.
+func (s *Server) deviceReach(d *koreader.Device, tagID, bookID int64) bool {
+	for _, t := range s.deviceTags(d) {
+		if t == tagID {
+			return s.Catalog.BookVisible(bookID, []int64{tagID})
+		}
+	}
+	return false
 }
 
 func (s *Server) koreaderDevice(w http.ResponseWriter, r *http.Request) (deviceID int64, ok bool) {
@@ -545,24 +559,39 @@ func (s *Server) handleKoSync(w http.ResponseWriter, r *http.Request) {
 		Format     string   `json:"format"`
 		SizeBytes  int64    `json:"sizeBytes"`
 	}
+	// The plugin keys what it has downloaded by "book:libraryId" and fetches
+	// /download/{libraryId}/{book}. Libraries became tags of the same id, so
+	// that field now carries the tag the device reaches the book through —
+	// a plugin already on a device sees exactly the keys it stored before
+	// and never re-downloads a book it has. An auto-download tag wins, so the
+	// plugin's auto[] lookup still fires for it.
+	tags := s.deviceTags(device)
 	books := []syncBook{}
-	for _, libID := range device.Libraries {
-		if !s.deviceMayAccess(device, libID) {
-			continue
-		}
-		list, err := s.Catalog.ListBooks(0, libID, 0)
-		if err != nil {
-			continue
-		}
-		for _, b := range list {
-			if b.FilePath == "" {
-				continue
+	if len(tags) > 0 {
+		list, err := s.Catalog.ListBooks(0, 0, 0)
+		if err == nil {
+			for _, b := range list {
+				if b.FilePath == "" {
+					continue
+				}
+				via := int64(0)
+				for _, t := range tags {
+					if !containsID(b.Tags, t) {
+						continue
+					}
+					if via == 0 || (device.AutoFor(t) && !device.AutoFor(via)) {
+						via = t
+					}
+				}
+				if via == 0 {
+					continue
+				}
+				books = append(books, syncBook{
+					ID: b.ID, LibraryID: via, Title: b.Title, Author: b.Author,
+					SeriesName: b.SeriesName, SeriesNum: b.SeriesNum, Genres: b.Genres,
+					Filename: filepath.Base(b.FilePath), Format: b.FileFormat, SizeBytes: b.FileSize,
+				})
 			}
-			books = append(books, syncBook{
-				ID: b.ID, LibraryID: libID, Title: b.Title, Author: b.Author,
-				SeriesName: b.SeriesName, SeriesNum: b.SeriesNum, Genres: b.Genres,
-				Filename: filepath.Base(b.FilePath), Format: b.FileFormat, SizeBytes: b.FileSize,
-			})
 		}
 	}
 	s.KoReader.TouchSync(device.ID)
@@ -579,15 +608,14 @@ func (s *Server) handleKoDownload(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusUnauthorized, errors.New("unknown device"))
 		return
 	}
-	libraryID, err1 := strconv.ParseInt(r.PathValue("libraryId"), 10, 64)
+	// the path's first id is the tag the sync named (see handleKoSync)
+	tagID, err1 := strconv.ParseInt(r.PathValue("libraryId"), 10, 64)
 	bookID, err2 := strconv.ParseInt(r.PathValue("bookId"), 10, 64)
-	if err1 != nil || err2 != nil || !s.deviceMayAccess(device, libraryID) {
+	if err1 != nil || err2 != nil || !s.deviceReach(device, tagID, bookID) {
 		http.NotFound(w, r)
 		return
 	}
-	var path string
-	err = s.db.QueryRow(`SELECT COALESCE(file_path, '') FROM library_books
-		WHERE library_id = ? AND book_id = ?`, libraryID, bookID).Scan(&path)
+	path, _, err := s.shelfFile(bookID)
 	if err != nil || path == "" {
 		http.NotFound(w, r)
 		return
@@ -612,15 +640,9 @@ func (s *Server) handleKoCover(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusUnauthorized, errors.New("unknown device"))
 		return
 	}
-	libraryID, err1 := strconv.ParseInt(r.PathValue("libraryId"), 10, 64)
+	tagID, err1 := strconv.ParseInt(r.PathValue("libraryId"), 10, 64)
 	bookID, err2 := strconv.ParseInt(r.PathValue("bookId"), 10, 64)
-	if err1 != nil || err2 != nil || !s.deviceMayAccess(device, libraryID) {
-		http.NotFound(w, r)
-		return
-	}
-	var n int
-	if err := s.db.QueryRow(`SELECT COUNT(*) FROM library_books
-		WHERE library_id = ? AND book_id = ?`, libraryID, bookID).Scan(&n); err != nil || n == 0 {
+	if err1 != nil || err2 != nil || !s.deviceReach(device, tagID, bookID) {
 		http.NotFound(w, r)
 		return
 	}
@@ -814,4 +836,13 @@ func scheduleExit() {
 		log.Printf("restarting on request")
 		os.Exit(0)
 	}()
+}
+
+func containsID(ids []int64, id int64) bool {
+	for _, x := range ids {
+		if x == id {
+			return true
+		}
+	}
+	return false
 }

@@ -29,7 +29,12 @@ func Open(path string) (*sql.DB, error) {
 	return conn, nil
 }
 
-func migrate(conn *sql.DB) error {
+func migrate(conn *sql.DB) error { return migrateUntil(conn, "") }
+
+// migrateUntil applies pending migrations in order, stopping before the
+// first one named `stop` or later ("" applies everything). Tests use it to
+// build a database as an older release left it.
+func migrateUntil(conn *sql.DB, stop string) error {
 	if _, err := conn.Exec(`CREATE TABLE IF NOT EXISTS schema_migrations (
 		name TEXT PRIMARY KEY,
 		applied_at TEXT NOT NULL DEFAULT (datetime('now'))
@@ -44,6 +49,9 @@ func migrate(conn *sql.DB) error {
 	sort.Strings(entries)
 
 	for _, name := range entries {
+		if stop != "" && name >= stop {
+			break
+		}
 		var applied int
 		if err := conn.QueryRow(`SELECT COUNT(*) FROM schema_migrations WHERE name = ?`, name).Scan(&applied); err != nil {
 			return err
