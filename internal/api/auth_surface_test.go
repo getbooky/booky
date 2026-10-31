@@ -61,9 +61,11 @@ func TestEveryRouteRefusesUnauthenticated(t *testing.T) {
 		}
 	}
 
-	// OPDS carries its own per-library credentials — but none presented is
+	// OPDS signs in with Basic credentials of its own — none presented is
 	// still a refusal, never a feed
-	for _, p := range []string{"/opds", "/opds/download/1", "/opds/cover/1"} {
+	for _, p := range []string{"/opds", "/opds/download/1", "/opds/cover/1", "/opds/all", "/opds/recent",
+		"/opds/authors", "/opds/authors/1", "/opds/series", "/opds/series/1", "/opds/tags", "/opds/tags/1",
+		"/opds/search?q=a", "/opds/opensearch.xml"} {
 		req := httptest.NewRequest("GET", p, nil)
 		w := httptest.NewRecorder()
 		h.ServeHTTP(w, req)

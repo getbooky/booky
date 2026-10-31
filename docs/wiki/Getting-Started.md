@@ -30,7 +30,7 @@ root to them.
 ## First run
 
 Open `http://<server>:8787`. The wizard opens with the one required step —
-creating your admin account — then walks through libraries → metadata →
+creating your admin account — then walks through the library → metadata →
 quality profile → sources → SABnzbd → watched lists → e-readers → Send to
 Kindle. Everything after the account is skippable, per-step or entirely —
 wizard fields are ordinary settings and live in Settings afterwards. The
@@ -46,12 +46,12 @@ passwords are bcrypt-hashed, session and device tokens are stored as hashes,
 and credentials Booky must present elsewhere — SMTP passwords for Send to
 Kindle, provider tokens and API keys — are write-only (never shown again in
 the UI or API) and encrypted under a key kept outside the database. A stolen
-database or backup yields none of them. OPDS feeds and KoReader devices use
-their own per-library credentials, never your account — see
+database or backup yields none of them. OPDS signs in with your Booky login;
+KoReader devices carry their own token — see
 [Reading and Devices](Reading-and-Devices.md).
 
-Roles and per-library access are covered in
-[Libraries and Users](Libraries-and-Users.md).
+Roles and sharing with tags are covered in
+[Library, Tags and Users](Libraries-and-Users.md).
 
 ## Remote access
 
