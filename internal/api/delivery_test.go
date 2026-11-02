@@ -194,7 +194,18 @@ func TestOPDSFeedAndDownload(t *testing.T) {
 		t.Fatalf("a wrong password opened OPDS: %d", rec.Code)
 	}
 
+	// the start page leads everywhere
 	rec = opdsGet(h, "/opds", "sam", "web passphrase")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("start page: %d %s", rec.Code, rec.Body)
+	}
+	for _, want := range []string{"/opds/all", "/opds/recent", "/opds/authors", "/opds/series", "/opds/tags", "/opds/opensearch.xml"} {
+		if !strings.Contains(rec.Body.String(), want) {
+			t.Fatalf("start page missing %q:\n%s", want, rec.Body)
+		}
+	}
+
+	rec = opdsGet(h, "/opds/all", "sam", "web passphrase")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("feed: %d %s", rec.Code, rec.Body)
 	}
@@ -205,8 +216,51 @@ func TestOPDSFeedAndDownload(t *testing.T) {
 			t.Fatalf("feed missing %q:\n%s", want, feedXML)
 		}
 	}
-	if strings.Contains(feedXML, "Haze") {
-		t.Fatal("the feed listed a book outside the account's tags")
+
+	// every list, index and search is built from the account's own books:
+	// Haze (by Nora Vale, shared through a tag sam doesn't hold) is nowhere
+	for _, path := range []string{"/opds/all", "/opds/recent", "/opds/authors", "/opds/series", "/opds/tags",
+		"/opds/search?q=haze", "/opds/search?q=nora"} {
+		rec := opdsGet(h, path, "sam", "web passphrase")
+		if rec.Code != http.StatusOK {
+			t.Fatalf("%s: %d %s", path, rec.Code, rec.Body)
+		}
+		if strings.Contains(rec.Body.String(), "Haze") || strings.Contains(rec.Body.String(), "Nora Vale") {
+			t.Fatalf("%s leaked a book outside the account's tags:\n%s", path, rec.Body)
+		}
+	}
+	otherBook, _ := srv.Catalog.GetBook(other)
+	for _, path := range []string{
+		"/opds/authors/" + intToStr(otherBook.AuthorID),
+		"/opds/tags/" + intToStr(private),
+	} {
+		if rec := opdsGet(h, path, "sam", "web passphrase"); rec.Code != http.StatusNotFound {
+			t.Fatalf("%s outside the account's tags: %d", path, rec.Code)
+		}
+	}
+
+	// browsing and search find sam's book
+	book, _ := srv.Catalog.GetBook(bookID)
+	for _, path := range []string{
+		"/opds/authors/" + intToStr(book.AuthorID),
+		"/opds/series/" + intToStr(*book.SeriesID),
+		"/opds/tags/" + intToStr(tag),
+		"/opds/search?q=vault+hale",
+	} {
+		rec := opdsGet(h, path, "sam", "web passphrase")
+		if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "<title>Burrow</title>") {
+			t.Fatalf("%s should list Burrow: %d\n%s", path, rec.Code, rec.Body)
+		}
+	}
+	rec = opdsGet(h, "/opds/authors", "sam", "web passphrase")
+	if !strings.Contains(rec.Body.String(), "/opds/authors/"+intToStr(book.AuthorID)) {
+		t.Fatalf("author index missing sam's author:\n%s", rec.Body)
+	}
+	if rec := opdsGet(h, "/opds/opensearch.xml", "sam", "web passphrase"); !strings.Contains(rec.Body.String(), "/opds/search?q={searchTerms}") {
+		t.Fatalf("opensearch description: %d %s", rec.Code, rec.Body)
+	}
+	if rec := opdsGet(h, "/opds/search?q=burrow", "", ""); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("search without credentials: %d", rec.Code)
 	}
 
 	rec = opdsGet(h, "/opds/download/"+intToStr(bookID), "sam", "web passphrase")

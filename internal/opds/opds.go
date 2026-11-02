@@ -8,14 +8,12 @@ import (
 	"database/sql"
 	"encoding/xml"
 	"fmt"
-	"log"
 	"net"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/getbooky/booky/internal/auth"
 	"github.com/getbooky/booky/internal/catalog"
@@ -34,7 +32,17 @@ func New(db *sql.DB, cat *catalog.Store, covers *catalog.CoverCache, accounts *a
 
 // Register mounts the OPDS routes on mux.
 func (h *Handler) Register(mux *http.ServeMux) {
-	mux.HandleFunc("GET /opds", h.handleFeed)
+	mux.HandleFunc("GET /opds", h.handleRoot)
+	mux.HandleFunc("GET /opds/all", h.handleAll)
+	mux.HandleFunc("GET /opds/recent", h.handleRecent)
+	mux.HandleFunc("GET /opds/authors", h.handleAuthors)
+	mux.HandleFunc("GET /opds/authors/{id}", h.handleAuthor)
+	mux.HandleFunc("GET /opds/series", h.handleSeriesIndex)
+	mux.HandleFunc("GET /opds/series/{id}", h.handleSeries)
+	mux.HandleFunc("GET /opds/tags", h.handleTags)
+	mux.HandleFunc("GET /opds/tags/{id}", h.handleTag)
+	mux.HandleFunc("GET /opds/search", h.handleSearch)
+	mux.HandleFunc("GET /opds/opensearch.xml", h.handleOpenSearch)
 	mux.HandleFunc("GET /opds/download/{bookId}", h.handleDownload)
 	mux.HandleFunc("GET /opds/cover/{bookId}", h.handleCover)
 	// the per-library feeds that came before tags: answer reader apps still
@@ -85,14 +93,16 @@ func (h *Handler) mayRead(u *auth.User, b *catalog.Book) bool {
 // ---- feed rendering ----
 
 type feed struct {
-	XMLName xml.Name `xml:"feed"`
-	Xmlns   string   `xml:"xmlns,attr"`
-	XmlnsDC string   `xml:"xmlns:dc,attr"`
-	ID      string   `xml:"id"`
-	Title   string   `xml:"title"`
-	Updated string   `xml:"updated"`
-	Links   []link   `xml:"link"`
-	Entries []entry  `xml:"entry"`
+	XMLName    xml.Name `xml:"feed"`
+	Xmlns      string   `xml:"xmlns,attr"`
+	XmlnsDC    string   `xml:"xmlns:dc,attr"`
+	XmlnsOS    string   `xml:"xmlns:opensearch,attr"`
+	TotalItems int      `xml:"opensearch:totalResults,omitempty"`
+	ID         string   `xml:"id"`
+	Title      string   `xml:"title"`
+	Updated    string   `xml:"updated"`
+	Links      []link   `xml:"link"`
+	Entries    []entry  `xml:"entry"`
 }
 
 type link struct {
@@ -105,6 +115,7 @@ type entry struct {
 	ID       string   `xml:"id"`
 	Title    string   `xml:"title"`
 	Updated  string   `xml:"updated"`
+	Content  *text    `xml:"content,omitempty"` // navigation entries' one-line blurb
 	Authors  []person `xml:"author"`
 	Series   string   `xml:"dc:extent,omitempty"` // human-readable series label
 	Language string   `xml:"dc:language,omitempty"`
@@ -137,81 +148,6 @@ func mimeFor(format string) string {
 		return m
 	}
 	return "application/octet-stream"
-}
-
-func (h *Handler) handleFeed(w http.ResponseWriter, r *http.Request) {
-	u, ok := h.authorize(w, r)
-	if !ok {
-		return
-	}
-	books, err := h.catalog.ListBooks(0, 0, 0)
-	if err != nil {
-		http.Error(w, "feed unavailable", http.StatusInternalServerError)
-		return
-	}
-
-	self := "/opds"
-	now := time.Now().UTC().Format(time.RFC3339)
-	f := feed{
-		Xmlns:   "http://www.w3.org/2005/Atom",
-		XmlnsDC: "http://purl.org/dc/terms/",
-		ID:      "urn:booky:user:" + strconv.FormatInt(u.ID, 10),
-		Title:   u.Username + "'s books — Booky",
-		Updated: now,
-		Links: []link{
-			{Rel: "self", Href: self, Type: "application/atom+xml;profile=opds-catalog;kind=acquisition"},
-			{Rel: "start", Href: self, Type: "application/atom+xml;profile=opds-catalog;kind=acquisition"},
-		},
-	}
-	for _, b := range books {
-		if b.FilePath == "" {
-			continue // shelf only — wanted books aren't downloadable
-		}
-		if !h.mayRead(u, &b) {
-			continue
-		}
-		e := entry{
-			ID:       fmt.Sprintf("urn:booky:book:%d", b.ID),
-			Title:    b.Title,
-			Updated:  now,
-			Authors:  []person{{Name: b.Author}},
-			Language: b.Language,
-			Links: []link{
-				{
-					Rel:  "http://opds-spec.org/acquisition",
-					Href: fmt.Sprintf("%s/download/%d", self, b.ID),
-					Type: mimeFor(b.FileFormat),
-				},
-			},
-		}
-		if b.SeriesName != "" {
-			label := b.SeriesName
-			if b.SeriesNum != 0 {
-				label = fmt.Sprintf("%s #%g", b.SeriesName, b.SeriesNum)
-			}
-			e.Series = label
-		}
-		if b.Description != "" {
-			e.Summary = &text{Type: "text", Body: b.Description}
-		}
-		if h.covers.Path(b.ID) != "" {
-			cover := fmt.Sprintf("%s/cover/%d", self, b.ID)
-			e.Links = append(e.Links,
-				link{Rel: "http://opds-spec.org/image", Href: cover, Type: "image/jpeg"},
-				link{Rel: "http://opds-spec.org/image/thumbnail", Href: cover, Type: "image/jpeg"},
-			)
-		}
-		f.Entries = append(f.Entries, e)
-	}
-
-	w.Header().Set("Content-Type", "application/atom+xml;profile=opds-catalog;kind=acquisition; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	if _, err := w.Write([]byte(xml.Header)); err != nil {
-		return
-	}
-	if err := xml.NewEncoder(w).Encode(f); err != nil {
-		log.Printf("opds: encode feed: %v", err)
-	}
 }
 
 // fileFor returns a book's file if the account may read it. Every download

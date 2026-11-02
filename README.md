@@ -7,7 +7,7 @@
 **Ebook automation for your shelf.**
 
 Watch your Goodreads/Hardcover lists, grab new books the moment they appear or release,
-file them into per-person libraries with clean embedded metadata, and read them anywhere —
+file them into one library shared with tags, with clean embedded metadata, and read them anywhere —
 in the browser, over OPDS, or synced straight to KoReader. One Docker container, no external database.
 
 ![Go 1.26](https://img.shields.io/badge/Go-1.26-00ADD8?logo=go&logoColor=white)
@@ -26,7 +26,7 @@ The full manual lives in [the wiki](https://github.com/getbooky/booky/wiki).
 Readarr-style apps break down on book metadata (box sets shown as books, missing
 releases, series chaos). Booky models Author → Series → Book → Editions correctly,
 cross-links Goodreads + Hardcover + ISBN identities, and folds the library manager
-(metadata writing, per-person libraries, OPDS, KoReader sync) into the same app —
+(metadata writing, sharing with tags, OPDS, KoReader sync) into the same app —
 so the whole loop is: add a book to your list, it shows up on your e-reader minutes later.
 
 ## A look around
@@ -68,7 +68,7 @@ so the whole loop is: add a book to your list, it shows up on your e-reader minu
 - **Acquisition** — indexers via Prowlarr, plus built-in Anna's Archive and
   Z-Library direct downloads. Each source can be toggled on/off, mirror lists
   are editable pills, and a Source Priority card sets the order they're tried.
-  Format-first ranking with per-library quality profiles and cutoff upgrades.
+  Format-first ranking with a quality profile and cutoff upgrades.
 - **Failure handling that keeps going** — a failed download blocklists that
   release and automatically cascades to the next-best candidate until
   something imports or the options run out. Import failures show their reason
@@ -89,14 +89,14 @@ so the whole loop is: add a book to your list, it shows up on your e-reader minu
   shelf narrows live as you type. Smart scopes (Recently added, Missing,
   Upgrade wanted) and your own saved scopes live in the sidebar.
 - **Read it right there** — a built-in EPUB reader (foliate-js) with per-user
-  reading positions that sync across devices. Or point any OPDS reader at a
-  library's feed.
-- **Per-person libraries** — each library is a root folder with its own
-  quality profile and its own OPDS feed (HTTP basic auth, works with any OPDS
-  reader). Imports are hardlink + rename: atomic, instant, no duplicate bytes
-  across libraries.
+  reading positions that sync across devices. Or point any OPDS reader at your
+  own catalog — browse by author, series and tag, or search — signing in with
+  your usual Booky login.
+- **One library, shared with tags** — every book lives once on disk, and tags
+  decide who sees it ("Kids", "Household", plus everyone's own "My shelf").
+  The web app, OPDS, KoReader and Kindle all follow the same rule.
 - **KoReader devices** — build a preconfigured plugin zip per device; it syncs
-  over wifi and auto-downloads new arrivals from the libraries you chose.
+  over wifi and auto-downloads new arrivals with the tags you chose.
   Revoke a device and its token dies instantly.
 - **Send to Kindle** — email a book (EPUB/PDF) straight to a Kindle's
   @kindle.com address, Calibre-style, with optional auto-send on import.
@@ -106,7 +106,7 @@ so the whole loop is: add a book to your list, it shows up on your e-reader minu
   denser grids, and safe-area-aware layout. Pair it with Tailscale and your
   whole library is a tap away from anywhere.
 - **The boring essentials** — local accounts (bcrypt, rate-limited login,
-  admin/user roles with per-library access), weekly zipped backups with
+  admin/user roles, sharing with tags), weekly zipped backups with
   one-click restore, health checks, in-app logs, first-run wizard.
 
 ## Running (unraid / Docker)
@@ -136,27 +136,26 @@ docker run -d --name booky \
   paths and variables. PUID 99 / PGID 100 are the unraid defaults.
 
 Then open `http://<server>:8787`. The first-run wizard opens with the one
-required step — creating your admin account — then walks through libraries →
+required step — creating your admin account — then walks through the library →
 metadata → quality profile → sources → SABnzbd → watched lists → e-readers →
 Send to Kindle. Everything after the account is skippable and lives in
 Settings afterward.
 
 **Auth model**: creating the admin account is the wizard's first, mandatory
 step — the API is open only for that brief first-run window and locks the
-moment the account exists. OPDS feeds and KoReader devices use their own
-credentials, never your account.
+moment the account exists. OPDS signs in with your Booky login; KoReader
+devices carry their own token.
 
-**Roles**: admins run the install. A `user` is given a specific set of
-libraries when you create them and only ever sees those: inside them they can
-browse, search and add books, refresh metadata, monitor authors and series,
-and pair their own e-reader — but not edit metadata by hand, delete anything,
-or open Settings. Change a user's libraries any time from Settings → Users;
-it takes effect on their next click. Authors and series follow the books — add
-a book to someone's library and its author and series show up for them too.
-Series are shelved with **Add series to library**, which names the library it
-goes into — a user only sees the libraries assigned to them, and is not asked
-at all when they have just one. Users can take a book back off their own shelf;
-deleting files and blocklisting stay with the admin.
+**Roles**: admins run the install and see every book. A `user` sees the books
+shared with their tags plus what they add for themselves ("My shelf"): they can
+browse, search and add books, refresh metadata, grab releases and pair their
+own e-readers — but not edit metadata by hand, delete files, change tags, or
+open the install's settings. Give someone tags from Settings → Users or
+Settings → Tags; it takes effect on their next click and their devices' next
+sync. Authors and series follow the books, and "Remove" for a user takes a
+book off their own shelf only. See
+[Library, Tags and Users](docs/wiki/Libraries-and-Users.md) — including how an
+install with several libraries upgrades.
 
 **Remote access**: Booky pairs well with Tailscale — run the container as a
 tailnet node (Booky listens on 8787 inside the container) and reach it by
@@ -171,7 +170,7 @@ MagicDNS name from your phone; add it to your home screen as a PWA.
 | Prowlarr | Settings → Sources | URL + API key; indexers sync automatically |
 | SABnzbd | Settings → Download Clients | completed folder must live under `/data` |
 | Anna's / Z-Library | Settings → Sources | optional accounts; toggle sources and edit mirrors |
-| OPDS reader | Settings → Libraries → set credentials | feed at `/opds/<library id>`; row shows a ✓ once configured |
+| OPDS reader | Settings → Account | copy the feed address; sign in with your Booky username and password |
 | KoReader | Settings → KoReader Devices | set the Server URL, download the zip, drop `booky.koplugin/` into KOReader's `plugins/` folder |
 
 ## Development
