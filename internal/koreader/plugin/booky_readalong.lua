@@ -154,6 +154,13 @@ function U.nextWake(units, i, pos, streamEnd)
     return math.min(5, math.max(0.05, nextAt - pos))
 end
 
+-- formatSize writes a byte count for people: "740 MB", "1.2 GB".
+function U.formatSize(bytes)
+    if bytes >= 1024 ^ 3 then return string.format("%.1f GB", bytes / 1024 ^ 3) end
+    if bytes >= 1024 ^ 2 then return string.format("%.0f MB", bytes / 1024 ^ 2) end
+    return string.format("%.0f KB", math.max(bytes, 0) / 1024)
+end
+
 -- validManifest checks what the server sent before anything trusts it.
 function U.validManifest(m)
     if type(m) ~= "table" or type(m.audio) ~= "table" or m.audio.format ~= "s16le"
@@ -405,6 +412,70 @@ function M.new(plugin)
             end)
         end
         step()
+    end
+
+    -- audioBytes is how much space a book's downloaded audio takes.
+    function RA:audioBytes(book_id)
+        local dir, total = self:dir(book_id), 0
+        if not dir or lfs.attributes(dir, "mode") ~= "directory" then return 0 end
+        for name in lfs.dir(dir) do
+            if name:match("%.pcm") then
+                total = total + (lfs.attributes(dir .. "/" .. name, "size") or 0)
+            end
+        end
+        return total
+    end
+
+    -- removeAudio deletes a book's downloaded audio (finished and partial
+    -- chunks), keeping the read-along copy and its manifest: pressing play
+    -- later downloads what's needed again.
+    function RA:removeAudio(book_id)
+        if self.player and self.player.book_id == book_id then self.player:stop(true) end
+        local dir = self:dir(book_id)
+        if not dir or lfs.attributes(dir, "mode") ~= "directory" then return end
+        for name in lfs.dir(dir) do
+            if name:match("^%d%d%d%d%.pcm") then os.remove(dir .. "/" .. name) end
+        end
+    end
+
+    -- forget drops everything the read-along at path left on the device:
+    -- its audio folder and its entry. The plain copy of the book is a
+    -- different file and is never touched.
+    function RA:forget(path)
+        local info = self:bookFor(path)
+        if not info then return end
+        self:removeAudio(info.id)
+        local dir = self:dir(info.id)
+        if dir then
+            os.remove(dir .. "/manifest.json")
+            os.remove(dir)
+        end
+        local known = self:known()
+        known[path] = nil
+        self.settings:saveSetting("readalong_books", known)
+        self.settings:flush()
+    end
+
+    -- removeReadAlong deletes the read-along copy (and KOReader's notes for
+    -- it) along with its audio.
+    function RA:removeReadAlong(path)
+        self:forget(path)
+        os.remove(path)
+        local sdr = path:gsub("%.epub$", "") .. ".sdr"
+        if lfs.attributes(sdr, "mode") == "directory" then
+            for name in lfs.dir(sdr) do
+                if name ~= "." and name ~= ".." then os.remove(sdr .. "/" .. name) end
+            end
+            os.remove(sdr)
+        end
+    end
+
+    -- sweep forgets read-alongs whose copy was deleted some other way (the
+    -- file browser's own Delete), so their audio doesn't sit there unseen.
+    function RA:sweep()
+        for path, _info in pairs(self:known()) do
+            if lfs.attributes(path, "mode") ~= "file" then self:forget(path) end
+        end
     end
 
     function RA:audioReady(book_id)

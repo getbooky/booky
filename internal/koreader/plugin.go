@@ -146,6 +146,14 @@ function Booky:init()
     if self.ui and self.ui.document then
         self.player = self.readalong:attach(self.ui)
     end
+    -- in the file browser: read-along actions on a long-press, and audio
+    -- left behind by a read-along deleted with the browser's own Delete
+    if self.ui and not self.ui.document and self.ui.addFileDialogButtons then
+        self.readalong:sweep()
+        self.ui:addFileDialogButtons("booky_readalong", function(file, is_file)
+            return self:readAlongFileButtons(file, is_file)
+        end)
+    end
     self.cover_cache = DataStorage:getFullDataDir() .. "/cache/booky-covers"
     self._cover_miss = {}
     self._menus = {}
@@ -272,6 +280,63 @@ function Booky:onBookyReadAlongForward()
     return true
 end
 
+-- closeFileDialog closes the long-press dialog the buttons sit in (the file
+-- browser's, or History's or Collections', whichever is up).
+local function closeFileDialog()
+    local ok, FileManager = pcall(require, "apps/filemanager/filemanager")
+    local fm = ok and FileManager.instance
+    if fm and fm.file_chooser and fm.file_chooser.file_dialog then
+        UIManager:close(fm.file_chooser.file_dialog)
+    end
+    for _k, mod in ipairs({ "history", "collections", "filesearcher" }) do
+        local m = fm and fm[mod]
+        if m and m.file_dialog then UIManager:close(m.file_dialog) end
+    end
+end
+
+-- readAlongFileButtons adds, for a read-along copy, a row to the long-press
+-- menu: free its audio, or remove the read-along. The plain copy of the
+-- book is a different file and stays.
+function Booky:readAlongFileButtons(file, is_file)
+    if not is_file or not self.readalong:bookFor(file) then return nil end
+    local info = self.readalong:bookFor(file)
+    local bytes = self.readalong:audioBytes(info.id)
+    local refresh = function()
+        local ok, FileManager = pcall(require, "apps/filemanager/filemanager")
+        if ok and FileManager.instance and FileManager.instance.onRefresh then FileManager.instance:onRefresh() end
+    end
+    return {
+        {
+            text = _("Free read-along audio") .. (bytes > 0 and (" (" .. ReadAlong.util.formatSize(bytes) .. ")") or ""),
+            enabled = bytes > 0,
+            callback = function()
+                closeFileDialog()
+                self.readalong:removeAudio(info.id)
+                UIManager:show(InfoMessage:new{
+                    text = _("Booky: freed ") .. ReadAlong.util.formatSize(bytes)
+                        .. _(". The read-along stays — pressing play downloads the audio it needs again."),
+                    timeout = 4,
+                })
+            end,
+        },
+        {
+            text = _("Remove read-along"),
+            callback = function()
+                closeFileDialog()
+                UIManager:show(ConfirmBox:new{
+                    text = _("Remove the read-along copy of ") .. (info.title or _("this book"))
+                        .. _(" and its audio?") .. "\n\n" .. _("Your own copy of the book stays as it is."),
+                    ok_text = _("Remove"),
+                    ok_callback = function()
+                        self.readalong:removeReadAlong(file)
+                        refresh()
+                    end,
+                })
+            end,
+        },
+    }
+end
+
 function Booky:readAlongMenu()
     local p = self.player
     return {
@@ -318,6 +383,19 @@ function Booky:readAlongMenu()
                         self.settings:saveSetting("readalong_delay", p.delay)
                     end },
                 },
+            },
+            {
+                text_func = function()
+                    local bytes = self.readalong:audioBytes(p.book_id)
+                    return _("Free the downloaded audio") .. (bytes > 0 and (" (" .. ReadAlong.util.formatSize(bytes) .. ")") or "")
+                end,
+                enabled_func = function() return self.readalong:audioBytes(p.book_id) > 0 end,
+                help_text = _("Deletes this book's audio from the device. The read-along stays; pressing play downloads what it needs again."),
+                callback = function()
+                    local bytes = self.readalong:audioBytes(p.book_id)
+                    self.readalong:removeAudio(p.book_id)
+                    UIManager:show(InfoMessage:new{ text = _("Booky: freed ") .. ReadAlong.util.formatSize(bytes), timeout = 3 })
+                end,
             },
             {
                 text_func = function()

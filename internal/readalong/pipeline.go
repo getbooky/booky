@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 )
 
 // Files inside a built read-along directory.
@@ -86,29 +87,77 @@ func (t Tools) Build(ctx context.Context, j Job) (*Result, error) {
 		return nil, err
 	}
 
-	// cutting is quick; recognising speech is where the time goes, so it
-	// gets most of the progress bar
+	// Each part is cut and listened to on its own, several at once: speech
+	// recognition is where the time goes, and it keeps one core busy per
+	// part. Results land by index, so the words come out in order however
+	// the parts finish.
+	chunks := make([]Chunk, len(spans))
+	heard := make([][]Word, len(spans))
+	workers := t.Workers
+	if workers < 1 {
+		workers = 1
+	}
+	workers = min(workers, len(spans))
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	var (
+		mu       sync.Mutex
+		firstErr error
+		doneSecs float64
+		doneN    int
+		wg       sync.WaitGroup
+	)
+	next := make(chan int)
+	progress(fmt.Sprintf("Listening to %d parts", len(spans)), 0)
+	for w := 0; w < workers; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := range next {
+				sp := spans[i]
+				name := fmt.Sprintf("%04d.mp3", i+1)
+				dst := filepath.Join(tmp, ChunkDir, name)
+				err := t.EncodeChunk(ctx, j.Audio, j.Format, sp, dst)
+				var words []Word
+				if err == nil {
+					words, err = t.Transcribe(ctx, dst, sp.Start)
+				}
+				mu.Lock()
+				if err != nil {
+					if firstErr == nil {
+						firstErr = err
+						cancel()
+					}
+				} else {
+					heard[i] = words
+					chunks[i] = Chunk{File: name, Start: sp.Start, Duration: sp.Duration}
+					doneSecs += sp.Duration
+					doneN++
+					progress(fmt.Sprintf("Listening: %d of %d parts done", doneN, len(spans)), doneSecs/probe.Duration)
+				}
+				mu.Unlock()
+			}
+		}()
+	}
+feed:
+	for i := range spans {
+		select {
+		case next <- i:
+		case <-ctx.Done():
+			break feed
+		}
+	}
+	close(next)
+	wg.Wait()
+	if firstErr != nil {
+		return nil, firstErr
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	var words []Word
-	var chunks []Chunk
-	for i, sp := range spans {
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
-		before := sp.Start / probe.Duration
-		share := sp.Duration / probe.Duration
-		progress(fmt.Sprintf("Listening to part %d of %d", i+1, len(spans)), before)
-		name := fmt.Sprintf("%04d.mp3", i+1)
-		dst := filepath.Join(tmp, ChunkDir, name)
-		if err := t.EncodeChunk(ctx, j.Audio, j.Format, sp, dst); err != nil {
-			return nil, err
-		}
-		progress(fmt.Sprintf("Listening to part %d of %d", i+1, len(spans)), before+share*0.1)
-		heard, err := t.Transcribe(ctx, dst, sp.Start)
-		if err != nil {
-			return nil, err
-		}
-		words = append(words, heard...)
-		chunks = append(chunks, Chunk{File: name, Start: sp.Start, Duration: sp.Duration})
+	for _, h := range heard {
+		words = append(words, h...)
 	}
 
 	progress("Lining up the text", 0.99)

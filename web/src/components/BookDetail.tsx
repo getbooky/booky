@@ -435,6 +435,12 @@ export function BookDetail({ book: initial, onBack, onChanged, onRead, onReadAlo
     }
   }
 
+  // reloadBook re-reads the book from Booky — no provider lookup, no toast —
+  // for when something else changed it (an audiobook arriving, a grab)
+  const reloadBook = async () => {
+    try { setBook(withContext(await api.book(book.id))) } catch { /* keep what's shown */ }
+  }
+
   const refresh = async () => {
     toast("Refreshing metadata…")
     try {
@@ -782,7 +788,7 @@ export function BookDetail({ book: initial, onBack, onChanged, onRead, onReadAlo
       {book.libraryId ? <SharedWith book={book} onChange={tagIds => setBook({ ...book, tagIds })} /> : null}
 
       {format === "audiobook" && book.libraryId
-        ? <AudiobookCard book={book} onReadAlong={b => onReadAlong?.(b)} onChanged={() => void refresh()} />
+        ? <AudiobookCard book={book} onReadAlong={b => onReadAlong?.(b)} onChanged={() => void reloadBook()} />
         : null}
 
       {format === "ebook" && book.filePath && (
@@ -813,10 +819,10 @@ export function BookDetail({ book: initial, onBack, onChanged, onRead, onReadAlo
         bookId={book.id} bookTitle={book.title} defaultLibraryId={book.libraryId}
         onImported={() => { refresh(); onChanged() }} />
       <ReleasesDialog book={searchOpen ? book : null} open={searchOpen} onOpenChange={setSearchOpen}
-        onGrabbed={() => { toast("Watch Activity for progress"); refresh(); onChanged() }} />
+        onGrabbed={() => { toast("Watch Activity for progress"); void reloadBook(); onChanged() }} />
       <ReleasesDialog kind="audiobook" book={audioSearchOpen ? book : null} open={audioSearchOpen}
         onOpenChange={setAudioSearchOpen}
-        onGrabbed={() => { toast("Watch Activity for progress"); refresh(); onChanged() }} />
+        onGrabbed={() => { toast("Watch Activity for progress"); void reloadBook(); onChanged() }} />
     </section>
   )
 }
