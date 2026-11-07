@@ -80,3 +80,37 @@ func TestAudioRanking(t *testing.T) {
 		t.Errorf("over the size limit scored %d", s)
 	}
 }
+
+func TestPartOfSet(t *testing.T) {
+	cases := map[string]bool{
+		"Mara Voss - First Ember (Unabridged) Part 1 of 2 M4B": true,
+		"First Ember Pt.2 of 2 MP3":                            true,
+		"First Ember CD 3 of 12":                               true,
+		"First Ember [Disc 2/2]":                               true,
+		"First Ember (Unabridged) M4B":                         false,
+		"Dune Part One":                                        false, // the book's own title
+		"First Ember Part 3 of 2":                              false, // nonsense, not a set
+		"First Ember Book 1 of 3":                              false, // a series, not a split
+	}
+	for title, want := range cases {
+		if got := PartOfSet(title); got != want {
+			t.Errorf("PartOfSet(%q) = %v, want %v", title, got, want)
+		}
+	}
+	// half a book is never what an automatic grab takes
+	rels := Rank([]Release{
+		{Title: "First Ember (Unabridged) Part 1 of 2 M4B", SizeBytes: 300 << 20},
+		{Title: "First Ember (Unabridged) MP3", SizeBytes: 300 << 20},
+	}, audioProfile, nil)
+	if len(rels) != 1 || rels[0].Title != "First Ember (Unabridged) MP3" {
+		t.Fatalf("ranked = %+v", rels)
+	}
+	only := Rank([]Release{{Title: "First Ember (Unabridged) Part 1 of 2 M4B", SizeBytes: 300 << 20}}, audioProfile, nil)
+	if len(only) != 1 || !only[0].PartOfSet || only[0].Score > 0 {
+		t.Fatalf("a lone part = %+v", only)
+	}
+	// ebooks aren't judged on it
+	if Rank([]Release{{Title: "First Ember Part 1 of 2 EPUB"}}, profile, nil)[0].PartOfSet {
+		t.Error("ebook flagged as part of a set")
+	}
+}

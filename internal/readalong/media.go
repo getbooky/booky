@@ -159,11 +159,15 @@ type Chapter struct {
 type Probe struct {
 	Duration float64
 	Chapters []Chapter
+	// the first audio stream's sample rate and channel count (0 if unknown)
+	SampleRate int
+	Channels   int
 }
 
 // Probe reads an audiobook's length and chapter marks.
 func (t Tools) Probe(ctx context.Context, path string, f Format) (*Probe, error) {
-	args := append([]string{"-v", "error", "-print_format", "json", "-show_format", "-show_chapters"},
+	args := append([]string{"-v", "error", "-print_format", "json", "-show_format", "-show_chapters",
+		"-show_streams", "-select_streams", "a:0"},
 		"-protocol_whitelist", "file,pipe", "-f", string(f), "file:"+path)
 	out, err := run(ctx, t.FFprobe, args...)
 	if err != nil {
@@ -178,11 +182,19 @@ func (t Tools) Probe(ctx context.Context, path string, f Format) (*Probe, error)
 			End   string            `json:"end_time"`
 			Tags  map[string]string `json:"tags"`
 		} `json:"chapters"`
+		Streams []struct {
+			SampleRate string `json:"sample_rate"`
+			Channels   int    `json:"channels"`
+		} `json:"streams"`
 	}
 	if err := json.Unmarshal(out, &raw); err != nil {
 		return nil, fmt.Errorf("ffprobe output: %w", err)
 	}
 	p := &Probe{}
+	if len(raw.Streams) > 0 {
+		p.SampleRate, _ = strconv.Atoi(raw.Streams[0].SampleRate)
+		p.Channels = raw.Streams[0].Channels
+	}
 	p.Duration, _ = strconv.ParseFloat(raw.Format.Duration, 64)
 	if p.Duration <= 0 || math.IsNaN(p.Duration) || math.IsInf(p.Duration, 0) {
 		return nil, errors.New("audio has no readable duration")

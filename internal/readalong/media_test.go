@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -356,5 +357,76 @@ func TestBuildRefusesAPartialAudiobook(t *testing.T) {
 	}
 	if !errors.Is(err, ErrMismatch) || !strings.Contains(err.Error(), "Is the audiobook complete?") {
 		t.Fatalf("err = %v, want a partial-audiobook mismatch", err)
+	}
+}
+
+// m4bWithChapters makes an M4B of spoken sentences, one chapter each, at the
+// given rate and channel count.
+func m4bWithChapters(t *testing.T, tools Tools, dir, name string, sentences []string, rate, channels int) string {
+	t.Helper()
+	wav := filepath.Join(dir, name+".mp3")
+	starts := speak(t, tools, sentences, wav)
+	pr, err := tools.Probe(context.Background(), wav, MP3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var meta strings.Builder
+	meta.WriteString(";FFMETADATA1\n")
+	for i, s := range starts {
+		end := pr.Duration
+		if i+1 < len(starts) {
+			end = starts[i+1]
+		}
+		fmt.Fprintf(&meta, "[CHAPTER]\nTIMEBASE=1/1000\nSTART=%d\nEND=%d\ntitle=%s chapter %d\n", int64(s*1000), int64(end*1000), name, i+1)
+	}
+	metaFile := filepath.Join(dir, name+".txt")
+	if err := os.WriteFile(metaFile, []byte(meta.String()), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	dst := filepath.Join(dir, name+".m4b")
+	out, err := exec.Command(tools.FFmpeg, "-v", "error", "-i", wav, "-i", metaFile, //nolint:gosec // G204: test fixture, our own temp files
+		"-map", "0:a", "-map_chapters", "1", "-ar", strconv.Itoa(rate), "-ac", strconv.Itoa(channels),
+		"-c:a", "aac", "-f", "ipod", "-y", dst).CombinedOutput()
+	if err != nil {
+		t.Fatalf("ffmpeg: %v %s", err, out)
+	}
+	return dst
+}
+
+// A download in two M4B parts, each with its own chapters and encoded
+// differently, joins into one book with every chapter kept, in place.
+func TestJoinTwoPartM4BKeepsChapters(t *testing.T) {
+	tools := realTools(t)
+	dir := t.TempDir()
+	p1 := m4bWithChapters(t, tools, dir, "Part 1", aliceSentences[:3], 44100, 2)
+	p2 := m4bWithChapters(t, tools, dir, "Part 2", aliceSentences[3:5], 22050, 1)
+	pr1, err := tools.Probe(context.Background(), p1, MP4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pr1.SampleRate != 44100 || pr1.Channels != 2 || len(pr1.Chapters) != 3 {
+		t.Fatalf("fixture part 1 = %+v", pr1)
+	}
+	dst := filepath.Join(dir, "book.m4b")
+	parts := []Part{{Path: p1, Format: MP4, Title: "Part 1"}, {Path: p2, Format: MP4, Title: "Part 2"}}
+	if err := tools.Join(context.Background(), parts, dst); err != nil {
+		t.Fatal(err)
+	}
+	pr, err := tools.Probe(context.Background(), dst, MP4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pr.Chapters) != 5 {
+		t.Fatalf("chapters: %+v", pr.Chapters)
+	}
+	if pr.Chapters[0].Title != "Part 1 chapter 1" || pr.Chapters[3].Title != "Part 2 chapter 1" {
+		t.Fatalf("chapter titles: %+v", pr.Chapters)
+	}
+	// part 2's chapters start where part 1 ends
+	if d := pr.Chapters[3].Start - pr1.Duration; d < -0.1 || d > 0.1 {
+		t.Fatalf("part 2 starts at %.2f, part 1 is %.2f long", pr.Chapters[3].Start, pr1.Duration)
+	}
+	if pr.SampleRate != 44100 || pr.Channels != 2 {
+		t.Fatalf("joined at %d Hz, %d channels", pr.SampleRate, pr.Channels)
 	}
 }

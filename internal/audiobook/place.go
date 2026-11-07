@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"unicode"
@@ -82,10 +83,53 @@ func Parts(path string) ([]readalong.Part, error) {
 		}
 		parts = append(parts, readalong.Part{Path: p, Format: f, Title: title(rel)})
 	}
+	parts = oneCopy(parts)
 	if len(parts) == 0 {
 		return nil, fmt.Errorf("no MP3, M4A or M4B files in %s", path)
 	}
 	return parts, nil
+}
+
+// sampleName matches a preview clip shipped alongside the book.
+var sampleName = regexp.MustCompile(`(?i)(^|[^a-z])sample([^a-z]|$)`)
+
+// oneCopy keeps one copy of the book from a download folder. Releases
+// sometimes carry the book twice — an M4B and a folder of the same book as
+// MP3s — and joining both would make it twice as long; the format with the
+// most audio is kept. Preview clips ("sample.mp3") are dropped, unless
+// they're all there is.
+func oneCopy(parts []readalong.Part) []readalong.Part {
+	var keep []readalong.Part
+	for _, p := range parts {
+		if !sampleName.MatchString(filepath.Base(p.Path)) {
+			keep = append(keep, p)
+		}
+	}
+	if len(keep) == 0 {
+		keep = parts
+	}
+	size := map[readalong.Format]int64{}
+	for _, p := range keep {
+		if st, err := os.Stat(p.Path); err == nil {
+			size[p.Format] += st.Size()
+		}
+	}
+	if len(size) < 2 {
+		return keep
+	}
+	best := keep[0].Format
+	for f, n := range size {
+		if n > size[best] || (n == size[best] && f < best) {
+			best = f
+		}
+	}
+	var out []readalong.Part
+	for _, p := range keep {
+		if p.Format == best {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 // SortParts puts uploaded parts in reading order by their titles (the
