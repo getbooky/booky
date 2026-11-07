@@ -16,6 +16,17 @@ import { formatDuration } from "@/lib/time"
 // for admins), watch Booky line it up with the text, then listen or read
 // along. It sits beside the ebook on disk, under the same name.
 
+// estimate says how long a build has left, from how fast it has gone since
+// the page first saw it — a few minutes per hour of audio on most servers.
+function estimate(start: { at: number; progress: number } | null, progress: number): string {
+  const base = "Runs in the background — you can leave this page."
+  if (!start || progress - start.progress < 0.03) return base + " Usually a few minutes per hour of audio."
+  const rate = (progress - start.progress) / (Date.now() - start.at) // share per ms
+  const left = Math.round((1 - progress) / rate / 60000)
+  if (left < 1) return base + " Almost done."
+  return base + ` About ${left} min left.`
+}
+
 // upload with progress — audiobooks run to hundreds of megabytes, and a bar
 // that sits at zero for two minutes reads as broken
 function uploadWithProgress(bookId: number, files: File[], onProgress: (f: number) => void): Promise<void> {
@@ -50,11 +61,27 @@ export function AudiobookCard({ book, onReadAlong, onChanged }: {
   const [listening, setListening] = useState(false)
   const fileInput = useRef<HTMLInputElement>(null)
 
+  // the status last passed up to the page; a ref, so a poll scheduled by
+  // an older render compares against the latest, and each change is
+  // reported once
+  const reported = useRef(book.audio ?? "")
+  // when the build was first seen, and how far along, for an estimate
+  const [started, setStarted] = useState<{ at: number; progress: number } | null>(null)
   const load = async () => {
     let next: ApiAudiobook | null = null
     try { next = await audiobooks.get(book.id) } catch { /* shown as none */ }
     setAb(next)
-    if ((next?.status ?? "") !== (book.audio ?? "")) onChanged?.()
+    const status = next?.status ?? ""
+    if (status !== reported.current) {
+      reported.current = status
+      onChanged?.()
+    }
+    if (status === "working") {
+      const progress = next?.progress ?? 0
+      setStarted(s => s ?? { at: Date.now(), progress })
+    } else {
+      setStarted(null)
+    }
   }
   useEffect(() => { void load() }, [book.id]) // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -180,7 +207,7 @@ export function AudiobookCard({ book, onReadAlong, onChanged }: {
       )}
       {ab?.status === "working" && (
         <Progress label={`${ab.phase || "Lining up with the text"} · ${Math.round((ab.progress ?? 0) * 100)}%`}
-          value={ab.progress ?? 0} hint="This runs in the background — about as long as the book takes to read, on a modest server." />
+          value={ab.progress ?? 0} hint={estimate(started, ab.progress ?? 0)} />
       )}
       {ab?.status === "failed" && (
         <div className="mt-2">
@@ -203,6 +230,11 @@ export function AudiobookCard({ book, onReadAlong, onChanged }: {
           <Button variant="outline" className="h-9" onClick={() => setListening(l => !l)}>
             <Headphones className="mr-1.5 h-4 w-4" /> {listening ? "Hide player" : "Just listen"}
           </Button>
+          {ab.readAlong && (
+            <p className="basis-full text-[11.5px] text-faint">
+              Read along opens the book with the narration and follows it sentence by sentence. Just listen plays the audiobook here on its own. Both pick up where you left off.
+            </p>
+          )}
           {ab.status === "ready" && ab.match ? (
             <span className="mono-label text-faint" title="How much of the narration matched the text">
               {Math.round(ab.match * 100)}% matched

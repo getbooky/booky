@@ -115,6 +115,11 @@ m = manifest(); m.units = {}
 check("no units", U.validManifest(m), false)
 check("not a table", U.validManifest("nope"), false)
 
+-- sizes for people
+check("formatSize MB", U.formatSize(740 * 1024 * 1024), "740 MB")
+check("formatSize GB", U.formatSize(1.5 * 1024 ^ 3), "1.5 GB")
+check("formatSize KB", U.formatSize(2048), "2 KB")
+
 if failures > 0 then
     io.stderr:write(failures .. " failure(s)\n")
     os.exit(1)

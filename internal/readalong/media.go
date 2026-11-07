@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 )
@@ -76,6 +77,23 @@ func Detect(path string) (Format, error) {
 type Tools struct {
 	FFmpeg, FFprobe, Transcriber string
 	Model                        string // Vosk model directory
+	// Workers is how many parts of an audiobook are listened to at once
+	// (0 or 1: one at a time).
+	Workers int
+}
+
+// DefaultWorkers is half the CPU cores, at most four: speech recognition
+// keeps a core busy for each part, and the server has other work to do.
+// Each worker holds a copy of the speech model (a few hundred MB).
+func DefaultWorkers() int {
+	n := runtime.NumCPU() / 2
+	if n > 4 {
+		n = 4
+	}
+	if n < 1 {
+		n = 1
+	}
+	return n
 }
 
 // DefaultModel is where Alpine's vosk-model-small-en-us package installs.
@@ -84,9 +102,13 @@ const DefaultModel = "/usr/share/vosk-models/small-en-us"
 // FindTools locates the programs on PATH. BOOKY_VOSK_MODEL overrides the
 // model, for a bigger or another language's.
 func FindTools() (Tools, error) {
-	t := Tools{Model: DefaultModel}
+	t := Tools{Model: DefaultModel, Workers: DefaultWorkers()}
 	if m := os.Getenv("BOOKY_VOSK_MODEL"); m != "" {
 		t.Model = m
+	}
+	// BOOKY_READALONG_WORKERS sets how many parts are listened to at once
+	if n, err := strconv.Atoi(os.Getenv("BOOKY_READALONG_WORKERS")); err == nil && n >= 1 {
+		t.Workers = min(n, runtime.NumCPU())
 	}
 	var missing []string
 	for _, p := range []struct {
