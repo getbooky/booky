@@ -72,6 +72,12 @@ func TestBuiltPluginZipIsValidLua(t *testing.T) {
 // shell commands that feed the audio, manifest checks) in an embedded Lua,
 // so CI runs them without LuaJIT.
 func TestReadAlongLua(t *testing.T) {
+	for _, file := range []string{"booky_readalong_test.lua", "booky_readalong_device_test.lua"} {
+		t.Run(file, func(t *testing.T) { runLuaTest(t, file) })
+	}
+}
+
+func runLuaTest(t *testing.T, file string) {
 	L := lua.NewState()
 	defer L.Close()
 	dir, err := filepath.Abs("plugin")
@@ -85,7 +91,7 @@ func TestReadAlongLua(t *testing.T) {
 	if err := L.DoString(`os.exit = function(code) error("lua tests failed (exit " .. tostring(code) .. ")") end`); err != nil {
 		t.Fatal(err)
 	}
-	if err := L.DoFile(filepath.Join(dir, "booky_readalong_test.lua")); err != nil {
+	if err := L.DoFile(filepath.Join(dir, file)); err != nil {
 		t.Fatal(err)
 	}
 }

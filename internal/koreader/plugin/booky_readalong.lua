@@ -28,6 +28,13 @@ range to highlight runs from its first character to its last.
 
 local M = {}
 
+-- State shared by every instance of the plugin: the file browser and the
+-- open book each load their own, but there is one set of downloads and one
+-- player. Downloads in flight, by book; a generation per book that bumps
+-- when its audio is freed, so a download already running stops and doesn't
+-- bring it back; and the player now following a book, if any.
+local shared = { fetching = {}, gen = {}, player = nil }
+
 -- ---------------------------------------------------------------------
 -- Pure helpers (no KOReader): exported for the tests.
 -- ---------------------------------------------------------------------
@@ -399,42 +406,58 @@ function M.new(plugin)
     end
 
     -- fetchAudio downloads missing chunks one after another, starting from
-    -- `from` (the one needed soonest), then wrapping round.
+    -- `from` (the one needed soonest), then wrapping round. Returns whether
+    -- a download is running now.
     function RA:fetchAudio(book_id, from)
         local m = self:loadManifest(book_id)
         local info
         for _p, b in pairs(self:known()) do
             if b.id == book_id then info = b end
         end
-        if not m or not info then return end
-        self._fetching = self._fetching or {}
-        if self._fetching[book_id] then return end
+        if not m or not info then return false end
+        if shared.fetching[book_id] then return true end
         local order = {}
         from = from or 1
         for k = 0, #m.chunks - 1 do
             local n = (from - 1 + k) % #m.chunks + 1
             if lfs.attributes(self:chunkPath(book_id, n), "mode") ~= "file" then table.insert(order, n) end
         end
-        if #order == 0 then return end
-        if not NetworkMgr:isOnline() then return end
-        self._fetching[book_id] = true
+        if #order == 0 then return false end
+        if not NetworkMgr:isOnline() then return false end
+        shared.fetching[book_id] = true
+        local gen = shared.gen[book_id] or 0
         local base = "/api/koreader/v1/readalong/" .. tostring(info.libraryId) .. "/" .. tostring(book_id)
         local i, failed = 0, 0
         local function step()
+            if (shared.gen[book_id] or 0) ~= gen then
+                -- the audio was freed meanwhile: stop, and leave nothing behind
+                shared.fetching[book_id] = nil
+                return
+            end
             i = i + 1
             local n = order[i]
             if not n then
-                self._fetching[book_id] = nil
-                if failed > 0 then toast(_("Booky: some audio didn't download — it will retry")) end
+                shared.fetching[book_id] = nil
+                if failed > 0 then
+                    toast(_("Booky: some audio didn't download. Press play there, or use “download the rest” in the read-along menu, to try again."), 5)
+                end
                 return
             end
-            self:fetchInChild(base .. "/audio/" .. tostring(n), self:chunkPath(book_id, n), function(ok)
+            local dest = self:chunkPath(book_id, n)
+            self:fetchInChild(base .. "/audio/" .. tostring(n), dest, function(ok)
+                if (shared.gen[book_id] or 0) ~= gen then
+                    os.remove(dest)
+                    shared.fetching[book_id] = nil
+                    return
+                end
                 if not ok then failed = failed + 1 end
-                if self.player and self.player.book_id == book_id then self.player:onChunkArrived(n) end
+                local p = shared.player
+                if p and p.book_id == book_id then p:onChunkArrived(n, ok) end
                 step()
             end)
         end
         step()
+        return true
     end
 
     -- audioBytes is how much space a book's downloaded audio takes.
@@ -453,7 +476,9 @@ function M.new(plugin)
     -- chunks), keeping the read-along copy and its manifest: pressing play
     -- later downloads what's needed again.
     function RA:removeAudio(book_id)
-        if self.player and self.player.book_id == book_id then self.player:stop(true) end
+        local p = shared.player
+        if p and p.book_id == book_id then p:stop(true) end
+        shared.gen[book_id] = (shared.gen[book_id] or 0) + 1
         local dir = self:dir(book_id)
         if not dir or lfs.attributes(dir, "mode") ~= "directory" then return end
         for name in lfs.dir(dir) do
@@ -603,12 +628,15 @@ function M.new(plugin)
         }, Player)
         local saved = self:localPosition(info.id)
         p.pos = saved and saved.pos or 0
+        if shared.player and shared.player ~= p then shared.player:stop(true) end
+        shared.player = p
         self.player = p
         return p
     end
 
     function RA:detach()
         if self.player then self.player:stop(true) end
+        if shared.player == self.player then shared.player = nil end
         self.player = nil
     end
 
@@ -666,11 +694,16 @@ function M.new(plugin)
         if pos then self.pos = math.max(0, pos) end
         local c = U.chunkAt(self.chunks, self.pos)
         if not self:haveChunk(c) then
-            self.waiting = c
             self.playing = false
             self:release() -- no need to keep the device awake while waiting
-            self.ra:fetchAudio(self.book_id, c)
-            toast(_("Booky: downloading the audio for this part — playback starts when it arrives"), 4)
+            if self.ra:fetchAudio(self.book_id, c) then
+                self.waiting = c
+                toast(_("Booky: downloading the audio for this part — playback starts when it arrives"), 4)
+            else
+                self.waiting = nil
+                toast(_("Booky: the audio for this part isn't on the device yet. Connect to wifi, then press play again."), 5)
+            end
+            self:changed()
             return
         end
         self.waiting = nil
@@ -814,8 +847,14 @@ function M.new(plugin)
         if was then self:play() else self:show(target, true) end
     end
 
-    function Player:onChunkArrived(n)
-        if self.waiting == n then self:play() end
+    -- onChunkArrived: a download finished (ok) or gave up. Playback that
+    -- was waiting for it starts, or stops waiting and says why.
+    function Player:onChunkArrived(n, ok)
+        if self.waiting ~= n then return end
+        if ok then return self:play() end
+        self.waiting = nil
+        toast(_("Booky: couldn't download the audio for this part. Check the connection, then press play again."), 5)
+        self:changed()
     end
 
     -- tick moves the highlight along and sleeps until the next sentence.
