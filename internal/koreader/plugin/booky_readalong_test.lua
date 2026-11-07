@@ -115,6 +115,14 @@ m = manifest(); m.units = {}
 check("no units", U.validManifest(m), false)
 check("not a table", U.validManifest("nope"), false)
 
+-- positions cut to the paragraph
+check("element xp", U.elementXPointer("/body/DocFragment[5]/body/p[12]/text().34"), "/body/DocFragment[5]/body/p[12]")
+check("element xp indexed text", U.elementXPointer("/body/DocFragment[5]/body/div/p[3]/text()[2].7"), "/body/DocFragment[5]/body/div/p[3]")
+check("element xp already an element", U.elementXPointer("/body/DocFragment[2]/body/h1"), "/body/DocFragment[2]/body/h1")
+check("element xp offset on element", U.elementXPointer("/body/DocFragment[2]/body/p[4].0"), "/body/DocFragment[2]/body/p[4]")
+check("element xp not a path", U.elementXPointer("#booky-s1"), nil)
+check("element xp nil", U.elementXPointer(nil), nil)
+
 -- sizes for people
 check("formatSize MB", U.formatSize(740 * 1024 * 1024), "740 MB")
 check("formatSize GB", U.formatSize(1.5 * 1024 ^ 3), "1.5 GB")

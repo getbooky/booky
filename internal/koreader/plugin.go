@@ -244,17 +244,120 @@ end
 
 function Booky:onReaderReady()
     self.player = self.player or self.readalong:attach(self.ui)
-    if self.player and not self.settings:readSetting("readalong_hint_shown") then
+    if not self.player then return end
+    self:showReadAlongControls()
+    if not self.settings:readSetting("readalong_hint_shown") then
         self.settings:saveSetting("readalong_hint_shown", true)
         self.settings:flush()
         UIManager:show(InfoMessage:new{
-            text = _("This is a Booky read-along. Open the menu → Read-along → Play, with Bluetooth headphones connected.\n\nPlay / pause can also go on a gesture: Settings → Gestures → Booky read-along."),
+            text = _("This book has a Booky read-along. It reads like any book — the audio plays only when you start it.\n\nTo start or stop the narration, tap “▶ Read-along” in the status bar (when it shows all items at once), or use the menu → Read-along. Bluetooth headphones need to be connected in the Kindle's settings.\n\nIt can also go on a gesture: Settings → Gestures → Booky read-along."),
         })
+    end
+end
+
+-- readAlongLabel is the read-along's item in the status bar.
+function Booky:readAlongLabel()
+    local p = self.player
+    if not p then return nil end
+    if p.playing then return "♪ " .. _("Read-along") end
+    if p.waiting then return "… " .. _("Read-along") end
+    return "▶ " .. _("Read-along")
+end
+
+-- showReadAlongControls puts the read-along in the status bar — in the
+-- bottom margin, never over the text. A tap on the item itself starts or
+-- stops the narration; a tap anywhere else in the bar (the page count, the
+-- clock…) does what it always did, and so does any tap with the bar hidden.
+function Booky:showReadAlongControls()
+    local footer = self.ui.view and self.ui.view.footer
+    if not footer or not footer.addAdditionalFooterContent then return end
+    self._footer_content = function() return self:readAlongLabel() end
+    footer:addAdditionalFooterContent(self._footer_content)
+    self.player.onChange = function()
+        if footer.onUpdateFooter then footer:onUpdateFooter(true) end
+    end
+    if footer.onUpdateFooter then footer:onUpdateFooter(true) end
+    self:watchFooterText(footer.footer_text)
+
+    local ok, zone = pcall(function() return G_defaults:readSetting("DTAP_ZONE_MINIBAR") end)
+    if not ok or not zone or not self.ui.registerTouchZones then return end
+    self.ui:registerTouchZones({
+        {
+            id = "booky_readalong_tap",
+            ges = "tap",
+            screen_zone = { ratio_x = zone.x, ratio_y = zone.y, ratio_w = zone.w, ratio_h = zone.h },
+            handler = function(ges)
+                if not self.player or not self.ui.view.footer_visible then return false end
+                if not self:tapOnReadAlongLabel(footer, ges) then return false end
+                self.player:toggle()
+                return true
+            end,
+            overrides = { "readerfooter_tap", "readerconfigmenu_ext_tap", "readerconfigmenu_tap", "tap_forward", "tap_backward" },
+        },
+    })
+end
+
+-- tapOnReadAlongLabel reports whether a tap landed on the read-along's own
+-- words in the status bar. The bar's text is one line holding every item;
+-- where it was last drawn is noted (see watchFooterText), and the item's
+-- span is measured in the bar's font. Unsure means no: the tap goes on to
+-- the status bar as usual.
+function Booky:tapOnReadAlongLabel(footer, ges)
+    -- a bar showing one item at a time cycles items on tap; it keeps that
+    if footer.settings and not footer.settings.all_at_once and not footer.has_no_mode then return false end
+    local ft = footer.footer_text
+    self:watchFooterText(ft)
+    local label = self:readAlongLabel()
+    if not ft or not label or not self._footer_x or not ges or not ges.pos then return false end
+    local text = ft.text or ""
+    local at = text:find(label, 1, true)
+    if not at then return false end
+    local okr, RenderText = pcall(require, "ui/rendertext")
+    if not okr then return false end
+    local width = function(str)
+        local okw, size = pcall(function()
+            return RenderText:sizeUtf8Text(0, Screen:getWidth(), ft.face, str, true, ft.bold)
+        end)
+        return okw and size and size.x or nil
+    end
+    local before, own = width(text:sub(1, at - 1)), width(label)
+    if not before or not own then return false end
+    -- the screen's corners are KOReader's own shortcuts (the bottom-left
+    -- one toggles the frontlight): a tap there is never ours
+    local sw, sh = Screen:getWidth(), Screen:getHeight()
+    for _k, name in ipairs({ "DTAP_ZONE_BOTTOM_LEFT", "DTAP_ZONE_BOTTOM_RIGHT" }) do
+        local okc, c = pcall(function() return G_defaults:readSetting(name) end)
+        if okc and c and ges.pos.x >= c.x * sw and ges.pos.x < (c.x + c.w) * sw
+            and ges.pos.y >= c.y * sh and ges.pos.y < (c.y + c.h) * sh then
+            return false
+        end
+    end
+    local slack = Screen:scaleBySize(8)
+    local x0 = self._footer_x + before
+    return ges.pos.x >= x0 - slack and ges.pos.x <= x0 + own + slack
+end
+
+-- watchFooterText notes where the status bar's text is drawn. The footer
+-- rebuilds that widget when its font changes; the new one is watched the
+-- next time it's needed.
+function Booky:watchFooterText(ft)
+    if not ft or ft._booky_watched then return end
+    ft._booky_watched = true
+    self._footer_x = nil
+    local paint = ft.paintTo
+    ft.paintTo = function(widget, bb, x, y)
+        self._footer_x = x
+        return paint(widget, bb, x, y)
     end
 end
 
 function Booky:onCloseDocument()
     if self.player then
+        local footer = self.ui.view and self.ui.view.footer
+        if footer and footer.removeAdditionalFooterContent and self._footer_content then
+            footer:removeAdditionalFooterContent(self._footer_content)
+        end
+        self._footer_content = nil
         self.readalong:detach()
         self.player = nil
     end
@@ -294,17 +397,14 @@ local function closeFileDialog()
     end
 end
 
--- readAlongFileButtons adds, for a read-along copy, a row to the long-press
--- menu: free its audio, or remove the read-along. The plain copy of the
--- book is a different file and stays.
+-- readAlongFileButtons adds, for a book with a read-along, a long-press
+-- action that frees its audio. The book stays and reads as before; pressing
+-- play downloads the audio it needs again. (Deleting the book itself is the
+-- file browser's own Delete, which clears the audio too.)
 function Booky:readAlongFileButtons(file, is_file)
     if not is_file or not self.readalong:bookFor(file) then return nil end
     local info = self.readalong:bookFor(file)
     local bytes = self.readalong:audioBytes(info.id)
-    local refresh = function()
-        local ok, FileManager = pcall(require, "apps/filemanager/filemanager")
-        if ok and FileManager.instance and FileManager.instance.onRefresh then FileManager.instance:onRefresh() end
-    end
     return {
         {
             text = _("Free read-along audio") .. (bytes > 0 and (" (" .. ReadAlong.util.formatSize(bytes) .. ")") or ""),
@@ -314,23 +414,8 @@ function Booky:readAlongFileButtons(file, is_file)
                 self.readalong:removeAudio(info.id)
                 UIManager:show(InfoMessage:new{
                     text = _("Booky: freed ") .. ReadAlong.util.formatSize(bytes)
-                        .. _(". The read-along stays — pressing play downloads the audio it needs again."),
+                        .. _(". The book stays as it is — pressing play downloads the audio it needs again."),
                     timeout = 4,
-                })
-            end,
-        },
-        {
-            text = _("Remove read-along"),
-            callback = function()
-                closeFileDialog()
-                UIManager:show(ConfirmBox:new{
-                    text = _("Remove the read-along copy of ") .. (info.title or _("this book"))
-                        .. _(" and its audio?") .. "\n\n" .. _("Your own copy of the book stays as it is."),
-                    ok_text = _("Remove"),
-                    ok_callback = function()
-                        self.readalong:removeReadAlong(file)
-                        refresh()
-                    end,
                 })
             end,
         },
@@ -1144,43 +1229,52 @@ function Booky:pickBook(book, on_change)
     end)
 end
 
--- pickReadAlong offers the book and its read-along: the read-along is a
--- separate copy ("<book> - read-along.epub"), so notes and positions in the
--- plain copy are never touched.
+-- pickReadAlong offers a book that has a read-along. There is only ever one
+-- file for the book: the read-along edition is the whole book with its
+-- sentences marked, so adding the read-along swaps the book's file for it
+-- (keeping the reader's place) and audio plays only when asked.
 function Booky:pickReadAlong(book, on_change)
     local dialog
-    local edition = self.readalong:editionPath(book)
-    local have_edition = edition and lfs.attributes(edition, "mode") == "file"
+    local path = self:bookDest(book)
+    local here = self:isDownloaded(book)
+    local is_readalong = here and self.readalong:bookFor(path) ~= nil
     local rows = {}
-    if have_edition then
-        table.insert(rows, { { text = _("Open the read-along"), callback = function()
+    if here then
+        table.insert(rows, { { text = _("Open"), callback = function()
             UIManager:close(dialog)
-            self:openBook(edition)
+            self:openBook(path)
         end } })
     end
-    table.insert(rows, { { text = have_edition and _("Update the read-along") or _("Download the read-along"), callback = function()
+    local label = is_readalong and _("Update the read-along")
+        or here and _("Add the read-along to this book")
+        or _("Download with read-along")
+    table.insert(rows, { { text = label, callback = function()
         UIManager:close(dialog)
         self:ensureDownloadDir(function()
             UIManager:show(InfoMessage:new{ text = _("Booky: getting the read-along…"), timeout = 1 })
             UIManager:scheduleIn(0.2, function()
-                self.readalong:download(book, function(path)
+                lfs.mkdir(self:downloadRoot())
+                self.readalong:download(book, function(file)
+                    self:markDownloaded(book)
                     if on_change then on_change() end
                     UIManager:show(ConfirmBox:new{
                         text = _("Read-along ready: ") .. (book.title or "?")
-                            .. "\n\n" .. _("The audio keeps downloading in the background. Open it now?"),
+                            .. "\n\n" .. _("It reads like any book — start the narration from the status bar or the menu whenever you want. The audio keeps downloading in the background. Open it now?"),
                         ok_text = _("Open"),
-                        ok_callback = function() self:openBook(path) end,
+                        ok_callback = function() self:openBook(file) end,
                     })
                 end)
             end)
         end)
     end } })
-    table.insert(rows, { { text = self:isDownloaded(book) and _("Open the book") or _("Download the book"), callback = function()
-        UIManager:close(dialog)
-        book.readAlong = nil
-        self:pickBook(book, on_change)
-        book.readAlong = true
-    end } })
+    if not here then
+        table.insert(rows, { { text = _("Download without read-along"), callback = function()
+            UIManager:close(dialog)
+            book.readAlong = nil
+            self:pickBook(book, on_change)
+            book.readAlong = true
+        end } })
+    end
     dialog = ButtonDialog:new{ title = (book.title or "?") .. "\n" .. _("Has a read-along"), buttons = rows }
     UIManager:show(dialog)
 end

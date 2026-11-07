@@ -154,6 +154,18 @@ function U.nextWake(units, i, pos, streamEnd)
     return math.min(5, math.max(0.05, nextAt - pos))
 end
 
+-- elementXPointer cuts a reading position down to the element it's in:
+-- "/body/DocFragment[5]/body/p[12]/text().34" becomes
+-- "/body/DocFragment[5]/body/p[12]". The read-along copy wraps sentences
+-- in spans inside paragraphs, so a position inside a paragraph's text
+-- doesn't carry over — but the paragraph itself is at the same path.
+function U.elementXPointer(xp)
+    if type(xp) ~= "string" or xp:sub(1, 1) ~= "/" then return nil end
+    xp = xp:gsub("/text%(%).*$", ""):gsub("%.%d+$", "")
+    if xp == "" then return nil end
+    return xp
+end
+
 -- formatSize writes a byte count for people: "740 MB", "1.2 GB".
 function U.formatSize(bytes)
     if bytes >= 1024 ^ 3 then return string.format("%.1f GB", bytes / 1024 ^ 3) end
@@ -251,11 +263,12 @@ function M.new(plugin)
         return root .. "/.booky-readalong/" .. tostring(book_id)
     end
 
+    -- editionPath is where the read-along goes: the book's own file. The
+    -- read-along edition is the whole book — it only adds sentence marks —
+    -- so it takes the book's place instead of sitting beside it as a second
+    -- copy; the audio is extra and plays only when asked.
     function RA:editionPath(book)
-        local root = plugin:downloadRoot()
-        if not root then return nil end
-        local base = (book.filename or ("book-" .. tostring(book.id))):gsub("%.[^.]*$", "")
-        return root .. "/" .. base .. " - read-along.epub"
+        return plugin:bookDest(book)
     end
 
     function RA:chunkPath(book_id, n)
@@ -345,6 +358,12 @@ function M.new(plugin)
             return
         end
         local edition = self:editionPath(book)
+        -- the file can't be swapped while it's open
+        local open = plugin.ui and plugin.ui.document and plugin.ui.document.file
+        if open == edition then
+            toast(_("Booky: close the book first, then add its read-along."), 5)
+            return
+        end
         local old = self:loadManifest(book.id)
         local changed = not old or type(old.edition) ~= "table" or type(m.edition) ~= "table"
             or old.edition.modified ~= m.edition.modified
@@ -354,13 +373,17 @@ function M.new(plugin)
                 if name:match("^%d%d%d%d%.pcm") then os.remove(dir .. "/" .. name) end
             end
         end
-        if changed or lfs.attributes(edition, "mode") ~= "file" then
+        local is_readalong = self:bookFor(edition) ~= nil and lfs.attributes(edition, "mode") == "file"
+        if changed or not is_readalong then
             if not plugin:request(self:apiPath(book) .. "/edition", edition .. ".part") then
                 os.remove(edition .. ".part")
                 toast(_("Booky: couldn't download the read-along book"))
                 return
             end
+            -- replacing the plain book: keep the reader's place
+            local place = lfs.attributes(edition, "mode") == "file" and self:readPlace(edition)
             os.rename(edition .. ".part", edition)
+            self:keepPlace(edition, place)
         end
         local f = io.open(self:manifestPath(book.id), "wb")
         if f then
@@ -456,22 +479,39 @@ function M.new(plugin)
         self.settings:flush()
     end
 
-    -- removeReadAlong deletes the read-along copy (and KOReader's notes for
-    -- it) along with its audio.
-    function RA:removeReadAlong(path)
-        self:forget(path)
-        os.remove(path)
-        local sdr = path:gsub("%.epub$", "") .. ".sdr"
-        if lfs.attributes(sdr, "mode") == "directory" then
-            for name in lfs.dir(sdr) do
-                if name ~= "." and name ~= ".." then os.remove(sdr .. "/" .. name) end
-            end
-            os.remove(sdr)
-        end
+    -- readPlace notes where the reader is in the book at path, before its
+    -- file is swapped for the read-along edition.
+    function RA:readPlace(path)
+        local ok, DocSettings = pcall(require, "docsettings")
+        if not ok or not DocSettings:hasSidecarFile(path) then return nil end
+        local ds = DocSettings:open(path)
+        return { xp = ds:readSetting("last_xpointer"), percent = ds:readSetting("percent_finished") }
     end
 
-    -- sweep forgets read-alongs whose copy was deleted some other way (the
-    -- file browser's own Delete), so their audio doesn't sit there unseen.
+    -- keepPlace puts the reader back where they were in the new file. A
+    -- position inside a paragraph doesn't survive the sentence marks, so it
+    -- becomes the start of that paragraph (or, failing that, the same
+    -- percentage). KOReader's notes for the book stay in its settings but
+    -- may no longer point at the right words.
+    function RA:keepPlace(path, place)
+        local ok, DocSettings = pcall(require, "docsettings")
+        if not ok or not place then return end
+        local ds = DocSettings:open(path)
+        local xp = U.elementXPointer(place.xp)
+        if xp then
+            ds:saveSetting("last_xpointer", xp)
+        elseif place.percent then
+            ds:delSetting("last_xpointer")
+            ds:saveSetting("last_percent", place.percent)
+        end
+        ds:flush()
+        -- the file browser caches what it knows about each book
+        local okb, BookList = pcall(require, "ui/widget/booklist")
+        if okb and BookList and BookList.resetBookInfoCache then pcall(BookList.resetBookInfoCache, path) end
+    end
+
+    -- sweep forgets read-alongs whose book was deleted (the file browser's
+    -- own Delete), so their audio doesn't sit there unseen.
     function RA:sweep()
         for path, _info in pairs(self:known()) do
             if lfs.attributes(path, "mode") ~= "file" then self:forget(path) end
@@ -666,7 +706,13 @@ function M.new(plugin)
         end
         self:holdAwake(true)
         self.current = 0
+        self:changed()
         self:tick()
+    end
+
+    -- changed tells the reader the state moved (the status bar shows it)
+    function Player:changed()
+        if self.onChange then pcall(self.onChange, self) end
     end
 
     function Player:killContent()
@@ -698,6 +744,7 @@ function M.new(plugin)
         end
         self:release()
         self:savePosition()
+        self:changed()
     end
 
     function Player:stop(quiet)
@@ -713,6 +760,7 @@ function M.new(plugin)
         self:release()
         self:unhighlight()
         if was or not quiet then self:savePosition() end
+        self:changed()
     end
 
     function Player:release()

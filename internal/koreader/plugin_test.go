@@ -259,3 +259,50 @@ func TestAutoSyncNeverFetchesAudio(t *testing.T) {
 		}
 	}
 }
+
+// KOReader's corner shortcuts (bottom-left toggles the frontlight) always
+// win over the read-along's tap.
+func TestReadAlongTapLeavesTheCornersAlone(t *testing.T) {
+	i := strings.Index(mainLua, "function Booky:tapOnReadAlongLabel(")
+	if i < 0 {
+		t.Fatal("tapOnReadAlongLabel not found")
+	}
+	body := mainLua[i:]
+	if end := strings.Index(body[1:], "\nfunction "); end > 0 {
+		body = body[:end+1]
+	}
+	for _, want := range []string{"DTAP_ZONE_BOTTOM_LEFT", "DTAP_ZONE_BOTTOM_RIGHT", "all_at_once"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("tapOnReadAlongLabel doesn't check %s", want)
+		}
+	}
+}
+
+// The read-along's control lives in the status bar, in the bottom margin:
+// a tap on the bar's left end starts or stops the narration, and with the
+// bar hidden the tap must fall through (return false) to page turning.
+func TestReadAlongControlStaysOffTheText(t *testing.T) {
+	i := strings.Index(mainLua, "function Booky:showReadAlongControls()")
+	if i < 0 {
+		t.Fatal("showReadAlongControls not found")
+	}
+	body := mainLua[i:]
+	if end := strings.Index(body[1:], "\nfunction "); end > 0 {
+		body = body[:end+1]
+	}
+	for _, want := range []string{
+		"addAdditionalFooterContent",                         // shown in the status bar
+		`G_defaults:readSetting("DTAP_ZONE_MINIBAR")`,        // the status bar's own zone
+		"not self.ui.view.footer_visible then return false",  // hidden bar: tap passes on
+		"tapOnReadAlongLabel(footer, ges) then return false", // only the item's own words
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("showReadAlongControls lacks %q", want)
+		}
+	}
+	for _, banned := range []string{"UIManager:show(", "FrameContainer", "Button:new"} {
+		if strings.Contains(body, banned) {
+			t.Errorf("showReadAlongControls draws a widget (%q) — it must stay in the status bar", banned)
+		}
+	}
+}
