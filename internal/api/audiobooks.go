@@ -309,7 +309,7 @@ func (s *Server) handleAudiobookImport(w http.ResponseWriter, r *http.Request) {
 		}
 		//nolint:gosec // G118: the import must outlive the HTTP request by design
 		go func() {
-			if err := s.ImportAudioFrom(context.Background(), id, src); err != nil {
+			if err := s.ImportAudioFrom(context.Background(), id, []string{src}); err != nil {
 				log.Printf("audiobook: series import for book %d: %v", id, err) //nolint:gosec // G706: a number and our own error
 			}
 		}()
@@ -383,13 +383,35 @@ func (s *Server) startAudioImport(bookID int64, parts []readalong.Part, move boo
 // is in place; the acquisition engine calls it for finished downloads. The
 // source is left for the caller to clean up, except a single file, which
 // is moved.
-func (s *Server) ImportAudioFrom(ctx context.Context, bookID int64, path string) error {
+//
+// Several paths are the downloads of one book posted in parts, in order:
+// their audio is joined into the one book. A pack is only looked for in a
+// single download.
+func (s *Server) ImportAudioFrom(ctx context.Context, bookID int64, paths []string) error {
+	if len(paths) == 0 {
+		return errors.New("nothing to import")
+	}
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	st, ok := s.claimImport(bookID, cancel)
 	if !ok {
 		return errImportBusy
 	}
+	if len(paths) > 1 {
+		var parts []readalong.Part
+		for i, p := range paths {
+			pp, err := audiobook.Parts(p)
+			if err != nil {
+				s.finishImport(bookID, st, fmt.Sprintf("Part %d of the download had no usable audio.", i+1))
+				return fmt.Errorf("part %d: %w", i+1, err)
+			}
+			parts = append(parts, pp...)
+		}
+		msg, err := s.installAudio(ctx, bookID, parts, false)
+		s.finishImport(bookID, st, msg)
+		return err
+	}
+	path := paths[0]
 	split, err := audiobook.SplitByBook(path, s.audioCandidates(bookID))
 	if err != nil {
 		s.finishImport(bookID, st, "The download had no usable audio.")
@@ -432,9 +454,6 @@ func (s *Server) audioCandidates(bookID int64) []audiobook.BookRef {
 	}
 	return out
 }
-
-// errNotInDownload: a series pack didn't hold the book it was grabbed for.
-var errNotInDownload = errors.New("the download doesn't contain this book")
 
 // installSeries files each library book a series pack holds as that book's
 // audiobook. The book it was grabbed for is filed whatever it had before;
@@ -509,7 +528,7 @@ func (s *Server) installSeries(ctx context.Context, bookID int64, split *audiobo
 	summary := fmt.Sprintf("series download with %d book(s) — %s", len(split.Books)+len(split.Unmatched), strings.Join(report, "; "))
 	_ = s.Catalog.AddHistory(bookID, s.Catalog.TheLibrary(), "series download", summary)
 	if _, ok := split.Books[bookID]; !ok {
-		return "The series download didn't contain this book — " + strings.Join(report, "; ") + ".", errNotInDownload
+		return "The series download didn't contain this book — " + strings.Join(report, "; ") + ".", audiobook.ErrNotInDownload
 	}
 	return targetMsg, targetErr
 }

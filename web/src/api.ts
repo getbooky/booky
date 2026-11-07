@@ -323,8 +323,12 @@ export interface ApiRelease {
   titleMismatch?: boolean
   /** an audiobook posted as one of several separate downloads ("Part 1 of 2") — never auto-grabbed */
   partOfSet?: boolean
-  /** a series pack that may hold this book — never auto-grabbed; grabbed by hand, it's split into its books */
+  /** a series pack that may hold this book; it's split into its books when it arrives. An audiobook
+   * pack named for the book or its series may be auto-grabbed (after any release of just this book) */
   bundle?: boolean
+  /** a whole set: one book posted as separate downloads, every part found. Grabbing it grabs every
+   * part, and they're joined in order once all are in */
+  parts?: ApiRelease[]
 }
 
 export interface ApiSourceStat {

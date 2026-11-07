@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/getbooky/booky/internal/audiobook"
 )
 
 func TestAudioProfileIsAnAdminSetting(t *testing.T) {
@@ -163,7 +165,7 @@ func TestDownloadedAudiobookIsFiled(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if err := f.srv.ImportAudioFrom(context.Background(), id, job); err != nil {
+	if err := f.srv.ImportAudioFrom(context.Background(), id, []string{job}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(filepath.Join(root, "books", "Emmett Hale", "Alice.m4b")); err != nil {
@@ -187,8 +189,83 @@ func TestDownloadedAudiobookIsFiled(t *testing.T) {
 	if err := os.MkdirAll(empty, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := f.srv.ImportAudioFrom(context.Background(), id, empty); err == nil {
+	if err := f.srv.ImportAudioFrom(context.Background(), id, []string{empty}); err == nil {
 		t.Fatal("an empty download was filed")
+	}
+}
+
+// TestSetDownloadsAreJoined: a book posted as "Part 1 of 2" and "Part 2 of
+// 2" arrives as two downloads, joined in order into one audiobook.
+func TestSetDownloadsAreJoined(t *testing.T) {
+	if os.Getenv("BOOKY_READALONG_IT") == "" {
+		t.Skip("set BOOKY_READALONG_IT=1 to run against ffmpeg/vosk/espeak")
+	}
+	f := newScopedFixture(t)
+	root := t.TempDir()
+	f.srv.mediaRoot = root
+	if _, err := f.srv.db.Exec(`UPDATE libraries SET root_path = ?`, filepath.Join(root, "books")); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go f.srv.ReadAlong.Run(ctx)
+
+	first := []string{"Alice was beginning to get very tired of sitting by her sister on the bank.",
+		"Once or twice she had peeped into the book her sister was reading."}
+	second := []string{"So she was considering in her own mind whether the pleasure of making a daisy chain would be worth the trouble.",
+		"Suddenly a White Rabbit with pink eyes ran close by her."}
+	book := idStr(f.addBook(t, f.userCookie, map[string]any{"title": "Alice"}, nil)["id"])
+	id, _ := strconv.ParseInt(book, 10, 64)
+	epub := filepath.Join(root, "books", "Emmett Hale", "Alice.epub")
+	minimalEPUB(t, epub, append(append([]string{}, first...), second...))
+	if err := f.srv.Catalog.SetFile(f.lib, id, epub, "epub", 1); err != nil {
+		t.Fatal(err)
+	}
+
+	// two SAB job folders, one per part; each is a single file
+	var jobs []string
+	for i, text := range [][]string{first, second} {
+		job := filepath.Join(root, "downloads", "Alice (Part "+strconv.Itoa(i+1)+" of 2)")
+		if err := os.MkdirAll(job, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(job, "Alice.mp3"), spokenMP3(t, text), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		jobs = append(jobs, job)
+	}
+	if err := f.srv.ImportAudioFrom(context.Background(), id, jobs); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "books", "Emmett Hale", "Alice.m4b")); err != nil {
+		t.Fatalf("joined audiobook not beside the ebook: %v", err)
+	}
+	var view map[string]any
+	waitFor(t, 120*time.Second, func() bool {
+		_, view = f.do(t, f.userCookie, "GET", "/api/v1/books/"+book+"/audiobook", nil)
+		if view["status"] == "failed" {
+			t.Fatalf("read-along failed: %v", view["error"])
+		}
+		return view["readAlong"] == true
+	})
+	// both parts were heard, in order: the read-along covers all four
+	// sentences, and the second part's come after the first's
+	for _, job := range jobs {
+		if _, err := os.Stat(filepath.Join(job, "Alice.mp3")); err != nil {
+			t.Errorf("a part was taken from its job folder: %v", err)
+		}
+	}
+	if d, _ := view["duration"].(float64); d < 8 {
+		t.Errorf("joined audiobook is %.1fs long: %v", d, view)
+	}
+
+	// a part with no audio sinks the set
+	empty := filepath.Join(root, "downloads", "nothing")
+	if err := os.MkdirAll(empty, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.srv.ImportAudioFrom(context.Background(), id, []string{jobs[0], empty}); err == nil {
+		t.Fatal("a set missing a part was filed")
 	}
 }
 
@@ -251,7 +328,7 @@ func TestSeriesDownloadIsSplitIntoBooks(t *testing.T) {
 	}
 
 	// grabbed for book 2
-	if err := f.srv.ImportAudioFrom(context.Background(), ids["The Iron Moon"], job); err != nil {
+	if err := f.srv.ImportAudioFrom(context.Background(), ids["The Iron Moon"], []string{job}); err != nil {
 		t.Fatal(err)
 	}
 	// books 1 and 2 are filed beside their own ebooks, book 1 joined
@@ -305,7 +382,7 @@ func TestSeriesDownloadIsSplitIntoBooks(t *testing.T) {
 
 	// a pack without the book it was grabbed for says so
 	other, _ := strconv.ParseInt(idStr(f.addBook(t, f.adminCooke, map[string]any{"title": "Nowhere Near"}, nil)["id"]), 10, 64)
-	if err := f.srv.ImportAudioFrom(context.Background(), other, job); !errors.Is(err, errNotInDownload) {
+	if err := f.srv.ImportAudioFrom(context.Background(), other, []string{job}); !errors.Is(err, audiobook.ErrNotInDownload) {
 		t.Fatalf("pack without the book: %v", err)
 	}
 }

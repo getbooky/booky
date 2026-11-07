@@ -20,7 +20,10 @@ type fakeAudioIndexers struct {
 	mu        sync.Mutex
 	added     []string // NZB URLs sent to SAB, in order
 	deleted   []string // SAB jobs cleared
+	cancelled []string // SAB jobs removed from its queue
 	jobStatus func(nzo string) string
+	// results is Prowlarr's answer; empty means the First Ember list
+	results string
 }
 
 func (f *fakeAudioIndexers) start(t *testing.T, e *Engine) {
@@ -28,6 +31,10 @@ func (f *fakeAudioIndexers) start(t *testing.T, e *Engine) {
 	prowlarr := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if got := r.URL.Query().Get("categories"); got != "3030" {
 			t.Errorf("audiobook search in category %q, want 3030", got)
+		}
+		if f.results != "" {
+			_, _ = w.Write([]byte(f.results))
+			return
 		}
 		_, _ = w.Write([]byte(`[
 			{"title":"Mara Voss - First Ember (Abridged) M4B","size":200000000,"downloadUrl":"http://x/nzb/abridged","indexer":"ndx","protocol":"usenet"},
@@ -45,6 +52,9 @@ func (f *fakeAudioIndexers) start(t *testing.T, e *Engine) {
 		case q.Get("mode") == "addurl":
 			f.added = append(f.added, q.Get("name"))
 			_, _ = fmt.Fprintf(w, `{"status":true,"nzo_ids":["nzo_%d"]}`, len(f.added))
+		case q.Get("mode") == "queue" && q.Get("name") == "delete":
+			f.cancelled = append(f.cancelled, q.Get("value"))
+			_, _ = w.Write([]byte(`{"status":true}`))
 		case q.Get("mode") == "history" && q.Get("name") == "delete":
 			f.deleted = append(f.deleted, q.Get("value"))
 			_, _ = w.Write([]byte(`{"status":true}`))
@@ -122,11 +132,11 @@ func TestAudiobookGrabImportsAndCleansUp(t *testing.T) {
 	f := &fakeAudioIndexers{jobStatus: func(string) string { return "Completed" }}
 	f.start(t, e)
 	var imported []string
-	e.ImportAudio = func(ctx context.Context, id int64, path string) error {
+	e.ImportAudio = func(ctx context.Context, id int64, paths []string) error {
 		if id != bookID {
 			t.Errorf("imported for book %d", id)
 		}
-		imported = append(imported, path)
+		imported = append(imported, paths...)
 		return nil
 	}
 
@@ -171,7 +181,7 @@ func TestAudiobookImportFailureKeepsTheJob(t *testing.T) {
 	e, _, _, bookID, libID := testEngine(t)
 	f := &fakeAudioIndexers{jobStatus: func(string) string { return "Completed" }}
 	f.start(t, e)
-	e.ImportAudio = func(context.Context, int64, string) error { return errors.New("disk full") }
+	e.ImportAudio = func(context.Context, int64, []string) error { return errors.New("disk full") }
 	if _, err := e.AutoGrabAudio(context.Background(), bookID, libID); err != nil {
 		t.Fatal(err)
 	}
@@ -199,7 +209,7 @@ func TestFailedAudiobookDownloadCascadesToTheNextAudiobook(t *testing.T) {
 		return "Downloading"
 	}}
 	f.start(t, e)
-	e.ImportAudio = func(context.Context, int64, string) error { return nil }
+	e.ImportAudio = func(context.Context, int64, []string) error { return nil }
 	if _, err := e.AutoGrabAudio(context.Background(), bookID, libID); err != nil {
 		t.Fatal(err)
 	}
@@ -230,7 +240,7 @@ func TestInterruptedAudiobookImportResumes(t *testing.T) {
 		t.Fatalf("pending direct imports = %+v", pending)
 	}
 	done := 0
-	e.ImportAudio = func(context.Context, int64, string) error { done++; return nil }
+	e.ImportAudio = func(context.Context, int64, []string) error { done++; return nil }
 	e.PollSab(context.Background())
 	waitImports(t, e)
 	if done != 1 {

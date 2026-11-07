@@ -254,3 +254,52 @@ func BundleFor(bookTitle, author, series, releaseTitle string) bool {
 	}
 	return allIn(series) || allIn(bookTitle)
 }
+
+// emptyBrackets is what's left of "(Part 1 of 2)" once the part is cut out.
+var emptyBrackets = regexp.MustCompile(`[(\[{]\s*[)\]}]`)
+
+// SetPart reads a release that is one piece of a set: which part it is,
+// how many there are, the name with the part cut out ("Book - Part 1 of 2
+// M4B" → "Book M4B"), and a key that the set's other parts share.
+func SetPart(title string) (base, key string, n, of int, ok bool) {
+	for _, m := range partOfSetRe.FindAllStringSubmatchIndex(title, -1) {
+		n, _ = strconv.Atoi(title[m[2]:m[3]])
+		of, _ = strconv.Atoi(title[m[4]:m[5]])
+		if of < 2 || n < 1 || n > of {
+			continue
+		}
+		base = title[:m[0]] + " " + title[m[1]:]
+		base = emptyBrackets.ReplaceAllString(base, " ")
+		base = strings.Join(strings.Fields(base), " ")
+		base = strings.Trim(base, " -–—_.,:")
+		key = strings.Join(words(base), " ") + "|" + strconv.Itoa(of)
+		return base, key, n, of, true
+	}
+	return "", "", 0, 0, false
+}
+
+// BundleNames reports whether a bundle's name points at this book: it names
+// the book's series, or the book itself. That's what an automatic grab of a
+// pack needs; a pack named only for the author could be any of their books.
+func BundleNames(bookTitle, author, series, releaseTitle string) bool {
+	if !Bundle(releaseTitle) {
+		return false
+	}
+	have := map[string]bool{}
+	for _, w := range words(releaseTitle) {
+		have[w] = true
+	}
+	allIn := func(s string) bool {
+		ws := significant(words(s))
+		if len(ws) == 0 {
+			return false
+		}
+		for _, w := range ws {
+			if !have[w] {
+				return false
+			}
+		}
+		return true
+	}
+	return allIn(series) || TitleMatches(bookTitle, author, releaseTitle)
+}

@@ -38,6 +38,10 @@ type Release struct {
 	// may include this one. Never grabbed automatically; grabbed by hand,
 	// the download is split and each book in it filed with its own.
 	Bundle bool `json:"bundle,omitempty"`
+	// Parts, when set, makes this release a whole set: one book posted as
+	// separate downloads ("Part 1 of 2", "Part 2 of 2"), every part found.
+	// Grabbing it grabs every part; they're joined in order once all are in.
+	Parts []Release `json:"parts,omitempty"`
 }
 
 // Profile is the slice of a quality profile that ranking needs.

@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 
@@ -34,9 +35,10 @@ type Engine struct {
 	annas    *directdl.Client
 
 	// ImportAudio files a downloaded audiobook (a file, or a folder of
-	// parts) for a book: beside its ebook, lined up for read-along. The
+	// parts) for a book: beside its ebook, lined up for read-along. A set's
+	// downloads come as several paths, in part order, to be joined. The
 	// server wires it in; nil means audiobook downloads can't be filed.
-	ImportAudio func(ctx context.Context, bookID int64, path string) error
+	ImportAudio func(ctx context.Context, bookID int64, paths []string) error
 
 	// running holds a cancel func per queue row whose direct download is in
 	// flight in this process — SAB jobs are cancelled at SAB instead.
@@ -170,11 +172,18 @@ type SourceStat struct {
 // first; then the rest — other titles, kept so a person can still look —
 // marked, and scored so nothing automatic ever takes them.
 func rankForBook(book *catalog.Book, rels []release.Release, profile release.Profile, order []string, stats []SourceStat) []release.Release {
-	var match, bundles, other []release.Release
+	var match, packs, bundles, other []release.Release
 	for _, r := range rels {
-		// checked first: a bundle can name this book among others
+		// checked first: a bundle can name this book among others. For an
+		// audiobook, a pack named for the book or its series may be grabbed
+		// on its own (it's split into its books when it arrives); any other
+		// pack is only offered.
 		if release.BundleFor(book.Title, book.Author, book.SeriesName, r.Title) {
-			bundles = append(bundles, r)
+			if profile.Audio && release.BundleNames(book.Title, book.Author, book.SeriesName, r.Title) {
+				packs = append(packs, r)
+			} else {
+				bundles = append(bundles, r)
+			}
 			continue
 		}
 		if release.TitleMatches(book.Title, book.Author, r.Title) {
@@ -190,7 +199,16 @@ func rankForBook(book *catalog.Book, rels []release.Release, profile release.Pro
 			}
 		}
 	}
+	// a release of just this book comes before any pack
 	ranked := release.Rank(match, profile, order)
+	// and, as good otherwise, one download before a book in parts
+	sort.SliceStable(ranked, func(i, j int) bool {
+		return ranked[i].Score == ranked[j].Score && len(ranked[i].Parts) == 0 && len(ranked[j].Parts) > 0
+	})
+	for _, r := range release.Rank(packs, profile, order) {
+		r.Bundle = true
+		ranked = append(ranked, r)
+	}
 	for _, r := range release.Rank(bundles, profile, order) {
 		r.Bundle = true
 		if r.Score > 0 {
@@ -454,6 +472,9 @@ type QueueItem struct {
 	Detail       string `json:"detail,omitempty"`
 	// Kind is what the row fetches: "ebook" or "audiobook"
 	Kind string `json:"kind"`
+	// SetID ties together the parts of one book posted as separate
+	// downloads: "<id>/<parts>". Empty for an ordinary grab.
+	SetID string `json:"setId,omitempty"`
 	// Both are RFC3339 (see catalog.SQLTime): CreatedAt is when the grab was
 	// sent, UpdatedAt when the row last changed state — the two times the
 	// queue answers "how long has this been sitting here?" with.
@@ -471,7 +492,7 @@ func (e *Engine) Queue(v *catalog.Visibility) ([]QueueItem, error) {
 	args = append(args, tagArgs...)
 	rows, err := e.db.Query(fmt.Sprintf( //nolint:gosec // G201: placeholders only, see catalog.IDPlaceholders
 		`SELECT q.id, q.book_id, q.library_id, b.title, q.release_title, q.source,
-		        q.protocol, q.status, q.external_id, q.detail, q.created_at, q.updated_at, q.kind
+		        q.protocol, q.status, q.external_id, q.detail, q.created_at, q.updated_at, q.kind, q.set_id
 		 FROM queue q JOIN books b ON b.id = q.book_id
 		 WHERE (? = 1 OR EXISTS (SELECT 1 FROM book_tags bt WHERE bt.book_id = q.book_id AND bt.tag_id IN (%s)))
 		 ORDER BY q.id DESC LIMIT 200`, ph), args...)
@@ -483,7 +504,7 @@ func (e *Engine) Queue(v *catalog.Visibility) ([]QueueItem, error) {
 	for rows.Next() {
 		var it QueueItem
 		if err := rows.Scan(&it.ID, &it.BookID, &it.LibraryID, &it.BookTitle, &it.ReleaseTitle,
-			&it.Source, &it.Protocol, &it.Status, &it.ExternalID, &it.Detail, &it.CreatedAt, &it.UpdatedAt, &it.Kind); err != nil {
+			&it.Source, &it.Protocol, &it.Status, &it.ExternalID, &it.Detail, &it.CreatedAt, &it.UpdatedAt, &it.Kind, &it.SetID); err != nil {
 			return nil, err
 		}
 		it.CreatedAt, it.UpdatedAt = db.SQLTime(it.CreatedAt), db.SQLTime(it.UpdatedAt)
@@ -515,14 +536,60 @@ func (e *Engine) PendingImports() ([]QueueItem, error) {
 // history entry. Deliberately NO blocklist and NO cascade — cancelling is a
 // choice about this download, not a verdict on the release, so nothing else
 // gets grabbed in its place and the release stays available for a re-grab.
+//
+// A part of a set takes the rest of the set with it: the other parts are no
+// use alone.
 func (e *Engine) Cancel(ctx context.Context, id int64) error {
+	var setID string
+	err := e.db.QueryRow(`SELECT set_id FROM queue WHERE id = ?`, id).Scan(&setID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("queue item not found")
+	}
+	if err != nil {
+		return err
+	}
+	if err := e.cancelOne(ctx, id); err != nil {
+		return err
+	}
+	if setID == "" {
+		return nil
+	}
+	return e.cancelSet(ctx, setID)
+}
+
+// cancelSet cancels every row left in a set.
+func (e *Engine) cancelSet(ctx context.Context, setID string) error {
+	rows, err := e.db.Query(`SELECT id FROM queue WHERE set_id = ?`, setID)
+	if err != nil {
+		return err
+	}
+	var ids []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return err
+		}
+		ids = append(ids, id)
+	}
+	rows.Close()
+	var firstErr error
+	for _, id := range ids {
+		if err := e.cancelOne(ctx, id); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	return firstErr
+}
+
+func (e *Engine) cancelOne(ctx context.Context, id int64) error {
 	var it QueueItem
 	err := e.db.QueryRow(`SELECT q.book_id, q.library_id, q.release_title, q.protocol,
 			q.status, COALESCE(q.external_id, '')
 		FROM queue q WHERE q.id = ?`, id).
 		Scan(&it.BookID, &it.LibraryID, &it.ReleaseTitle, &it.Protocol, &it.Status, &it.ExternalID)
 	if errors.Is(err, sql.ErrNoRows) {
-		return fmt.Errorf("queue item not found")
+		return nil // already gone
 	}
 	if err != nil {
 		return err
@@ -597,7 +664,13 @@ func (e *Engine) RetryImport(ctx context.Context, id int64) error {
 		e.setQueue(id, "importing", "retrying import")
 		e.DeliverPending()
 	case "usenet":
-		e.setQueue(id, "downloading", "retrying import from SABnzbd")
+		// a set is imported whole, so every part goes back together
+		if _, err := e.db.Exec(`UPDATE queue SET status = 'downloading', detail = 'retrying import from SABnzbd',
+				updated_at = datetime('now')
+			WHERE id = ? OR (set_id != '' AND set_id = (SELECT set_id FROM queue WHERE id = ?) AND status = 'import_failed')`,
+			id, id); err != nil {
+			return err
+		}
 		e.PollSab(ctx)
 	default:
 		return fmt.Errorf("no retry path for protocol %q", protocol)
