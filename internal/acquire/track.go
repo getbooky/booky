@@ -3,7 +3,9 @@ package acquire
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log"
+	"sort"
 	"strings"
 
 	"github.com/getbooky/booky/internal/catalog"
@@ -96,7 +98,12 @@ func (e *Engine) PollSab(ctx context.Context) {
 	if err != nil {
 		return
 	}
+	sets := map[string][]QueueItem{}
 	for _, it := range items {
+		if it.SetID != "" && it.Kind == KindAudiobook && it.Protocol == "usenet" {
+			sets[it.SetID] = append(sets[it.SetID], it)
+			continue
+		}
 		// an audiobook left "importing" by a restart is filed again
 		resumed := it.Kind == KindAudiobook && it.Status == "importing" && !e.audioImportRunning(it.ID)
 		if (it.Status != "downloading" && !resumed) || it.Protocol != "usenet" {
@@ -109,7 +116,7 @@ func (e *Engine) PollSab(ctx context.Context) {
 		switch h.status {
 		case "Completed":
 			if it.Kind == KindAudiobook {
-				e.importAudio(it, h.storage)
+				e.importAudio([]QueueItem{it}, []string{h.storage})
 				continue
 			}
 			title, author := "", ""
@@ -141,6 +148,66 @@ func (e *Engine) PollSab(ctx context.Context) {
 			e.failAndCascade(ctx, it, h.fail)
 		}
 	}
+	for setID, rows := range sets {
+		e.pollSet(ctx, setID, rows, func(nzo string) (string, string, string, bool) {
+			h, ok := byNzo[nzo]
+			return h.status, h.storage, h.fail, ok
+		})
+	}
+}
+
+// pollSet moves a set along: once every part has downloaded they're
+// imported together, in order. A part that failed sinks the set — its
+// release is blocklisted, the other parts are cancelled, and the next
+// release is tried. A set missing a row (a part was cancelled, or fell out
+// of the recent queue) is cancelled whole.
+func (e *Engine) pollSet(ctx context.Context, setID string, rows []QueueItem,
+	job func(nzo string) (status, storage, fail string, ok bool)) {
+	// rows come newest first; parts were grabbed in order
+	sort.Slice(rows, func(i, j int) bool { return rows[i].ID < rows[j].ID })
+	if e.audioImportRunning(rows[0].ID) {
+		return
+	}
+	var storages []string
+	for _, it := range rows {
+		switch it.Status {
+		case "downloading", "importing": // importing: left so by a restart
+		default:
+			return // import_failed waits for a retry; failed was dealt with
+		}
+		status, storage, fail, ok := job(it.ExternalID)
+		if !ok {
+			return // still in SAB's queue
+		}
+		switch status {
+		case "Completed":
+			storages = append(storages, storage)
+		case "Failed":
+			if err := e.cancelSetExcept(ctx, setID, it.ID); err != nil {
+				log.Printf("acquire: cancel set %s: %v", setID, err)
+			}
+			e.failAndCascade(ctx, it, fmt.Sprintf("%s (one part of a set)", fail))
+			return
+		default:
+			return // still unpacking
+		}
+	}
+	if len(rows) != setSize(setID) {
+		log.Printf("acquire: set %s has %d of %d parts; cancelling it", setID, len(rows), setSize(setID))
+		if err := e.cancelSet(ctx, setID); err != nil {
+			log.Printf("acquire: cancel set %s: %v", setID, err)
+		}
+		return
+	}
+	e.importAudio(rows, storages)
+}
+
+// cancelSetExcept cancels a set's other parts, leaving one row to be failed.
+func (e *Engine) cancelSetExcept(ctx context.Context, setID string, keep int64) error {
+	if _, err := e.db.Exec(`UPDATE queue SET set_id = '' WHERE id = ?`, keep); err != nil {
+		return err
+	}
+	return e.cancelSet(ctx, setID)
 }
 
 // failAndCascade handles a download that died after the grab: the queue row

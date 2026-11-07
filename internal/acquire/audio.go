@@ -5,9 +5,12 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"strconv"
 	"strings"
 	"time"
 
+	"github.com/getbooky/booky/internal/audiobook"
+	"github.com/getbooky/booky/internal/auth"
 	"github.com/getbooky/booky/internal/prowlarr"
 	"github.com/getbooky/booky/internal/release"
 )
@@ -87,6 +90,7 @@ func (e *Engine) SearchAudio(ctx context.Context, bookID int64) ([]release.Relea
 	if err != nil {
 		return nil, stats, err
 	}
+	all = groupSets(all)
 	profile, err := e.audioProfile()
 	if err != nil {
 		return nil, stats, err
@@ -95,10 +99,137 @@ func (e *Engine) SearchAudio(ctx context.Context, bookID int64) ([]release.Relea
 	return rankForBook(book, all, profile, e.sourceOrder(), stats), stats, nil
 }
 
+// groupSets turns every complete set — one book posted as "Part 1 of N"
+// … "Part N of N", all parts found — into one release carrying its parts,
+// so it's ranked and grabbed as the whole book. Parts of incomplete sets
+// stay as they are: flagged, never grabbed on their own.
+func groupSets(rels []release.Release) []release.Release {
+	type set struct {
+		base  string
+		of    int
+		parts map[int]release.Release
+		first int // index of the first part seen, to keep the list's order
+	}
+	sets := map[string]*set{}
+	var order []string
+	inSet := map[int]string{}
+	for i, r := range rels {
+		base, key, n, of, ok := release.SetPart(r.Title)
+		if !ok || r.Protocol == "torrent" {
+			continue
+		}
+		s := sets[key]
+		if s == nil {
+			s = &set{base: base, of: of, parts: map[int]release.Release{}, first: i}
+			sets[key] = s
+			order = append(order, key)
+		}
+		if _, dup := s.parts[n]; !dup {
+			s.parts[n] = r
+		}
+		inSet[i] = key
+	}
+	complete := map[string]release.Release{}
+	for _, key := range order {
+		s := sets[key]
+		if len(s.parts) != s.of {
+			continue
+		}
+		first := s.parts[1]
+		whole := release.Release{
+			Title:       fmt.Sprintf("%s (in %d parts)", s.base, s.of),
+			Source:      first.Source,
+			Protocol:    first.Protocol,
+			Indexer:     first.Indexer,
+			Language:    first.Language,
+			DownloadURL: "set:" + key,
+		}
+		for n := 1; n <= s.of; n++ {
+			p := s.parts[n]
+			whole.Parts = append(whole.Parts, p)
+			whole.SizeBytes += p.SizeBytes
+			if p.Protocol != first.Protocol {
+				whole.Protocol = "mixed"
+			}
+		}
+		complete[key] = whole
+	}
+	var out []release.Release
+	added := map[string]bool{}
+	for i, r := range rels {
+		key, part := inSet[i]
+		if part {
+			if whole, ok := complete[key]; ok {
+				if !added[key] {
+					added[key] = true
+					out = append(out, whole)
+				}
+				continue
+			}
+		}
+		out = append(out, r)
+	}
+	return out
+}
+
 // GrabAudio sends an audiobook release to SABnzbd and tracks it in the
-// queue. Returns the queue id.
+// queue. Returns the queue id. A whole set grabs every part; the id is the
+// first part's.
 func (e *Engine) GrabAudio(ctx context.Context, bookID, libraryID int64, rel release.Release) (int64, error) {
+	if len(rel.Parts) > 0 {
+		return e.grabSet(ctx, bookID, libraryID, rel)
+	}
 	return e.grab(ctx, bookID, libraryID, rel, KindAudiobook)
+}
+
+// maxSetParts caps a set; real ones run to a dozen or so CDs.
+const maxSetParts = 50
+
+// grabSet grabs every part of a set. The rows share a set id ("<id>/<parts>")
+// so the poll can wait for all of them. If one part can't be sent, the parts
+// already sent are cancelled: half a book is no use.
+func (e *Engine) grabSet(ctx context.Context, bookID, libraryID int64, rel release.Release) (int64, error) {
+	if len(rel.Parts) < 2 || len(rel.Parts) > maxSetParts {
+		return 0, fmt.Errorf("a set has 2 to %d parts, not %d", maxSetParts, len(rel.Parts))
+	}
+	for _, p := range rel.Parts {
+		if p.Protocol != "usenet" || p.DownloadURL == "" || len(p.Parts) > 0 {
+			return 0, fmt.Errorf("every part of a set must be a usenet release")
+		}
+	}
+	setID := fmt.Sprintf("%s/%d", auth.RandomToken()[:12], len(rel.Parts))
+	var first int64
+	for i, p := range rel.Parts {
+		id, err := e.grab(ctx, bookID, libraryID, p, KindAudiobook)
+		if err != nil {
+			// the failed part's row stays, failed (and blocklisted when the
+			// release is at fault); the parts already sent go
+			if cerr := e.cancelSet(ctx, setID); cerr != nil {
+				log.Printf("acquire: cancel set %s: %v", setID, cerr)
+			}
+			return id, fmt.Errorf("part %d of %d: %w", i+1, len(rel.Parts), err)
+		}
+		if _, err := e.db.Exec(`UPDATE queue SET set_id = ? WHERE id = ?`, setID, id); err != nil {
+			log.Printf("acquire: tag set part %d: %v", id, err)
+		}
+		if first == 0 {
+			first = id
+		}
+	}
+	return first, nil
+}
+
+// setSize is how many parts a set id says the set has.
+func setSize(setID string) int {
+	i := strings.LastIndexByte(setID, '/')
+	if i < 0 {
+		return 0
+	}
+	n, err := strconv.Atoi(setID[i+1:])
+	if err != nil {
+		return 0
+	}
+	return n
 }
 
 // AutoGrabAudio searches for a book's audiobook and grabs the best
@@ -140,33 +271,56 @@ func (e *Engine) inFlight(bookID, libraryID int64, kind string) bool {
 	return err == nil && n > 0
 }
 
-// importAudio files a finished audiobook download in the background. The
-// row moves to "importing" first, so the next poll leaves it alone; the SAB
-// job is only cleared once the files have been taken, since joining a
-// many-part book reads them for minutes.
-func (e *Engine) importAudio(it QueueItem, storage string) {
+// importAudio files a finished audiobook download in the background: one
+// row, or every part of a set (in part order, with their folders in the
+// same order). The rows move to "importing" first, so the next poll leaves
+// them alone; the SAB jobs are only cleared once the files have been taken,
+// since joining a many-part book reads them for minutes.
+//
+// A pack grabbed for a book it turns out not to hold is a verdict on the
+// release: it's blocklisted and the next one tried.
+func (e *Engine) importAudio(rows []QueueItem, storages []string) {
+	lead := rows[0]
 	if e.ImportAudio == nil {
-		e.markImportFailed(it, ErrNoAudioImport)
+		for _, it := range rows {
+			e.markImportFailed(it, ErrNoAudioImport)
+		}
 		return
 	}
-	if !e.startAudioImport(it.ID) {
+	if !e.startAudioImport(lead.ID) {
 		return // already being imported
 	}
-	e.setQueue(it.ID, "importing", "filing the audiobook")
+	for _, it := range rows {
+		e.setQueue(it.ID, "importing", "filing the audiobook")
+	}
 	go func() {
-		defer e.endAudioImport(it.ID)
+		defer e.endAudioImport(lead.ID)
 		ctx := context.Background()
-		if err := e.ImportAudio(ctx, it.BookID, storage); err != nil {
-			e.markImportFailed(it, err)
+		err := e.ImportAudio(ctx, lead.BookID, storages)
+		switch {
+		case errors.Is(err, audiobook.ErrNotInDownload) && len(rows) == 1:
+			e.clearSabJob(ctx, lead.ExternalID)
+			e.failAndCascade(ctx, lead, err.Error())
+			return
+		case err != nil:
+			for _, it := range rows {
+				e.markImportFailed(it, err)
+			}
 			return
 		}
-		e.MarkDone(it.ID)
-		if sab := e.Sab(); sab.Configured() {
-			if err := sab.Delete(ctx, it.ExternalID, true); err != nil {
-				log.Printf("acquire: cleanup sab job %s: %v", it.ExternalID, err)
-			}
+		for _, it := range rows {
+			e.MarkDone(it.ID)
+			e.clearSabJob(ctx, it.ExternalID)
 		}
 	}()
+}
+
+func (e *Engine) clearSabJob(ctx context.Context, nzoID string) {
+	if sab := e.Sab(); sab.Configured() {
+		if err := sab.Delete(ctx, nzoID, true); err != nil {
+			log.Printf("acquire: cleanup sab job %s: %v", nzoID, err)
+		}
+	}
 }
 
 func (e *Engine) startAudioImport(queueID int64) bool {

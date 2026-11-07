@@ -1,6 +1,7 @@
 package audiobook
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -11,6 +12,9 @@ import (
 	"github.com/getbooky/booky/internal/readalong"
 	"github.com/getbooky/booky/internal/release"
 )
+
+// ErrNotInDownload means a pack didn't hold the book it was grabbed for.
+var ErrNotInDownload = errors.New("the download doesn't contain this book")
 
 // BookRef is a library book a download might hold.
 type BookRef struct {

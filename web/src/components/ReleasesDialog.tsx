@@ -200,6 +200,7 @@ export function ReleasesDialog({ book, open, onOpenChange, onGrabbed, kind = "eb
                     {r.titleMismatch && <Tag kind="want">Different title?</Tag>}
                     {r.partOfSet && <Tag kind="want">Only part of the book</Tag>}
                     {r.bundle && <Tag kind="info">Several books</Tag>}
+                    {r.parts && r.parts.length > 0 && <Tag kind="info">{r.parts.length} downloads, joined</Tag>}
                     {r.format && <Fmt>{r.format.toUpperCase()}</Fmt>}
                     <Tag kind="dim">{r.indexer ?? label(baseSource(r))}</Tag>
                     <span>{r.protocol}</span>

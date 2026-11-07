@@ -155,3 +155,46 @@ func TestBundleFor(t *testing.T) {
 		t.Error("a single book counted as a bundle")
 	}
 }
+
+func TestSetPart(t *testing.T) {
+	cases := []struct {
+		title, base string
+		n, of       int
+	}{
+		{"Mara Voss - First Ember (Unabridged) Part 1 of 2 M4B", "Mara Voss - First Ember (Unabridged) M4B", 1, 2},
+		{"Mara Voss - First Ember (Unabridged) Part 2 of 2 M4B", "Mara Voss - First Ember (Unabridged) M4B", 2, 2},
+		{"First Ember [Part 3 of 3]", "First Ember", 3, 3},
+		{"First Ember - CD 1/12 - MP3", "First Ember - - MP3", 1, 12},
+	}
+	for _, c := range cases {
+		base, _, n, of, ok := SetPart(c.title)
+		if !ok || n != c.n || of != c.of || base != c.base {
+			t.Errorf("SetPart(%q) = %q %d/%d %v", c.title, base, n, of, ok)
+		}
+	}
+	_, k1, _, _, _ := SetPart("Mara Voss - First Ember (Unabridged) Part 1 of 2 M4B")
+	_, k2, _, _, _ := SetPart("Mara Voss - First Ember (Unabridged) Part 2 of 2 M4B")
+	_, k3, _, _, _ := SetPart("Mara Voss - First Ember (Unabridged) Part 1 of 3 M4B")
+	if k1 != k2 || k1 == k3 {
+		t.Errorf("keys %q %q %q", k1, k2, k3)
+	}
+	if _, _, _, _, ok := SetPart("First Ember (Unabridged) M4B"); ok {
+		t.Error("a whole book read as a part")
+	}
+}
+
+func TestBundleNames(t *testing.T) {
+	const maas = "Sarah J. Maas"
+	if !BundleNames("A Court of Mist and Fury", maas, "A Court of Thorns and Roses", "A Court of Thorns and Roses Series (Books 1-4) M4B") {
+		t.Error("a pack named for the series should be taken")
+	}
+	if !BundleNames("A Court of Mist and Fury", maas, "", "A Court of Thorns and Roses / A Court of Mist and Fury / A Court of Wings and Ruin") {
+		t.Error("a pack naming the book should be taken")
+	}
+	if BundleNames("A Court of Mist and Fury", maas, "A Court of Thorns and Roses", "Sarah J. Maas Collection M4B") {
+		t.Error("a pack named only for the author was taken")
+	}
+	if BundleNames("A Court of Mist and Fury", maas, "A Court of Thorns and Roses", "Throne of Glass Box Set - Sarah J. Maas") {
+		t.Error("another series' pack was taken")
+	}
+}
