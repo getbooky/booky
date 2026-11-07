@@ -114,3 +114,44 @@ func TestPartOfSet(t *testing.T) {
 		t.Error("ebook flagged as part of a set")
 	}
 }
+
+func TestBundle(t *testing.T) {
+	cases := map[string]bool{
+		"Sarah J. Maas - A Court of Thorns and Roses Series (Books 1-4) M4B": true,
+		"Sarah J. Maas - ACOTAR Books 1-4 Unabridged MP3":                    true,
+		"ACOTAR #1-3 epub":                                       true,
+		"The Expanse Vol. 1 to 6":                                true,
+		"Harry Potter Complete Collection":                       true,
+		"Throne of Glass Box Set":                                true,
+		"The Hunger Games Trilogy (Unabridged)":                  true,
+		"Sarah J. Maas - A Court of Thorns and Roses Series M4B": true,
+		"A Court of Thorns and Roses / A Court of Mist and Fury / A Court of Wings and Ruin - Maas": true,
+		"A Court of Thorns and Roses - Sarah J. Maas M4B":                                           false,
+		"A Court of Silver Flames (A Court of Thorns and Roses #4) - Sarah J. Maas EPUB":            false,
+		"Court of Thorns and Roses 3: A Court of Wings and Ruin":                                    false,
+		"The Series of Unfortunate Events Begins":                                                   false, // "series" inside a title
+		"AC/DC - Let There Be Rock":                                                                 false,
+		"Fahrenheit 451":                                                                            false,
+	}
+	for title, want := range cases {
+		if got := Bundle(title); got != want {
+			t.Errorf("Bundle(%q) = %v, want %v", title, got, want)
+		}
+	}
+}
+
+func TestBundleFor(t *testing.T) {
+	const maas = "Sarah J. Maas"
+	if !BundleFor("A Court of Mist and Fury", maas, "A Court of Thorns and Roses", "ACOTAR Books 1-4 - Sarah J. Maas M4B") {
+		t.Error("the author's series pack should be offered")
+	}
+	if !BundleFor("A Court of Mist and Fury", maas, "A Court of Thorns and Roses", "A Court of Thorns and Roses Series (Books 1-4)") {
+		t.Error("a pack named for the series should be offered")
+	}
+	if BundleFor("A Court of Mist and Fury", maas, "A Court of Thorns and Roses", "Throne of Glass Box Set - Someone Else") {
+		t.Error("another author's pack offered")
+	}
+	if BundleFor("A Court of Mist and Fury", maas, "", "A Court of Mist and Fury - Sarah J. Maas") {
+		t.Error("a single book counted as a bundle")
+	}
+}

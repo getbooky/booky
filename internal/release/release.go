@@ -34,6 +34,10 @@ type Release struct {
 	// PartOfSet marks an audiobook release that is one piece of several
 	// separate downloads ("Part 1 of 2"). It is never grabbed automatically.
 	PartOfSet bool `json:"partOfSet,omitempty"`
+	// Bundle marks a release holding several books — a series pack — that
+	// may include this one. Never grabbed automatically; grabbed by hand,
+	// the download is split and each book in it filed with its own.
+	Bundle bool `json:"bundle,omitempty"`
 }
 
 // Profile is the slice of a quality profile that ranking needs.

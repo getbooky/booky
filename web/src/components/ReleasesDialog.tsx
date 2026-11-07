@@ -87,6 +87,9 @@ export function ReleasesDialog({ book, open, onOpenChange, onGrabbed, kind = "eb
 
   const grab = async (rel: ApiRelease) => {
     if (!book) return
+    if (rel.bundle && !window.confirm(audio
+      ? "This download holds several books. Booky will split it, file this book's audiobook, and also add the audiobook to any other of its books you have that don't have one yet. Books you don't have are left out."
+      : "This download holds several books. Booky will take the one named for this book, and refuse the download if it isn't in there.")) return
     setGrabbing(rel.downloadUrl)
     try {
       if (audio) await audiobooks.grab(book.id, rel)
@@ -196,13 +199,14 @@ export function ReleasesDialog({ book, open, onOpenChange, onGrabbed, kind = "eb
                   <div className="mt-1 flex flex-wrap items-center gap-1.5 text-xs text-muted-foreground">
                     {r.titleMismatch && <Tag kind="want">Different title?</Tag>}
                     {r.partOfSet && <Tag kind="want">Only part of the book</Tag>}
+                    {r.bundle && <Tag kind="info">Several books</Tag>}
                     {r.format && <Fmt>{r.format.toUpperCase()}</Fmt>}
                     <Tag kind="dim">{r.indexer ?? label(baseSource(r))}</Tag>
                     <span>{r.protocol}</span>
                     {r.sizeBytes ? <span>· {fmtSize(r.sizeBytes)}</span> : null}
                   </div>
                 </div>
-                <Button className="h-8" variant={r.titleMismatch ? "outline" : "default"} disabled={grabbing !== null} onClick={() => grab(r)}>
+                <Button className="h-8" variant={r.titleMismatch || r.bundle ? "outline" : "default"} disabled={grabbing !== null} onClick={() => grab(r)}>
                   <Download className="mr-1.5 h-3.5 w-3.5" />
                   {grabbing === r.downloadUrl ? "Grabbing…" : "Grab"}
                 </Button>

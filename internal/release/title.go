@@ -196,3 +196,61 @@ func PartOfSet(title string) bool {
 	}
 	return false
 }
+
+// bundleRe finds a release that says it holds several books: a range of
+// book numbers ("Books 1-4", "#1-3", "Vol. 1 to 6") or a collection word.
+var bundleRe = regexp.MustCompile(`(?i)(?:\b(?:books?|bk|vols?|volumes?)\.?|#)\s*\d{1,3}\s*(?:-|–|—|to|thru|through|&|and)\s*\d{1,3}\b` +
+	`|\b(?:box(?:ed)?[ -]?set|collection|omnibus|anthology|complete series|series set|bundle)\b` +
+	`|\b(?:trilogy|duology|quartet|series)\s*(?:$|[\[({]|\b(?:m4b|mp3|epub|unabridged|audiobook)\b)`)
+
+// Bundle reports whether a release holds several books — a series pack —
+// rather than one. Book names listed with " / " count too ("A / B / C").
+// A bundle is never grabbed automatically: the download has to be split
+// into its books, and only then is it known whether this book is in it.
+func Bundle(title string) bool {
+	if bundleRe.MatchString(title) {
+		return true
+	}
+	// "Title A / Title B / Title C": two or more real names between slashes
+	parts := strings.Split(title, " / ")
+	if len(parts) < 2 {
+		return false
+	}
+	named := 0
+	for _, p := range parts {
+		if len(significant(words(p))) >= 1 {
+			named++
+		}
+	}
+	return named >= 2
+}
+
+// BundleFor reports whether a release is a bundle that may hold this book:
+// one that names the book, its series, or its author. Bundles of other
+// authors' books aren't worth showing.
+func BundleFor(bookTitle, author, series, releaseTitle string) bool {
+	if !Bundle(releaseTitle) {
+		return false
+	}
+	have := map[string]bool{}
+	for _, w := range words(releaseTitle) {
+		have[w] = true
+	}
+	// the author's surname
+	if ws := words(author); len(ws) > 0 && len(ws[len(ws)-1]) > 1 && have[ws[len(ws)-1]] {
+		return true
+	}
+	allIn := func(s string) bool {
+		ws := significant(words(s))
+		if len(ws) == 0 {
+			return false
+		}
+		for _, w := range ws {
+			if !have[w] {
+				return false
+			}
+		}
+		return true
+	}
+	return allIn(series) || allIn(bookTitle)
+}
