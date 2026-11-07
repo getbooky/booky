@@ -390,11 +390,19 @@ func (s *Store) DeleteAuthor(authorID int64) error {
 // BEFORE DeleteAuthor: the cascade erases the file paths. Returns how many
 // files were deleted.
 func (s *Store) DeleteAuthorFiles(authorID int64) (int, error) {
+	// ebooks and audiobooks alike
 	rows, err := s.db.Query(`SELECT lb.file_path, l.root_path
 		FROM library_books lb
 		JOIN books b ON b.id = lb.book_id
 		JOIN libraries l ON l.id = lb.library_id
-		WHERE b.author_id = ? AND lb.file_path IS NOT NULL AND lb.file_path != ''`, authorID)
+		WHERE b.author_id = ? AND lb.file_path IS NOT NULL AND lb.file_path != ''
+		UNION ALL
+		SELECT au.file_path, l.root_path
+		FROM audiobooks au
+		JOIN books b ON b.id = au.book_id
+		JOIN library_books lb ON lb.book_id = b.id
+		JOIN libraries l ON l.id = lb.library_id
+		WHERE b.author_id = ?`, authorID, authorID)
 	if err != nil {
 		return 0, err
 	}

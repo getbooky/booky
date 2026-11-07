@@ -4,6 +4,7 @@ package api
 import (
 	"database/sql"
 	"encoding/json"
+	"github.com/getbooky/booky/internal/audiobook"
 	"io/fs"
 	"log"
 	"net/http"
@@ -54,6 +55,11 @@ type Server struct {
 	// the paced Kindle auto-send worker, started on first use
 	kindleOnce sync.Once
 	kindleJobs chan kindleJob
+	// Audiobooks and the read-along worker; audioImports tracks imports
+	// running in the background, by book id
+	Audiobooks   *audiobook.Store
+	ReadAlong    *audiobook.Worker
+	audioImports sync.Map
 }
 
 type Deps struct {
@@ -74,6 +80,8 @@ type Deps struct {
 	Kindle       *kindle.Store
 	Backups      *backup.Manager
 	OPDS         *opds.Handler
+	Audiobooks   *audiobook.Store
+	ReadAlong    *audiobook.Worker
 }
 
 func New(d Deps) (*Server, error) {
@@ -87,6 +95,7 @@ func New(d Deps) (*Server, error) {
 		Covers: d.Covers, AuthorPhotos: d.AuthorPhotos, Settings: d.Settings, Logs: d.Logs,
 		Acquire: d.Acquire, Watcher: d.Watcher,
 		Auth: d.Auth, KoReader: d.KoReader, Kindle: d.Kindle, Backups: d.Backups, OPDS: d.OPDS,
+		Audiobooks: d.Audiobooks, ReadAlong: d.ReadAlong,
 		mediaRoot: "/data",
 	}, nil
 }
@@ -196,6 +205,15 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("DELETE /api/v1/kindle/devices/{id}", s.handleKindleRemoveDevice)
 	mux.HandleFunc("POST /api/v1/kindle/devices/{id}/test", s.handleKindleDeviceTest)
 	mux.HandleFunc("POST /api/v1/books/{id}/send", s.handleBookSendToKindle)
+	mux.HandleFunc("GET /api/v1/books/{id}/audiobook", s.handleAudiobook)
+	mux.HandleFunc("POST /api/v1/books/{id}/audiobook", s.handleAudiobookUpload)
+	mux.HandleFunc("DELETE /api/v1/books/{id}/audiobook", s.handleAudiobookDelete)
+	mux.HandleFunc("POST /api/v1/books/{id}/audiobook/import", s.handleAudiobookImport)
+	mux.HandleFunc("POST /api/v1/books/{id}/audiobook/rebuild", s.handleAudiobookRebuild)
+	mux.HandleFunc("GET /api/v1/books/{id}/audiobook/file", s.handleAudiobookFile)
+	mux.HandleFunc("GET /api/v1/books/{id}/readalong/{file...}", s.handleReadAlongFile)
+	mux.HandleFunc("GET /api/v1/books/{id}/listen", s.handleGetListen)
+	mux.HandleFunc("PUT /api/v1/books/{id}/listen", s.handlePutListen)
 	s.OPDS.Register(mux)
 	mux.Handle("/", s.spaHandler())
 	return s.requireAuth(mux)

@@ -269,6 +269,10 @@ func (s *Server) handleBookRemove(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusConflict, err)
 		return
 	}
+	// the audiobook leaves with the book; its file goes when the book's does
+	if a, err := s.Audiobooks.Get(bookID); err == nil {
+		s.dropAudiobook(a, mode != "library")
+	}
 	// A delete is the one action nothing else leaves a trace of — the book
 	// simply stops being there. Record what went and how far it went, so
 	// "where did X go?" has an answer that isn't a shrug.

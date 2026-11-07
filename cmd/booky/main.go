@@ -14,6 +14,7 @@ import (
 
 	"github.com/getbooky/booky/internal/acquire"
 	"github.com/getbooky/booky/internal/api"
+	"github.com/getbooky/booky/internal/audiobook"
 	"github.com/getbooky/booky/internal/auth"
 	"github.com/getbooky/booky/internal/backup"
 	"github.com/getbooky/booky/internal/catalog"
@@ -23,6 +24,7 @@ import (
 	"github.com/getbooky/booky/internal/koreader"
 	"github.com/getbooky/booky/internal/metadata"
 	"github.com/getbooky/booky/internal/opds"
+	"github.com/getbooky/booky/internal/readalong"
 	"github.com/getbooky/booky/internal/secrets"
 	"github.com/getbooky/booky/internal/settings"
 	"github.com/getbooky/booky/internal/watcher"
@@ -106,14 +108,30 @@ func main() {
 	}
 
 	accounts := auth.New(database)
+	// audiobooks and read-along: ffmpeg and the speech recogniser ship in the
+	// Docker image; without them audiobooks still import and play
+	audiobooks := audiobook.NewStore(database)
+	tools, toolsErr := readalong.FindTools()
+	if toolsErr != nil {
+		log.Printf("read-along: %v", toolsErr)
+	}
+	readAlong := &audiobook.Worker{Store: audiobooks, Tools: tools, ToolsErr: toolsErr,
+		Dir: filepath.Join(configDir, "readalong")}
+	if n, err := readAlong.Sweep(); err != nil {
+		log.Printf("read-along sweep: %v", err)
+	} else if n > 0 {
+		log.Printf("read-along: removed %d leftover build(s)", n)
+	}
 	server, err := api.New(api.Deps{
 		DB: database, Version: version, Dist: web.Dist,
 		Catalog: cat, Chain: chain, Importer: imp, Covers: covers, AuthorPhotos: authorPhotos, Settings: cfg, Logs: logs,
 		Acquire: engine, Watcher: watch,
 		Auth: accounts, KoReader: koDevices, Kindle: kindle.New(database, keeper), Backups: backups,
-		// one auth store for web and OPDS, so a lockout or a changed OPDS
+		// one auth store for web and OPDS, so a lockout or a changed
 		// password applies to both at once
-		OPDS: opds.New(database, cat, covers, accounts),
+		OPDS:       opds.New(database, cat, covers, accounts),
+		Audiobooks: audiobooks,
+		ReadAlong:  readAlong,
 	})
 	if err != nil {
 		log.Fatalf("init server: %v", err)
@@ -123,6 +141,7 @@ func main() {
 	imp.OnFileAdded = func(bookID, libraryID int64, path, format string) {
 		go server.KindleOnImport(bookID)
 	}
+	readAlong.EPUBFor = server.EPUBFor
 	// a watched list sharing a book that's already on disk: send on tag
 	watch.OnTagged = func(ch catalog.TagChange) {
 		go server.KindleOnTagged(ch.BookID, ch.Added, true)
@@ -141,6 +160,7 @@ func main() {
 	// background loops: list polling, release-day triggers, download tracking
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	go readAlong.Run(ctx)
 	go watch.Run(ctx)
 
 	httpServer := &http.Server{

@@ -1,9 +1,12 @@
 import { useEffect, useRef, useState } from "react"
-import { ArrowLeft, List } from "lucide-react"
-import { api, bookFileUrl } from "@/api"
+import { ArrowLeft, List, Pause, Play, SkipBack, SkipForward } from "lucide-react"
+import { api, audiobooks, bookFileUrl } from "@/api"
 import type { ApiBook } from "@/api"
 import { cn } from "@/lib/utils"
 import type { RelocateDetail, TOCItem, View } from "@/vendor/foliate-js/view.js"
+import { formatDuration } from "@/lib/time"
+import { ACTIVE_CLASS, ReadAlongPlayer } from "./readAlong"
+import type { PlayerState } from "./readAlong"
 
 // The reader keeps its own theme, independent of the app's: you can read on
 // a dark page while the app is in daylight mode and vice versa. Both palettes
@@ -44,6 +47,10 @@ const contentCSS = (theme: ReaderTheme, fontSize: number) => {
     p, li, blockquote, dd { line-height: 1.62; -webkit-hyphens: auto; hyphens: auto; widows: 2; }
     pre { white-space: pre-wrap !important; }
     img, svg { max-width: 100%; }
+    .${ACTIVE_CLASS} {
+      background-color: ${theme === "dark" ? "hsl(38 70% 51% / 0.28)" : "hsl(38 80% 60% / 0.35)"} !important;
+      border-radius: 3px; box-decoration-break: clone; -webkit-box-decoration-break: clone;
+    }
     aside[epub|type~="endnote"], aside[epub|type~="footnote"],
     aside[epub|type~="note"], aside[epub|type~="rearnote"] { display: none; }
   `
@@ -65,7 +72,12 @@ function flattenToc(items: TOCItem[], depth = 0): { item: TOCItem; depth: number
   ])
 }
 
-export function ReaderView({ book, onClose }: { book: ApiBook; onClose: () => void }) {
+const RATES = [0.8, 1, 1.15, 1.3, 1.5, 1.75, 2]
+
+// readAlong opens the read-along edition with the audiobook playing over it;
+// the place you're at is the listen position, not the reading progress (the
+// edition's markup differs from the ebook's, so its locations don't carry).
+export function ReaderView({ book, readAlong = false, onClose }: { book: ApiBook; readAlong?: boolean; onClose: () => void }) {
   const containerRef = useRef<HTMLDivElement>(null)
   const viewRef = useRef<View | null>(null)
   const [loading, setLoading] = useState(true)
@@ -77,6 +89,8 @@ export function ReaderView({ book, onClose }: { book: ApiBook; onClose: () => vo
   const [loc, setLoc] = useState<Loc | null>(null)
   const [theme, setTheme] = useState<ReaderTheme>(() =>
     localStorage.getItem("booky-reader-theme") === "light" ? "light" : "dark")
+  const playerRef = useRef<ReadAlongPlayer | null>(null)
+  const [player, setPlayer] = useState<PlayerState | null>(null)
   const [fontSize, setFontSize] = useState(() => {
     const v = parseInt(localStorage.getItem("booky-reader-font") ?? "", 10)
     return v >= 14 && v <= 24 ? v : 18
@@ -112,13 +126,22 @@ export function ReaderView({ book, onClose }: { book: ApiBook; onClose: () => vo
   const handleKey = (e: KeyboardEvent) => {
     if (e.key === "ArrowLeft") void viewRef.current?.goLeft()
     else if (e.key === "ArrowRight") void viewRef.current?.goRight()
+    else if (e.key === " " && playerRef.current) { e.preventDefault(); togglePlay() }
     else if (e.key === " ") { e.preventDefault(); void viewRef.current?.goRight() }
     else if (e.key === "Escape") {
       if (ui.current.tocOpen || ui.current.aaOpen) { setTocOpen(false); setAaOpen(false) }
       else exit()
     }
   }
-  const exit = () => { flushSave(); onClose() }
+  const exit = () => { flushSave(); playerRef.current?.save(true); onClose() }
+  // play picks up at the page you're looking at if you've turned away from
+  // the narration; otherwise it carries on
+  const togglePlay = () => {
+    const p = playerRef.current
+    if (!p) return
+    if (p.playing) p.pause()
+    else p.playFromPage()
+  }
 
   useEffect(() => {
     let cancelled = false
@@ -137,7 +160,7 @@ export function ReaderView({ book, onClose }: { book: ApiBook; onClose: () => vo
         locCurrent: d.location?.current,
         locTotal: d.location?.total,
       })
-      if (d.cfi) scheduleSave(d.cfi, fraction)
+      if (d.cfi && !readAlong) scheduleSave(d.cfi, fraction)
     }
     // book documents live in iframes, so taps and keys inside them need
     // their own listeners; tap x is mapped back into window coordinates
@@ -152,23 +175,31 @@ export function ReaderView({ book, onClose }: { book: ApiBook; onClose: () => vo
       })
       doc.addEventListener("keydown", handleKey)
     }
-    const onHide = () => { if (document.visibilityState === "hidden") flushSave() }
+    const onHide = () => {
+      if (document.visibilityState !== "hidden") return
+      flushSave()
+      playerRef.current?.save(true)
+    }
 
     ;(async () => {
       try {
         await import("@/vendor/foliate-js/view.js")
-        const [res, progress] = await Promise.all([
-          fetch(bookFileUrl(book.id)),
-          api.readingProgress(book.id).catch(() => ({ locator: "", percent: 0 })),
+        const [res, progress, timing, listen] = await Promise.all([
+          fetch(readAlong ? audiobooks.readAlongUrl(book.id, "readalong.epub") : bookFileUrl(book.id)),
+          readAlong
+            ? { locator: "", percent: 0 }
+            : api.readingProgress(book.id).catch(() => ({ locator: "", percent: 0 })),
+          readAlong ? audiobooks.timing(book.id) : null,
+          readAlong ? audiobooks.position(book.id).catch(() => ({ position: 0 })) : null,
         ])
         if (!res.ok) {
           throw new Error(res.status === 404
-            ? "No file on the shelf for this book."
+            ? (readAlong ? "The read-along isn't ready for this book." : "No file on the shelf for this book.")
             : `Couldn't load the book file (${res.status}).`)
         }
         const blob = await res.blob()
         if (cancelled) return
-        const name = book.filePath?.split("/").pop() || `${book.title}.epub`
+        const name = readAlong ? "readalong.epub" : book.filePath?.split("/").pop() || `${book.title}.epub`
         const file = new File([blob], name, { type: blob.type })
 
         const view = document.createElement("foliate-view") as unknown as View
@@ -189,7 +220,15 @@ export function ReaderView({ book, onClose }: { book: ApiBook; onClose: () => vo
           parseInt(localStorage.getItem("booky-reader-font") ?? "18", 10) || 18,
         ))
         await view.init({ lastLocation: progress.locator || null, showTextStart: !progress.locator })
-        if (!cancelled) setLoading(false)
+        if (cancelled) return
+        if (timing) {
+          const p = new ReadAlongPlayer(book.id, timing, view, setPlayer)
+          playerRef.current = p
+          p.setMetadata(book.title, book.author ?? "")
+          // back to where you left off listening (the page follows)
+          p.seek(listen?.position ?? 0)
+        }
+        setLoading(false)
       } catch (err) {
         if (!cancelled) {
           setError(err instanceof Error ? err.message : String(err))
@@ -206,6 +245,8 @@ export function ReaderView({ book, onClose }: { book: ApiBook; onClose: () => vo
       document.removeEventListener("visibilitychange", onHide)
       document.body.style.overflow = prevOverflow
       flushSave()
+      playerRef.current?.destroy()
+      playerRef.current = null
       viewRef.current?.close()
       viewRef.current?.remove()
       viewRef.current = null
@@ -227,7 +268,9 @@ export function ReaderView({ book, onClose }: { book: ApiBook; onClose: () => vo
     "--r-faint": t.faint, "--r-muted": t.muted, "--r-brass": t.brass,
     "--r-brass-ink": t.brassInk, "--r-scrim": t.scrim,
   } as React.CSSProperties
-  const pct = loc ? Math.round(loc.fraction * 100) : 0
+  const pct = player && player.duration > 0
+    ? Math.round(100 * player.position / player.duration)
+    : loc ? Math.round(loc.fraction * 100) : 0
   const flatToc = flattenToc(toc)
   const barBase = "fixed left-3 right-3 z-20 flex items-center gap-2 rounded-2xl border px-3 " +
     "border-(--r-linesoft) bg-(--r-surface) shadow-(--r-shadow) backdrop-blur-md " +
@@ -242,7 +285,8 @@ export function ReaderView({ book, onClose }: { book: ApiBook; onClose: () => vo
 
       {/* reading surface — inset so text clears the floating bars */}
       <div ref={containerRef}
-        className="absolute inset-x-0 bottom-[3.6rem] top-[calc(env(safe-area-inset-top)+4.2rem)]"
+        className={cn("absolute inset-x-0 top-[calc(env(safe-area-inset-top)+4.2rem)]",
+          readAlong ? "bottom-[5.4rem]" : "bottom-[3.6rem]")}
         onClick={e => handleTap(e.clientX)} />
 
       {loading && (
@@ -271,7 +315,7 @@ export function ReaderView({ book, onClose }: { book: ApiBook; onClose: () => vo
         <div className="min-w-0 flex-1 leading-tight">
           <div className="truncate text-[14.5px] font-semibold">{book.title}</div>
           <div className="mono-label truncate text-[10px] text-(--r-muted)">
-            {book.author}{book.fileFormat ? ` · ${book.fileFormat.toUpperCase()}` : ""}
+            {book.author}{readAlong ? " · read-along" : book.fileFormat ? ` · ${book.fileFormat.toUpperCase()}` : ""}
           </div>
         </div>
         <button className={iconBtn} aria-label="Table of contents" title="Contents"
@@ -284,7 +328,43 @@ export function ReaderView({ book, onClose }: { book: ApiBook; onClose: () => vo
         </button>
       </div>
 
-      {/* bottom bar */}
+      {/* bottom bar — in read-along it's the player, and stays put */}
+      {readAlong ? (
+        <div className={cn(barBase, "bottom-3 flex-col items-stretch gap-1 py-2")}>
+          <input type="range" aria-label="Position" min={0} max={Math.max(1, Math.round(player?.duration ?? 0))} step={1}
+            value={Math.round(player?.position ?? 0)} disabled={!player}
+            onChange={e => playerRef.current?.seek(Number(e.target.value))}
+            className="h-1 w-full cursor-pointer accent-(--r-brass)" />
+          <div className="flex items-center gap-1">
+            <span className="mono-label w-[4.5rem] shrink-0 text-[10px] text-(--r-muted)">
+              {formatDuration(player?.position ?? 0)}
+            </span>
+            <div className="flex flex-1 items-center justify-center gap-1">
+              <button className={iconBtn} aria-label="Previous sentence" title="Previous sentence"
+                disabled={!player} onClick={() => playerRef.current?.skip(-1)}>
+                <SkipBack className="h-[18px] w-[18px]" />
+              </button>
+              <button aria-label={player?.playing ? "Pause" : "Play"} disabled={!player} onClick={togglePlay}
+                className="flex h-10 w-10 items-center justify-center rounded-full bg-(--r-brass) text-(--r-brass-ink) disabled:opacity-50">
+                {player?.playing ? <Pause className="h-[18px] w-[18px]" /> : <Play className="ml-0.5 h-[18px] w-[18px]" />}
+              </button>
+              <button className={iconBtn} aria-label="Next sentence" title="Next sentence"
+                disabled={!player} onClick={() => playerRef.current?.skip(1)}>
+                <SkipForward className="h-[18px] w-[18px]" />
+              </button>
+            </div>
+            <button className={cn(iconBtn, "mono-label w-[4.5rem] justify-end text-[11px]")} disabled={!player}
+              aria-label="Playback speed" title="Playback speed"
+              onClick={() => {
+                const r = player?.rate ?? 1
+                playerRef.current?.setRate(RATES[(RATES.findIndex(x => x >= r - 0.01) + 1) % RATES.length])
+              }}>
+              {Number((player?.rate ?? 1).toFixed(2))}×
+            </button>
+          </div>
+          {player?.error && <div className="text-center text-[12px] text-(--r-muted)">{player.error}</div>}
+        </div>
+      ) : (
       <div className={cn(barBase, "bottom-3 justify-between py-1.5",
         !chrome && "pointer-events-none translate-y-2 opacity-0")}>
         <span className="font-book min-w-0 truncate text-[12.5px] italic">{loc?.chapter || " "}</span>
@@ -292,6 +372,7 @@ export function ReaderView({ book, onClose }: { book: ApiBook; onClose: () => vo
           {loc?.locTotal ? `loc ${loc.locCurrent} / ${loc.locTotal} · ` : ""}{pct}%
         </span>
       </div>
+      )}
       {/* progress hairline survives chrome-hidden mode */}
       <div className="fixed inset-x-0 bottom-0 z-20 h-[2px]">
         <div className="h-full bg-(--r-brass) transition-[width]" style={{ width: `${pct}%` }} />

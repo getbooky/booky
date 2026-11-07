@@ -51,12 +51,14 @@ type Nav = {
   focusSeries?: string
   review: ApiLibrary | null
   reader: ApiBook | null
+  /** the reader plays the audiobook along with the text */
+  readAlong?: boolean
 }
 
 const HOME: Nav = { view: "home", scope: "all", library: null, tag: null, customScope: null, book: null, author: null, series: null, review: null, reader: null }
 
 const routeFor = (n: Nav): string => {
-  if (n.reader) return `#/read/${n.reader.id}`
+  if (n.reader) return `#/${n.readAlong ? "listen" : "read"}/${n.reader.id}`
   if (n.review) return `#/review/${n.review.id}`
   if (n.book) return `#/book/${n.book.id}`
   if (n.view === "library") {
@@ -141,7 +143,8 @@ function BookyApp({ user, usersExist, onLoggedOut }: { user: ApiUser | null; use
   }
   const back = () => window.history.back()
   // the reader overlays whatever you're looking at; back returns you there
-  const openReader = (b: ApiBook) => go({ ...navRef.current, reader: b })
+  const openReader = (b: ApiBook) => go({ ...navRef.current, reader: b, readAlong: false })
+  const openReadAlong = (b: ApiBook) => go({ ...navRef.current, reader: b, readAlong: true })
 
   const scopesQuery = useApi(async () => {
     try {
@@ -282,7 +285,7 @@ function BookyApp({ user, usersExist, onLoggedOut }: { user: ApiUser | null; use
             <>
               {nav.view === "library" && (nav.book
                 ? <BookDetail key={nav.book.id} book={nav.book} onBack={back} onChanged={bumped}
-                    onRead={openReader}
+                    onRead={openReader} onReadAlong={openReadAlong}
                     onOpenSeries={async b => {
                       if (!b.seriesId) return
                       const series = ((await api.series()).series ?? []).find(s => s.id === b.seriesId)
@@ -346,7 +349,7 @@ function BookyApp({ user, usersExist, onLoggedOut }: { user: ApiUser | null; use
 
       <BottomNav view={nav.view} onBrowse={v => go({ view: v })} />
 
-      {nav.reader && <ReaderView key={nav.reader.id} book={nav.reader} onClose={back} />}
+      {nav.reader && <ReaderView key={`${nav.reader.id}-${nav.readAlong ? 1 : 0}`} book={nav.reader} readAlong={!!nav.readAlong} onClose={back} />}
 
       <AddBookDialog open={addOpen} onOpenChange={setAddOpen} libraries={libraries} onAdded={bumped} />
       <SetupWizard open={wizardOpen} onOpenChange={closeWizard} onDone={bumped} />
