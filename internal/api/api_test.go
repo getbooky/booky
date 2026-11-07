@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"github.com/getbooky/booky/internal/audiobook"
+	"github.com/getbooky/booky/internal/readalong"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -79,25 +81,32 @@ func testServer(t *testing.T) *Server {
 	engine := acquire.New(conn, cat, cfg, imp, covers)
 	hc := metadata.NewHardcover(func() string { return cfg.Get("hardcover_token") })
 	accounts := auth.New(conn)
+	audiobooks := audiobook.NewStore(conn)
+	tools, toolsErr := readalong.FindTools() // present in the integration image
+	readAlong := &audiobook.Worker{Store: audiobooks, Tools: tools, ToolsErr: toolsErr, Dir: filepath.Join(configDir, "readalong")}
 	srv, err := New(Deps{
 		DB: conn, Version: "test",
-		Dist:     fstest.MapFS{"dist/index.html": {Data: []byte("<html>booky</html>")}},
-		Catalog:  cat,
-		Chain:    chain,
-		Importer: imp,
-		Covers:   covers,
-		Settings: cfg,
-		Acquire:  engine,
-		Watcher:  watcher.New(conn, cat, chain, cfg, engine, covers, hc),
-		Auth:     accounts,
-		KoReader: koreader.New(conn, testKeeper(t)),
-		Kindle:   kindle.New(conn, testKeeper(t)),
-		Backups:  backup.New(conn, configDir),
-		OPDS:     opds.New(conn, cat, covers, accounts),
+		Dist:       fstest.MapFS{"dist/index.html": {Data: []byte("<html>booky</html>")}},
+		Catalog:    cat,
+		Chain:      chain,
+		Importer:   imp,
+		Covers:     covers,
+		Settings:   cfg,
+		Acquire:    engine,
+		Watcher:    watcher.New(conn, cat, chain, cfg, engine, covers, hc),
+		Auth:       accounts,
+		KoReader:   koreader.New(conn, testKeeper(t)),
+		Kindle:     kindle.New(conn, testKeeper(t)),
+		Backups:    backup.New(conn, configDir),
+		OPDS:       opds.New(conn, cat, covers, accounts),
+		Audiobooks: audiobooks,
+		ReadAlong:  readAlong,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
+	readAlong.EPUBFor = srv.EPUBFor
+	engine.ImportAudio = srv.ImportAudioFrom
 	return srv
 }
 

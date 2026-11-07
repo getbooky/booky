@@ -91,12 +91,23 @@ type searchResult struct {
 	Protocol    string `json:"protocol"`
 }
 
+// Newznab categories Booky searches in.
+const (
+	CategoryBooks      = "7000" // ebooks, on usenet and torrent trackers alike
+	CategoryAudiobooks = "3030" // Audio/Audiobook
+)
+
 // Search runs a free-text query across enabled indexers in the books
-// categories (7000 covers ebooks on both usenet and torrent trackers).
+// categories.
 func (c *Client) Search(ctx context.Context, query string) ([]release.Release, error) {
+	return c.SearchIn(ctx, query, CategoryBooks)
+}
+
+// SearchIn runs a free-text query in one category.
+func (c *Client) SearchIn(ctx context.Context, query, category string) ([]release.Release, error) {
 	q := url.Values{}
 	q.Set("query", query)
-	q.Add("categories", "7000")
+	q.Add("categories", category)
 	q.Set("type", "search")
 	var results []searchResult
 	if err := c.get(ctx, "/api/v1/search", q, &results); err != nil {

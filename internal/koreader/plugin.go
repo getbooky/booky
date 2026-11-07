@@ -2,6 +2,7 @@ package koreader
 
 import (
 	"archive/zip"
+	_ "embed"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -25,12 +26,13 @@ func (s *Store) BuildPlugin(w io.Writer, d *Device, serverURL string) error {
 	}
 	zw := zip.NewWriter(w)
 	files := map[string]string{
-		"_meta.lua":  metaLua,
-		"main.lua":   mainLua,
-		"config.lua": configLua(d, serverURL),
+		"_meta.lua":           metaLua,
+		"main.lua":            mainLua,
+		"booky_readalong.lua": readAlongLua,
+		"config.lua":          configLua(d, serverURL),
 	}
 	// deterministic order keeps zips byte-comparable for the same inputs
-	for _, name := range []string{"_meta.lua", "main.lua", "config.lua"} {
+	for _, name := range []string{"_meta.lua", "main.lua", "booky_readalong.lua", "config.lua"} {
 		f, err := zw.Create(name)
 		if err != nil {
 			return err
@@ -63,11 +65,18 @@ return {
 `, d.Name, serverURL, d.Token, d.Name, string(libs), string(auto))
 }
 
+// readAlongLua plays a book's audiobook and follows it in the text; it
+// lives in its own file so its logic can be tested with plain LuaJIT
+// (plugin/booky_readalong_test.lua).
+//
+//go:embed plugin/booky_readalong.lua
+var readAlongLua string
+
 const metaLua = `local _ = require("gettext")
 return {
     name = "booky",
     fullname = _("Booky"),
-    description = _([[Browse your Booky libraries (by author, series or genre), download books over wifi, and auto-sync new arrivals.]]),
+    description = _([[Browse your Booky libraries (by author, series or genre), download books over wifi, auto-sync new arrivals, and read along with audiobooks.]]),
 }
 `
 
@@ -111,6 +120,8 @@ local socketutil = require("socketutil")
 local _ = require("gettext")
 
 local config = require("config")
+local ReadAlong = require("booky_readalong")
+local ButtonDialog = require("ui/widget/buttondialog")
 
 local Booky = WidgetContainer:extend{
     name = "booky",
@@ -127,6 +138,13 @@ function Booky:init()
             self.settings:saveSetting("download_dir", legacy)
             self.settings:flush()
         end
+    end
+    self.config = config
+    self.readalong = ReadAlong.new(self)
+    -- in the reader the document is already open: attach now, so the menu
+    -- (which may be built before ReaderReady) has the read-along entry
+    if self.ui and self.ui.document then
+        self.player = self.readalong:attach(self.ui)
     end
     self.cover_cache = DataStorage:getFullDataDir() .. "/cache/booky-covers"
     self._cover_miss = {}
@@ -202,9 +220,125 @@ function Booky:onDispatcherRegisterActions()
     Dispatcher:registerAction("booky_browse", {
         category = "none", event = "BookyBrowse", title = _("Booky: browse library"), general = true,
     })
+    -- read-along controls, to put on a gesture or a page-turn button
+    Dispatcher:registerAction("booky_readalong_toggle", {
+        category = "none", event = "BookyReadAlongToggle", title = _("Booky read-along: play / pause"), reader = true,
+    })
+    Dispatcher:registerAction("booky_readalong_back", {
+        category = "none", event = "BookyReadAlongBack", title = _("Booky read-along: previous sentence"), reader = true,
+    })
+    Dispatcher:registerAction("booky_readalong_forward", {
+        category = "none", event = "BookyReadAlongForward", title = _("Booky read-along: next sentence"), reader = true,
+    })
+end
+
+-- ---- read-along (in the reader) ----
+
+function Booky:onReaderReady()
+    self.player = self.player or self.readalong:attach(self.ui)
+    if self.player and not self.settings:readSetting("readalong_hint_shown") then
+        self.settings:saveSetting("readalong_hint_shown", true)
+        self.settings:flush()
+        UIManager:show(InfoMessage:new{
+            text = _("This is a Booky read-along. Open the menu → Read-along → Play, with Bluetooth headphones connected.\n\nPlay / pause can also go on a gesture: Settings → Gestures → Booky read-along."),
+        })
+    end
+end
+
+function Booky:onCloseDocument()
+    if self.player then
+        self.readalong:detach()
+        self.player = nil
+    end
+end
+
+-- the device sleeping stops the sound: pause properly, so the place is kept
+function Booky:onSuspend()
+    if self.player and self.player.playing then self.player:pause() end
+end
+
+function Booky:onBookyReadAlongToggle()
+    if self.player then self.player:toggle() end
+    return true
+end
+
+function Booky:onBookyReadAlongBack()
+    if self.player then self.player:skip(-1) end
+    return true
+end
+
+function Booky:onBookyReadAlongForward()
+    if self.player then self.player:skip(1) end
+    return true
+end
+
+function Booky:readAlongMenu()
+    local p = self.player
+    return {
+        text = _("Read-along"),
+        sorting_hint = "main",
+        sub_item_table = {
+            {
+                text_func = function() return p.playing and _("Pause") or _("Play") end,
+                keep_menu_open = false,
+                callback = function() p:toggle() end,
+            },
+            {
+                text = _("Previous sentence"),
+                keep_menu_open = true,
+                callback = function() p:skip(-1) end,
+            },
+            {
+                text = _("Next sentence"),
+                keep_menu_open = true,
+                callback = function() p:skip(1) end,
+            },
+            {
+                text = _("Turn pages with the narration"),
+                checked_func = function() return p.follow end,
+                callback = function()
+                    p.follow = not p.follow
+                    self.settings:saveSetting("readalong_follow", p.follow)
+                    self.settings:flush()
+                end,
+            },
+            {
+                text_func = function()
+                    return _("Audio delay: ") .. string.format("%.1f s", p.delay)
+                end,
+                help_text = _("Bluetooth headphones play slightly late. If the highlight runs ahead of the voice, raise this; if it lags, lower it."),
+                keep_menu_open = true,
+                sub_item_table = {
+                    { text = _("Later (+0.1 s)"), keep_menu_open = true, callback = function()
+                        p.delay = math.min(3, p.delay + 0.1)
+                        self.settings:saveSetting("readalong_delay", p.delay)
+                    end },
+                    { text = _("Earlier (−0.1 s)"), keep_menu_open = true, callback = function()
+                        p.delay = math.max(0, p.delay - 0.1)
+                        self.settings:saveSetting("readalong_delay", p.delay)
+                    end },
+                },
+            },
+            {
+                text_func = function()
+                    local have, total = self.readalong:audioReady(p.book_id)
+                    if have >= total then return _("Audio: all downloaded") end
+                    return _("Audio: ") .. tostring(have) .. " / " .. tostring(total) .. _(" parts — download the rest")
+                end,
+                callback = function()
+                    if not NetworkMgr:isOnline() then
+                        UIManager:show(InfoMessage:new{ text = _("Booky: no network connection") })
+                        return
+                    end
+                    self.readalong:fetchAudio(p.book_id)
+                end,
+            },
+        },
+    }
 end
 
 function Booky:addToMainMenu(menu_items)
+    if self.player then menu_items.booky_readalong = self:readAlongMenu() end
     menu_items.booky = {
         text = _("Booky"),
         sorting_hint = "tools",
@@ -900,6 +1034,7 @@ end
 
 -- pickBook downloads (or offers to open) the tapped book.
 function Booky:pickBook(book, on_change)
+    if book.readAlong then return self:pickReadAlong(book, on_change) end
     if self:isDownloaded(book) then
         UIManager:show(ConfirmBox:new{
             text = _("Already on this device:\n") .. (book.title or "?") .. "\n\n" .. _("Open it now?"),
@@ -929,6 +1064,47 @@ function Booky:pickBook(book, on_change)
             end,
         })
     end)
+end
+
+-- pickReadAlong offers the book and its read-along: the read-along is a
+-- separate copy ("<book> - read-along.epub"), so notes and positions in the
+-- plain copy are never touched.
+function Booky:pickReadAlong(book, on_change)
+    local dialog
+    local edition = self.readalong:editionPath(book)
+    local have_edition = edition and lfs.attributes(edition, "mode") == "file"
+    local rows = {}
+    if have_edition then
+        table.insert(rows, { { text = _("Open the read-along"), callback = function()
+            UIManager:close(dialog)
+            self:openBook(edition)
+        end } })
+    end
+    table.insert(rows, { { text = have_edition and _("Update the read-along") or _("Download the read-along"), callback = function()
+        UIManager:close(dialog)
+        self:ensureDownloadDir(function()
+            UIManager:show(InfoMessage:new{ text = _("Booky: getting the read-along…"), timeout = 1 })
+            UIManager:scheduleIn(0.2, function()
+                self.readalong:download(book, function(path)
+                    if on_change then on_change() end
+                    UIManager:show(ConfirmBox:new{
+                        text = _("Read-along ready: ") .. (book.title or "?")
+                            .. "\n\n" .. _("The audio keeps downloading in the background. Open it now?"),
+                        ok_text = _("Open"),
+                        ok_callback = function() self:openBook(path) end,
+                    })
+                end)
+            end)
+        end)
+    end } })
+    table.insert(rows, { { text = self:isDownloaded(book) and _("Open the book") or _("Download the book"), callback = function()
+        UIManager:close(dialog)
+        book.readAlong = nil
+        self:pickBook(book, on_change)
+        book.readAlong = true
+    end } })
+    dialog = ButtonDialog:new{ title = (book.title or "?") .. "\n" .. _("Has a read-along"), buttons = rows }
+    UIManager:show(dialog)
 end
 
 function Booky:openBook(path)

@@ -33,10 +33,17 @@ type Engine struct {
 	covers   *catalog.CoverCache
 	annas    *directdl.Client
 
+	// ImportAudio files a downloaded audiobook (a file, or a folder of
+	// parts) for a book: beside its ebook, lined up for read-along. The
+	// server wires it in; nil means audiobook downloads can't be filed.
+	ImportAudio func(ctx context.Context, bookID int64, path string) error
+
 	// running holds a cancel func per queue row whose direct download is in
 	// flight in this process — SAB jobs are cancelled at SAB instead.
 	mu      sync.Mutex
 	running map[int64]context.CancelFunc
+	// importing marks queue rows whose audiobook is being filed right now
+	importing map[int64]bool
 }
 
 // The stock mirror lists live in the settings defaults (internal/settings),
@@ -154,7 +161,39 @@ type SourceStat struct {
 	Configured bool   `json:"configured"`
 	Disabled   bool   `json:"disabled,omitempty"`
 	Count      int    `json:"count"`
+	// Mismatched is how many of Count were named for other titles
+	Mismatched int    `json:"mismatched,omitempty"`
 	Error      string `json:"error,omitempty"`
+}
+
+// rankForBook ranks releases for a book: those named for it first, best
+// first; then the rest — other titles, kept so a person can still look —
+// marked, and scored so nothing automatic ever takes them.
+func rankForBook(book *catalog.Book, rels []release.Release, profile release.Profile, order []string, stats []SourceStat) []release.Release {
+	var match, other []release.Release
+	for _, r := range rels {
+		if release.TitleMatches(book.Title, book.Author, r.Title) {
+			match = append(match, r)
+			continue
+		}
+		r.TitleMismatch = true
+		other = append(other, r)
+		name, _, _ := strings.Cut(r.Source, ":")
+		for i := range stats {
+			if stats[i].Name == name {
+				stats[i].Mismatched++
+			}
+		}
+	}
+	ranked := release.Rank(match, profile, order)
+	for _, r := range release.Rank(other, profile, order) {
+		r.TitleMismatch = true
+		if r.Score > 0 {
+			r.Score = 0 // automatic grabs only take positive scores
+		}
+		ranked = append(ranked, r)
+	}
+	return ranked
 }
 
 // sourceEnabled reads a per-source kill switch; anything but an explicit
@@ -220,7 +259,7 @@ func (e *Engine) SearchDetailed(ctx context.Context, bookID, libraryID, profileI
 		return nil, stats, err
 	}
 	profile.BookTitle = book.Title
-	return release.Rank(all, profile, e.sourceOrder()), stats, nil
+	return rankForBook(book, all, profile, e.sourceOrder(), stats), stats, nil
 }
 
 func (e *Engine) dropBlocked(bookID int64, rels []release.Release) ([]release.Release, error) {
@@ -257,12 +296,19 @@ func (e *Engine) Block(bookID int64, rel release.Release, reason string) error {
 	return err
 }
 
+// ErrNoClient means there's nothing set up to download a release with.
+var ErrNoClient = errors.New("no download client")
+
 // Grab downloads a chosen release. Usenet goes to SABnzbd under Booky's
 // category; direct sources resolve and download immediately. Either way a
 // queue row tracks it. Returns the queue id.
 func (e *Engine) Grab(ctx context.Context, bookID, libraryID int64, rel release.Release) (int64, error) {
-	res, err := e.db.Exec(`INSERT INTO queue (book_id, library_id, release_title, source, protocol, status)
-		VALUES (?, ?, ?, ?, ?, 'queued')`, bookID, libraryID, rel.Title, rel.Source, rel.Protocol)
+	return e.grab(ctx, bookID, libraryID, rel, KindEbook)
+}
+
+func (e *Engine) grab(ctx context.Context, bookID, libraryID int64, rel release.Release, kind string) (int64, error) {
+	res, err := e.db.Exec(`INSERT INTO queue (book_id, library_id, release_title, source, protocol, status, kind)
+		VALUES (?, ?, ?, ?, ?, 'queued', ?)`, bookID, libraryID, rel.Title, rel.Source, rel.Protocol, kind)
 	if err != nil {
 		return 0, err
 	}
@@ -274,7 +320,9 @@ func (e *Engine) Grab(ctx context.Context, bookID, libraryID int64, rel release.
 		// cancelled request says nothing about it, and blocklisting those
 		// poisons every candidate tried during a gated window ("keyless
 		// downloads always fail" forever, even after the wall lifts)
-		transient := errors.Is(cause, directdl.ErrPartnersGated) ||
+		// nor is a missing download client: that's this install's setup, and
+		// blocklisting would lose the right release for good
+		transient := errors.Is(cause, directdl.ErrPartnersGated) || errors.Is(cause, ErrNoClient) ||
 			errors.Is(cause, context.Canceled) || errors.Is(cause, context.DeadlineExceeded)
 		if !transient {
 			if err := e.Block(bookID, rel, cause.Error()); err != nil {
@@ -284,18 +332,27 @@ func (e *Engine) Grab(ctx context.Context, bookID, libraryID int64, rel release.
 		return queueID, cause
 	}
 
+	// audiobooks come from usenet only: the direct sources carry ebooks
+	if kind == KindAudiobook && rel.Protocol != "usenet" {
+		return fail(fmt.Errorf("audiobooks are fetched over usenet, not %q", rel.Protocol))
+	}
+
 	switch rel.Protocol {
 	case "usenet":
 		sab := e.Sab()
 		if !sab.Configured() {
-			return fail(fmt.Errorf("SABnzbd is not configured"))
+			return fail(fmt.Errorf("SABnzbd is not configured: %w", ErrNoClient))
 		}
 		nzoID, err := sab.AddURL(ctx, rel.DownloadURL, rel.Title)
 		if err != nil {
 			return fail(err)
 		}
 		e.setQueueExternal(queueID, "downloading", "sent to SABnzbd", nzoID)
-		_ = e.catalog.AddHistory(bookID, libraryID, "grabbed", grabDetail(rel, "SABnzbd"))
+		event := "grabbed"
+		if kind == KindAudiobook {
+			event = "grabbed audiobook"
+		}
+		_ = e.catalog.AddHistory(bookID, libraryID, event, grabDetail(rel, "SABnzbd"))
 		return queueID, nil
 
 	case "direct":
@@ -341,7 +398,7 @@ func (e *Engine) Grab(ctx context.Context, bookID, libraryID int64, rel release.
 		// torrents ride through Prowlarr's download URL too, but a torrent
 		// client integration is not built yet — refuse loudly instead of
 		// pretending.
-		return fail(fmt.Errorf("no download client for protocol %q", rel.Protocol))
+		return fail(fmt.Errorf("no download client for protocol %q: %w", rel.Protocol, ErrNoClient))
 	}
 }
 
@@ -383,6 +440,8 @@ type QueueItem struct {
 	Status       string `json:"status"`
 	ExternalID   string `json:"externalId,omitempty"`
 	Detail       string `json:"detail,omitempty"`
+	// Kind is what the row fetches: "ebook" or "audiobook"
+	Kind string `json:"kind"`
 	// Both are RFC3339 (see catalog.SQLTime): CreatedAt is when the grab was
 	// sent, UpdatedAt when the row last changed state — the two times the
 	// queue answers "how long has this been sitting here?" with.
@@ -400,7 +459,7 @@ func (e *Engine) Queue(v *catalog.Visibility) ([]QueueItem, error) {
 	args = append(args, tagArgs...)
 	rows, err := e.db.Query(fmt.Sprintf( //nolint:gosec // G201: placeholders only, see catalog.IDPlaceholders
 		`SELECT q.id, q.book_id, q.library_id, b.title, q.release_title, q.source,
-		        q.protocol, q.status, q.external_id, q.detail, q.created_at, q.updated_at
+		        q.protocol, q.status, q.external_id, q.detail, q.created_at, q.updated_at, q.kind
 		 FROM queue q JOIN books b ON b.id = q.book_id
 		 WHERE (? = 1 OR EXISTS (SELECT 1 FROM book_tags bt WHERE bt.book_id = q.book_id AND bt.tag_id IN (%s)))
 		 ORDER BY q.id DESC LIMIT 200`, ph), args...)
@@ -412,7 +471,7 @@ func (e *Engine) Queue(v *catalog.Visibility) ([]QueueItem, error) {
 	for rows.Next() {
 		var it QueueItem
 		if err := rows.Scan(&it.ID, &it.BookID, &it.LibraryID, &it.BookTitle, &it.ReleaseTitle,
-			&it.Source, &it.Protocol, &it.Status, &it.ExternalID, &it.Detail, &it.CreatedAt, &it.UpdatedAt); err != nil {
+			&it.Source, &it.Protocol, &it.Status, &it.ExternalID, &it.Detail, &it.CreatedAt, &it.UpdatedAt, &it.Kind); err != nil {
 			return nil, err
 		}
 		it.CreatedAt, it.UpdatedAt = db.SQLTime(it.CreatedAt), db.SQLTime(it.UpdatedAt)
@@ -422,6 +481,8 @@ func (e *Engine) Queue(v *catalog.Visibility) ([]QueueItem, error) {
 }
 
 // PendingImports returns direct downloads that finished and wait for import.
+// (A usenet row in "importing" is an audiobook being filed — its external
+// id is a SAB job, not a file.)
 func (e *Engine) PendingImports() ([]QueueItem, error) {
 	items, err := e.Queue(nil)
 	if err != nil {
@@ -429,7 +490,7 @@ func (e *Engine) PendingImports() ([]QueueItem, error) {
 	}
 	keep := items[:0:0]
 	for _, it := range items {
-		if it.Status == "importing" && it.ExternalID != "" {
+		if it.Status == "importing" && it.ExternalID != "" && it.Protocol == "direct" && it.Kind == KindEbook {
 			keep = append(keep, it)
 		}
 	}

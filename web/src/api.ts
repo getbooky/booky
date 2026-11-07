@@ -27,6 +27,10 @@ export interface ApiBook {
   fieldLocks?: Record<string, boolean>
   /** Tags sharing this book. Plain users only see the tags they hold. */
   tagIds?: number[]
+  /** Read-along state of the book's audiobook; absent when it has none. */
+  audio?: AudiobookStatus
+  /** Booky searches for this book's audiobook (off unless switched on) */
+  audioMonitored?: boolean
 }
 
 export interface ApiAuthor {
@@ -315,12 +319,16 @@ export interface ApiRelease {
   infoUrl?: string
   indexer?: string
   score?: number
+  /** named for another title (most often another book by the author) — never auto-grabbed */
+  titleMismatch?: boolean
 }
 
 export interface ApiSourceStat {
   name: string
   configured: boolean
   count: number
+  /** how many of count were named for other titles */
+  mismatched?: number
   error?: string
 }
 
@@ -337,6 +345,8 @@ export interface ApiQueueItem {
   detail?: string
   createdAt: string
   updatedAt: string
+  /** what the row fetches */
+  kind?: "ebook" | "audiobook"
 }
 
 export interface ApiHistoryItem {
@@ -360,6 +370,18 @@ export interface ApiProfile {
   avoidedTerms: string
 }
 
+/** The one audiobook profile. */
+export interface ApiAudioProfile {
+  formats: string[]
+  /** accepted release languages, newline-separated; "" = filter off */
+  languages: string
+  preferredTerms: string
+  avoidedTerms: string
+  /** 0 = no limit */
+  minSizeMB: number
+  maxSizeMB: number
+}
+
 export const acquisition = {
   releases: (bookId: number, libraryId: number) =>
     request<{ releases: ApiRelease[] | null; sources: ApiSourceStat[] | null }>(`/api/v1/books/${bookId}/releases?libraryId=${libraryId}`),
@@ -376,6 +398,9 @@ export const acquisition = {
   wanted: () => request<{ books: ApiBook[] | null; cutoffUnmet: ApiBook[] | null }>("/api/v1/wanted"),
   history: () => request<{ history: ApiHistoryItem[] | null }>("/api/v1/history"),
   profiles: () => request<{ profiles: ApiProfile[] | null }>("/api/v1/profiles"),
+  audioProfile: () => request<ApiAudioProfile>("/api/v1/profiles/audiobook"),
+  updateAudioProfile: (p: ApiAudioProfile) =>
+    request("/api/v1/profiles/audiobook", { method: "PUT", body: JSON.stringify(p) }),
   updateProfile: (id: number, p: Partial<ApiProfile>) =>
     request(`/api/v1/profiles/${id}`, { method: "PUT", body: JSON.stringify(p) }),
   testProwlarr: (url: string, apiKey: string) =>
@@ -620,4 +645,88 @@ export const tags = {
     request<BulkTagResult>("/api/v1/tags/bulk", {
       method: "POST", body: JSON.stringify({ bookIds, tagIds, mode, sendToKindle }),
     }),
+}
+
+/* ---------- audiobooks & read-along ---------- */
+
+export type AudiobookStatus = "queued" | "working" | "ready" | "failed"
+
+export interface ApiAudiobook {
+  bookId?: number
+  format?: "mp3" | "mov"
+  size?: number
+  /** seconds */
+  duration?: number
+  addedAt?: string
+  status?: AudiobookStatus
+  phase?: string
+  /** 0–1, while the read-along is being built */
+  progress?: number
+  error?: string
+  /** share of the narration that matched the text */
+  match?: number
+  builtAt?: string
+  /** admins only */
+  filePath?: string
+  readAlong: boolean
+  /** an upload or import still being put in place */
+  importing?: boolean
+  importError?: string
+}
+
+/** One sentence of a read-along, with when it's spoken (seconds). */
+export interface ReadAlongUnit { id: string; href: string; begin: number; end: number }
+export interface ReadAlongTiming {
+  duration: number
+  chunks: { file: string; start: number; duration: number }[]
+  units: ReadAlongUnit[]
+}
+
+export const audiobooks = {
+  /** null when the book has no audiobook */
+  get: async (bookId: number): Promise<ApiAudiobook | null> => {
+    const res = await fetch(`/api/v1/books/${bookId}/audiobook`)
+    if (res.status === 404) return null
+    if (!res.ok) throw new Error(await errorText(res))
+    return res.json() as Promise<ApiAudiobook>
+  },
+  /** One file, or the parts of an audiobook in order — sorted by name on the server. */
+  upload: async (bookId: number, files: File[]) => {
+    const form = new FormData()
+    for (const f of files) form.append("file", f)
+    const res = await fetch(`/api/v1/books/${bookId}/audiobook`, { method: "POST", body: form })
+    if (!res.ok) throw new Error(await errorText(res))
+    return res.json() as Promise<{ status: string }>
+  },
+  /** Admin: a file or folder already on the server. */
+  importPath: (bookId: number, path: string) =>
+    request<{ status: string }>(`/api/v1/books/${bookId}/audiobook/import`, {
+      method: "POST", body: JSON.stringify({ path }),
+    }),
+  rebuild: (bookId: number) =>
+    request<{ status: string }>(`/api/v1/books/${bookId}/audiobook/rebuild`, { method: "POST" }),
+  remove: (bookId: number, deleteFile: boolean) =>
+    request(`/api/v1/books/${bookId}/audiobook?file=${deleteFile ? "delete" : "keep"}`, { method: "DELETE" }),
+  fileUrl: (bookId: number) => `/api/v1/books/${bookId}/audiobook/file`,
+  readAlongUrl: (bookId: number, name: string) => `/api/v1/books/${bookId}/readalong/${name}`,
+  releases: (bookId: number) =>
+    request<{ releases: ApiRelease[] | null; sources: ApiSourceStat[] | null }>(`/api/v1/books/${bookId}/audiobook/releases`),
+  grab: (bookId: number, release: ApiRelease) =>
+    request<{ queueId: number }>(`/api/v1/books/${bookId}/audiobook/grab`, { method: "POST", body: JSON.stringify({ release }) }),
+  autoGrab: (bookId: number) =>
+    request<{ grabbed: boolean }>(`/api/v1/books/${bookId}/audiobook/autograb`, { method: "POST", body: "{}" }),
+  setMonitored: (bookId: number, monitored: boolean) =>
+    request(`/api/v1/books/${bookId}/audiobook/monitored`, { method: "PUT", body: JSON.stringify({ monitored }) }),
+  timing: (bookId: number) => request<ReadAlongTiming>(`/api/v1/books/${bookId}/readalong/timing.json`),
+  position: (bookId: number) => request<{ position: number; updatedAt: string }>(`/api/v1/books/${bookId}/listen`),
+  savePosition: (bookId: number, position: number) =>
+    request(`/api/v1/books/${bookId}/listen`, { method: "PUT", body: JSON.stringify({ position }) }),
+}
+
+async function errorText(res: Response): Promise<string> {
+  try {
+    const body = await res.json()
+    if (body.error) return body.error
+  } catch { /* non-json error body */ }
+  return `${res.status}`
 }

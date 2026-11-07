@@ -111,3 +111,66 @@ func (s *Store) ListHistory(limit int, v *Visibility) ([]HistoryItem, error) {
 	}
 	return out, rows.Err()
 }
+
+// AudioProfile is the one audiobook profile: what to look for when Booky
+// searches for a book's audiobook.
+type AudioProfile struct {
+	Formats        []string `json:"formats"` // best first: m4b, mp3, m4a
+	Languages      string   `json:"languages"`
+	PreferredTerms string   `json:"preferredTerms"`
+	// AvoidedTerms skip a release outright (an abridged reading can't be
+	// read along with the book), unlike the ebook profile's, which only
+	// rank lower
+	AvoidedTerms string `json:"avoidedTerms"`
+	// MinSizeMB and MaxSizeMB bound a release's size; 0 is no limit
+	MinSizeMB int64 `json:"minSizeMB"`
+	MaxSizeMB int64 `json:"maxSizeMB"`
+}
+
+// AudioFormats are the formats an audiobook profile may list.
+var AudioFormats = []string{"m4b", "mp3", "m4a"}
+
+func (s *Store) GetAudioProfile() (AudioProfile, error) {
+	var p AudioProfile
+	var formats string
+	err := s.db.QueryRow(`SELECT formats, language, preferred_terms, avoided_terms, min_size_mb, max_size_mb
+		FROM audiobook_profile WHERE id = 1`).
+		Scan(&formats, &p.Languages, &p.PreferredTerms, &p.AvoidedTerms, &p.MinSizeMB, &p.MaxSizeMB)
+	if err != nil {
+		return p, err
+	}
+	if err := json.Unmarshal([]byte(formats), &p.Formats); err != nil || len(p.Formats) == 0 {
+		p.Formats = append([]string(nil), AudioFormats...)
+	}
+	return p, nil
+}
+
+// UpdateAudioProfile saves the audiobook profile after checking it: known
+// formats only, each once, and a size range that makes sense.
+func (s *Store) UpdateAudioProfile(p AudioProfile) error {
+	if len(p.Formats) == 0 {
+		return fmt.Errorf("at least one format required")
+	}
+	seen := map[string]bool{}
+	for _, f := range p.Formats {
+		known := false
+		for _, a := range AudioFormats {
+			known = known || f == a
+		}
+		if !known || seen[f] {
+			return fmt.Errorf("format %q isn't one of m4b, mp3, m4a (or is listed twice)", f)
+		}
+		seen[f] = true
+	}
+	if p.MinSizeMB < 0 || p.MaxSizeMB < 0 || (p.MaxSizeMB > 0 && p.MaxSizeMB < p.MinSizeMB) {
+		return fmt.Errorf("the size range doesn't make sense")
+	}
+	formats, err := json.Marshal(p.Formats)
+	if err != nil {
+		return err
+	}
+	_, err = s.db.Exec(`UPDATE audiobook_profile
+		SET formats = ?, language = ?, preferred_terms = ?, avoided_terms = ?, min_size_mb = ?, max_size_mb = ?
+		WHERE id = 1`, string(formats), p.Languages, p.PreferredTerms, p.AvoidedTerms, p.MinSizeMB, p.MaxSizeMB)
+	return err
+}

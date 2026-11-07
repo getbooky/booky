@@ -27,10 +27,23 @@ ARG TARGETOS
 ARG TARGETARCH
 RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath -ldflags "-s -w -X main.version=${VERSION}" -o /booky ./cmd/booky
 
+# ---- transcriber ----
+# booky-transcribe turns audiobook speech into timestamped words (Vosk) so a
+# book's audio can be lined up with its text. A few lines of C against the
+# distro's libvosk, built for the target platform — under emulation for
+# arm64, which costs seconds for one file.
+FROM alpine:3.23 AS transcribe
+RUN apk add --no-cache build-base vosk-api-dev
+COPY tools/transcribe/transcribe.c /src/transcribe.c
+RUN cc -O2 -Wall -Wextra -Werror -o /booky-transcribe /src/transcribe.c -lvosk
+
 # ---- runtime ----
 FROM alpine:3.23
-RUN apk add --no-cache su-exec tzdata ca-certificates
+# ffmpeg reads and cuts audiobooks; vosk and its small English model do the
+# speech recognition for read-along
+RUN apk add --no-cache su-exec tzdata ca-certificates ffmpeg vosk-api vosk-model-small-en-us
 COPY --from=gobuild /booky /usr/local/bin/booky
+COPY --from=transcribe /booky-transcribe /usr/local/bin/booky-transcribe
 COPY docker/entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 

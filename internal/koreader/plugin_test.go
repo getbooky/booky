@@ -62,8 +62,31 @@ func TestBuiltPluginZipIsValidLua(t *testing.T) {
 		mustCompile(t, f.Name, string(src))
 		seen++
 	}
-	if seen != 3 {
-		t.Errorf("compiled %d lua files, want the 3 the plugin ships", seen)
+	if seen != 4 {
+		t.Errorf("compiled %d lua files, want the 4 the plugin ships", seen)
+	}
+}
+
+// TestReadAlongLua runs the read-along module's own tests (the helpers that
+// need no KOReader: timing lookups, the engine's ids, byte offsets, the
+// shell commands that feed the audio, manifest checks) in an embedded Lua,
+// so CI runs them without LuaJIT.
+func TestReadAlongLua(t *testing.T) {
+	L := lua.NewState()
+	defer L.Close()
+	dir, err := filepath.Abs("plugin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := L.DoString(`package.path = "` + dir + `/?.lua;" .. package.path`); err != nil {
+		t.Fatal(err)
+	}
+	// the test file exits non-zero on failure; catch that as an error
+	if err := L.DoString(`os.exit = function(code) error("lua tests failed (exit " .. tostring(code) .. ")") end`); err != nil {
+		t.Fatal(err)
+	}
+	if err := L.DoFile(filepath.Join(dir, "booky_readalong_test.lua")); err != nil {
+		t.Fatal(err)
 	}
 }
 

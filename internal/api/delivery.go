@@ -515,6 +515,9 @@ func (s *Server) handleKoSync(w http.ResponseWriter, r *http.Request) {
 		Filename   string   `json:"filename"`
 		Format     string   `json:"format"`
 		SizeBytes  int64    `json:"sizeBytes"`
+		// ReadAlong: the book's audiobook is lined up and can be
+		// downloaded for read-along (/api/koreader/v1/readalong/...)
+		ReadAlong bool `json:"readAlong,omitempty"`
 	}
 	// The plugin keys what it has downloaded by "book:libraryId" and fetches
 	// /download/{libraryId}/{book}. Libraries became tags of the same id, so
@@ -547,6 +550,7 @@ func (s *Server) handleKoSync(w http.ResponseWriter, r *http.Request) {
 					ID: b.ID, LibraryID: via, Title: b.Title, Author: b.Author,
 					SeriesName: b.SeriesName, SeriesNum: b.SeriesNum, Genres: b.Genres,
 					Filename: filepath.Base(b.FilePath), Format: b.FileFormat, SizeBytes: b.FileSize,
+					ReadAlong: b.Audio == "ready",
 				})
 			}
 		}

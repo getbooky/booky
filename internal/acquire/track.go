@@ -97,7 +97,9 @@ func (e *Engine) PollSab(ctx context.Context) {
 		return
 	}
 	for _, it := range items {
-		if it.Status != "downloading" || it.Protocol != "usenet" {
+		// an audiobook left "importing" by a restart is filed again
+		resumed := it.Kind == KindAudiobook && it.Status == "importing" && !e.audioImportRunning(it.ID)
+		if (it.Status != "downloading" && !resumed) || it.Protocol != "usenet" {
 			continue
 		}
 		h, ok := byNzo[it.ExternalID]
@@ -106,6 +108,10 @@ func (e *Engine) PollSab(ctx context.Context) {
 		}
 		switch h.status {
 		case "Completed":
+			if it.Kind == KindAudiobook {
+				e.importAudio(it, h.storage)
+				continue
+			}
 			path, err := importer.FindBookFile(h.storage)
 			if err != nil {
 				// downloaded but no usable book inside — that's a verdict on
@@ -143,7 +149,11 @@ func (e *Engine) failAndCascade(ctx context.Context, it QueueItem, reason string
 		log.Printf("acquire: blocklist %q: %v", it.ReleaseTitle, err)
 	}
 	_ = e.catalog.AddHistory(it.BookID, it.LibraryID, "failed", it.ReleaseTitle+": "+reason)
-	grabbed, err := e.AutoGrab(ctx, it.BookID, it.LibraryID, 0)
+	next := func() (bool, error) { return e.AutoGrab(ctx, it.BookID, it.LibraryID, 0) }
+	if it.Kind == KindAudiobook {
+		next = func() (bool, error) { return e.AutoGrabAudio(ctx, it.BookID, it.LibraryID) }
+	}
+	grabbed, err := next()
 	switch {
 	case err != nil:
 		log.Printf("acquire: cascade after %q: %v", it.ReleaseTitle, err)
@@ -164,10 +174,7 @@ func (e *Engine) AutoGrab(ctx context.Context, bookID, libraryID, profileID int6
 	// same book, or a monitor toggle racing a list poll, would otherwise
 	// download the same book twice — report "grabbed" so callers don't
 	// escalate; the running grab IS the outcome.
-	var active int
-	if err := e.db.QueryRow(`SELECT COUNT(*) FROM queue
-		WHERE book_id = ? AND library_id = ? AND status IN ('queued', 'downloading', 'importing')`,
-		bookID, libraryID).Scan(&active); err == nil && active > 0 {
+	if e.inFlight(bookID, libraryID, KindEbook) {
 		log.Printf("acquire: auto-grab skipped — a grab for book %d is already in flight", bookID)
 		return true, nil
 	}

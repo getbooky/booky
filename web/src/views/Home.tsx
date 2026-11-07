@@ -90,7 +90,15 @@ export function HomeView({ libraries, userName, onOpenBook, onOpenTag, onBrowse 
 
   const recent = useMemo(() => all.filter(b => b.filePath).sort(newestFirst).slice(0, 24), [all])
   const wanted = useMemo(() => all.filter(b => !b.filePath && b.monitored).sort(newestFirst).slice(0, 24), [all])
-  const upcoming = useMemo(() => dedupe(calQuery.data?.books ?? []).slice(0, 24), [calQuery.data])
+  // the calendar also carries the last two weeks' releases (Booky keeps
+  // searching for them); "Coming soon" is only what isn't out yet, and
+  // isn't already on the shelf
+  const upcoming = useMemo(() => {
+    const today = new Date().toLocaleDateString("en-CA") // YYYY-MM-DD, local
+    return dedupe(calQuery.data?.books ?? [])
+      .filter(b => !b.filePath && (b.releaseDate ?? "") > today)
+      .slice(0, 24)
+  }, [calQuery.data])
   // one row per shared tag, so a household sees "Kids", "Book club"… at a
   // glance; personal tags stay out of it (that's what My shelf is for)
   const { tags } = useTags()

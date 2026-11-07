@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react"
-import { acquisition, api, canRead, coverUrl, kindle, tags as tagsApi } from "@/api"
+import { acquisition, api, audiobooks, canRead, coverUrl, kindle, tags as tagsApi } from "@/api"
 import type { ApiBook, ApiKindleDevice, ApiLibrary } from "@/api"
 import { AddToLibraryButton } from "@/components/AddToLibrary"
 import { Cover, hashColors } from "@/components/Cover"
@@ -12,7 +12,7 @@ import { Textarea } from "@/components/ui/textarea"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu"
 import { TagPill, useTags } from "@/components/TagPills"
-import { ArrowLeft, BookOpenText, FolderInput, Lock, LockOpen, Mail, Pencil, RefreshCw, Search, Trash2, Upload, Users, Zap } from "lucide-react"
+import { ArrowLeft, BookOpenText, FolderInput, Headphones, Lock, LockOpen, Mail, Pencil, RefreshCw, Search, Trash2, Upload, Users, Zap } from "lucide-react"
 import { toast } from "sonner"
 import { cn } from "@/lib/utils"
 import { useIsAdmin } from "@/lib/access"
@@ -21,6 +21,7 @@ import type { RemoveMode } from "@/lib/removeModes"
 import { bookRibbon } from "@/views/Library"
 import { ReleasesDialog } from "@/components/ReleasesDialog"
 import { PathInput } from "@/components/PathInput"
+import { AudiobookCard } from "@/components/AudiobookCard"
 import { useApi } from "@/hooks/use-api"
 
 // ManualImportDialog delivers a file already on disk into a library for a
@@ -361,18 +362,52 @@ function SharedWith({ book, onChange }: { book: ApiBook; onChange: (tagIds: numb
 // icon actions on the hero card: small, glassy, brass on hover
 const ICON_BTN = "h-8 w-8 rounded-lg border-linesoft bg-surface/75 backdrop-blur hover:border-brass/50 hover:text-brass"
 
-export function BookDetail({ book: initial, onBack, onChanged, onRead, onOpenSeries, onOpenAuthor }: {
+type Format = "ebook" | "audiobook"
+
+const AUDIO_TAG: Record<string, { kind: "good" | "info" | "want" | "dim"; label: string }> = {
+  ready: { kind: "good", label: "Read-along ready" },
+  working: { kind: "info", label: "Lining up with the text" },
+  queued: { kind: "info", label: "Waiting to be lined up" },
+  failed: { kind: "want", label: "Couldn't line up" },
+}
+
+// FormatPill switches the page between the book's two forms. Each has its own
+// file, status and actions; the metadata above is shared.
+function FormatPill({ value, onChange, book }: { value: Format; onChange: (f: Format) => void; book: ApiBook }) {
+  const opts: { f: Format; label: string; icon: typeof BookOpenText; has: boolean }[] = [
+    { f: "ebook", label: "Ebook", icon: BookOpenText, has: !!book.filePath },
+    { f: "audiobook", label: "Audiobook", icon: Headphones, has: !!book.audio },
+  ]
+  return (
+    <div role="tablist" aria-label="Format" className="mt-4 inline-flex rounded-full border border-linesoft bg-surface2 p-0.5">
+      {opts.map(({ f, label, icon: Icon, has }) => (
+        <button key={f} role="tab" aria-selected={value === f} onClick={() => onChange(f)}
+          className={cn("flex items-center gap-1.5 rounded-full px-3.5 py-1.5 text-[12.5px] font-medium transition-colors",
+            value === f ? "bg-surface text-foreground shadow-sm" : "text-muted-foreground hover:text-foreground")}>
+          <Icon className="h-3.5 w-3.5" /> {label}
+          {/* a dot says this form is on the shelf */}
+          <span className={cn("h-1.5 w-1.5 rounded-full", has ? "bg-good" : "bg-transparent")} />
+        </button>
+      ))}
+    </div>
+  )
+}
+
+export function BookDetail({ book: initial, onBack, onChanged, onRead, onReadAlong, onOpenSeries, onOpenAuthor }: {
   book: ApiBook
   onBack: () => void
   onChanged: () => void
   onRead?: (b: ApiBook) => void
+  onReadAlong?: (b: ApiBook) => void
   onOpenSeries?: (b: ApiBook) => void
   onOpenAuthor?: (b: ApiBook) => void
 }) {
   const isAdmin = useIsAdmin()
+  const [format, setFormat] = useState<Format>("ebook")
   const [book, setBook] = useState(initial)
   const [editOpen, setEditOpen] = useState(false)
   const [searchOpen, setSearchOpen] = useState(false)
+  const [audioSearchOpen, setAudioSearchOpen] = useState(false)
   const [importOpen, setImportOpen] = useState(false)
   const [autoGrabbing, setAutoGrabbing] = useState(false)
   const [c1, c2] = hashColors(book.title)
@@ -426,6 +461,34 @@ export function BookDetail({ book: initial, onBack, onChanged, onRead, onOpenSer
       toast.error(`Auto-grab failed: ${e instanceof Error ? e.message : e}`)
     } finally {
       setAutoGrabbing(false)
+    }
+  }
+
+  // the audiobook has its own search and its own monitor switch
+  const autoGrabAudio = async () => {
+    setAutoGrabbing(true)
+    try {
+      const r = await audiobooks.autoGrab(book.id)
+      if (r.grabbed) {
+        toast.success("Grabbed the best audiobook release — watch Activity")
+        onChanged()
+      } else {
+        toast.warning("No grabbable audiobook found")
+      }
+    } catch (e) {
+      toast.error(`Auto-grab failed: ${e instanceof Error ? e.message : e}`)
+    } finally {
+      setAutoGrabbing(false)
+    }
+  }
+  const toggleAudioMonitored = async (v: boolean) => {
+    try {
+      await audiobooks.setMonitored(book.id, v)
+      setBook({ ...book, audioMonitored: v })
+      if (v && !book.audio) toast("Searching for the audiobook")
+      onChanged()
+    } catch (e) {
+      toast.error(`Couldn't update: ${e instanceof Error ? e.message : e}`)
     }
   }
 
@@ -509,6 +572,7 @@ export function BookDetail({ book: initial, onBack, onChanged, onRead, onOpenSer
             {/* librarian actions ride the card's corner, out of the reading path */}
             <TooltipProvider delayDuration={150}>
               <div className="mb-3 flex flex-wrap gap-1.5 sm:float-right sm:mb-0 sm:ml-4">
+        {format === "ebook" && (<>
         <Tooltip>
           <TooltipTrigger asChild>
             <Button variant="outline" size="icon" className={ICON_BTN} aria-label="Auto-grab best release"
@@ -573,6 +637,27 @@ export function BookDetail({ book: initial, onBack, onChanged, onRead, onOpenSer
             </DropdownMenuContent>
           </DropdownMenu>
         )}
+        </>)}
+        {format === "audiobook" && book.libraryId ? (<>
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Button variant="outline" size="icon" className={ICON_BTN} aria-label="Auto-grab best audiobook"
+              disabled={autoGrabbing} onClick={autoGrabAudio}>
+              <Zap className="h-4 w-4" />
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent>Auto-grab the best audiobook</TooltipContent>
+        </Tooltip>
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Button variant="outline" size="icon" className={ICON_BTN} aria-label="Search audiobook releases"
+              onClick={() => setAudioSearchOpen(true)}>
+              <Search className="h-4 w-4" />
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent>Search audiobook releases</TooltipContent>
+        </Tooltip>
+        </>) : null}
         <Tooltip>
           <TooltipTrigger asChild>
             <Button variant="outline" size="icon" className={ICON_BTN} aria-label="Refresh metadata" onClick={refresh}>
@@ -633,6 +718,15 @@ export function BookDetail({ book: initial, onBack, onChanged, onRead, onOpenSer
             </div>
             {meta.length > 0 && <div className="mono-label mt-2 text-faint">{meta.join(" · ")}</div>}
 
+            {book.libraryId ? <FormatPill value={format} onChange={setFormat} book={book} /> : null}
+
+            {format === "audiobook" ? (
+              <div className="mt-3 flex flex-wrap items-center gap-2">
+                {book.audio
+                  ? <Tag kind={AUDIO_TAG[book.audio]?.kind ?? "dim"}>{AUDIO_TAG[book.audio]?.label ?? book.audio}</Tag>
+                  : book.audioMonitored ? <Tag kind="want">Wanted</Tag> : <Tag kind="dim">No audiobook</Tag>}
+              </div>
+            ) : (
             <div className="mt-3 flex flex-wrap items-center gap-2">
               {book.filePath && <Tag kind="good">On shelf{book.fileFormat ? ` · ${book.fileFormat.toUpperCase()}` : ""}</Tag>}
               {!book.filePath && book.monitored && <Tag kind="want">Wanted</Tag>}
@@ -640,11 +734,22 @@ export function BookDetail({ book: initial, onBack, onChanged, onRead, onOpenSer
               {book.fileSize ? <span className="text-xs text-muted-foreground">{(book.fileSize / 1e6).toFixed(1)} MB</span> : null}
               {(book.ratingsCount ?? 0) > 0 && <span className="mono-label text-faint">{book.ratingsCount!.toLocaleString()} ratings</span>}
             </div>
+            )}
 
             <p className="mt-4 max-w-[68ch] text-[13.5px] leading-relaxed text-muted-foreground">
               {book.description || "No description cached yet — it arrives with the next metadata refresh."}
             </p>
 
+            {format === "audiobook" && book.libraryId ? (
+              <div className="mt-5 flex flex-wrap items-center gap-x-5 gap-y-3">
+                {/* separate from the ebook's: the EPUB can be wanted without the audiobook */}
+                <label className="flex items-center gap-2 text-[13px] text-muted-foreground">
+                  <Switch checked={!!book.audioMonitored} onCheckedChange={toggleAudioMonitored}
+                    aria-label="Monitor the audiobook" /> Monitored
+                </label>
+              </div>
+            ) : null}
+            {format === "ebook" && (
             <div className="mt-5 flex flex-wrap items-center gap-x-5 gap-y-3">
               {/* reading is the one consumer action, so it leads with a label */}
               {onRead && canRead(book) && (
@@ -662,6 +767,7 @@ export function BookDetail({ book: initial, onBack, onChanged, onRead, onOpenSer
                   onPick={monitorInto} busy={monitoring} />
               )}
             </div>
+            )}
 
             <div className="mono-label mt-5 flex flex-wrap gap-x-5 gap-y-1 text-faint">
               {book.isbn13 && <span>isbn {book.isbn13}</span>}
@@ -675,7 +781,11 @@ export function BookDetail({ book: initial, onBack, onChanged, onRead, onOpenSer
 
       {book.libraryId ? <SharedWith book={book} onChange={tagIds => setBook({ ...book, tagIds })} /> : null}
 
-      {book.filePath && (
+      {format === "audiobook" && book.libraryId
+        ? <AudiobookCard book={book} onReadAlong={b => onReadAlong?.(b)} onChanged={() => void refresh()} />
+        : null}
+
+      {format === "ebook" && book.filePath && (
         <>
           <div className="mono-label mb-2 mt-7 text-faint">File</div>
           <div className="overflow-hidden rounded-2xl border border-linesoft bg-surface">
@@ -703,6 +813,9 @@ export function BookDetail({ book: initial, onBack, onChanged, onRead, onOpenSer
         bookId={book.id} bookTitle={book.title} defaultLibraryId={book.libraryId}
         onImported={() => { refresh(); onChanged() }} />
       <ReleasesDialog book={searchOpen ? book : null} open={searchOpen} onOpenChange={setSearchOpen}
+        onGrabbed={() => { toast("Watch Activity for progress"); refresh(); onChanged() }} />
+      <ReleasesDialog kind="audiobook" book={audioSearchOpen ? book : null} open={audioSearchOpen}
+        onOpenChange={setAudioSearchOpen}
         onGrabbed={() => { toast("Watch Activity for progress"); refresh(); onChanged() }} />
     </section>
   )

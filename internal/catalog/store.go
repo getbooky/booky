@@ -173,6 +173,12 @@ type Book struct {
 	// per-field refresh-protection locks; filled by GetBook only (list views
 	// don't need it)
 	FieldLocks map[string]bool `json:"fieldLocks,omitempty"`
+	// Audio is the book's audiobook read-along state (queued, working,
+	// ready, failed), or empty when it has no audiobook
+	Audio string `json:"audio,omitempty"`
+	// AudioMonitored: Booky searches for this book's audiobook (off unless
+	// switched on, book by book)
+	AudioMonitored bool `json:"audioMonitored,omitempty"`
 }
 
 type Library struct {
@@ -620,6 +626,20 @@ func (s *Store) markTracked(bookID int64) error {
 // SetMonitored flips a book's monitored flag. Monitoring a book that isn't
 // in the library yet adds it — that's how catalog-only bibliography books
 // enter a library from the author page. Unmonitoring never creates rows.
+// SetAudioMonitored switches the search for a book's audiobook on or off.
+// The book must already be in the library: the audiobook is filed beside it.
+func (s *Store) SetAudioMonitored(libraryID, bookID int64, on bool) error {
+	res, err := s.db.Exec(`UPDATE library_books SET audio_monitored = ? WHERE library_id = ? AND book_id = ?`,
+		on, libraryID, bookID)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return fmt.Errorf("book %d isn't in the library", bookID)
+	}
+	return nil
+}
+
 func (s *Store) SetMonitored(libraryID, bookID int64, monitored bool) error {
 	if monitored {
 		if _, err := s.db.Exec(`INSERT INTO library_books (library_id, book_id, monitored) VALUES (?, ?, 1)
@@ -799,13 +819,15 @@ func (s *Store) ListSeries(v *Visibility) ([]Series, error) {
 const bookColumns = `
 	b.id, b.author_id, a.name, b.series_id, COALESCE(sr.name, ''), COALESCE(b.series_num, 0),
 	b.title, b.description, b.language, b.publisher, COALESCE(b.release_date, ''),
-	COALESCE(b.goodreads_id, ''), COALESCE(b.hardcover_id, ''), COALESCE(b.isbn13, ''), b.genres, b.ratings_count`
+	COALESCE(b.goodreads_id, ''), COALESCE(b.hardcover_id, ''), COALESCE(b.isbn13, ''), b.genres, b.ratings_count,
+	COALESCE((SELECT au.status FROM audiobooks au WHERE au.book_id = b.id), ''),
+	COALESCE((SELECT MAX(lb2.audio_monitored) FROM library_books lb2 WHERE lb2.book_id = b.id), 0)`
 
 func scanBook(scan func(...any) error, b *Book) error {
 	var genres string
 	if err := scan(&b.ID, &b.AuthorID, &b.Author, &b.SeriesID, &b.SeriesName, &b.SeriesNum,
 		&b.Title, &b.Description, &b.Language, &b.Publisher, &b.ReleaseDate,
-		&b.GoodreadsID, &b.HardcoverID, &b.ISBN13, &genres, &b.RatingsCount); err != nil {
+		&b.GoodreadsID, &b.HardcoverID, &b.ISBN13, &genres, &b.RatingsCount, &b.Audio, &b.AudioMonitored); err != nil {
 		return err
 	}
 	if genres != "" {
@@ -881,7 +903,7 @@ func (s *Store) ListBooks(authorID, libraryID, seriesID int64) ([]Book, error) {
 		var genres, tags string
 		err := rows.Scan(&b.ID, &b.AuthorID, &b.Author, &b.SeriesID, &b.SeriesName, &b.SeriesNum,
 			&b.Title, &b.Description, &b.Language, &b.Publisher, &b.ReleaseDate,
-			&b.GoodreadsID, &b.HardcoverID, &b.ISBN13, &genres, &b.RatingsCount,
+			&b.GoodreadsID, &b.HardcoverID, &b.ISBN13, &genres, &b.RatingsCount, &b.Audio, &b.AudioMonitored,
 			&b.LibraryID, &b.Monitored, &b.FilePath, &b.FileFormat, &b.FileSize, &b.AddedAt, &tags)
 		if err != nil {
 			return nil, err
