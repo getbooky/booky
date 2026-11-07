@@ -250,46 +250,94 @@ function Booky:onReaderReady()
         self.settings:saveSetting("readalong_hint_shown", true)
         self.settings:flush()
         UIManager:show(InfoMessage:new{
-            text = _("This book has a Booky read-along. It reads like any book — the audio plays only when you start it.\n\nTo start or stop the narration, tap the left end of the status bar (at the bottom), or use the menu → Read-along. Bluetooth headphones need to be connected in the Kindle's settings.\n\nIt can also go on a gesture: Settings → Gestures → Booky read-along."),
+            text = _("This book has a Booky read-along. It reads like any book — the audio plays only when you start it.\n\nTo start or stop the narration, tap "▶ Read-along" in the status bar (when it shows all items at once), or use the menu → Read-along. Bluetooth headphones need to be connected in the Kindle's settings.\n\nIt can also go on a gesture: Settings → Gestures → Booky read-along."),
         })
     end
 end
 
+-- readAlongLabel is the read-along's item in the status bar.
+function Booky:readAlongLabel()
+    local p = self.player
+    if not p then return nil end
+    if p.playing then return "♪ " .. _("Read-along") end
+    if p.waiting then return "… " .. _("Read-along") end
+    return "▶ " .. _("Read-along")
+end
+
 -- showReadAlongControls puts the read-along in the status bar — in the
--- bottom margin, never over the text — and makes a tap on the bar's left
--- end start or stop it. With the status bar hidden the tap does what it
--- always did.
+-- bottom margin, never over the text. A tap on the item itself starts or
+-- stops the narration; a tap anywhere else in the bar (the page count, the
+-- clock…) does what it always did, and so does any tap with the bar hidden.
 function Booky:showReadAlongControls()
     local footer = self.ui.view and self.ui.view.footer
-    if footer and footer.addAdditionalFooterContent then
-        self._footer_content = function()
-            local p = self.player
-            if not p then return nil end
-            if p.playing then return "♪ " .. _("Read-along") end
-            if p.waiting then return "… " .. _("Read-along") end
-            return "▶ " .. _("Read-along")
-        end
-        footer:addAdditionalFooterContent(self._footer_content)
-        self.player.onChange = function()
-            if footer.onUpdateFooter then footer:onUpdateFooter(true) end
-        end
+    if not footer or not footer.addAdditionalFooterContent then return end
+    self._footer_content = function() return self:readAlongLabel() end
+    footer:addAdditionalFooterContent(self._footer_content)
+    self.player.onChange = function()
         if footer.onUpdateFooter then footer:onUpdateFooter(true) end
     end
+    if footer.onUpdateFooter then footer:onUpdateFooter(true) end
+    self:watchFooterText(footer.footer_text)
+
     local ok, zone = pcall(function() return G_defaults:readSetting("DTAP_ZONE_MINIBAR") end)
-    if ok and zone and self.ui.registerTouchZones then
-        self.ui:registerTouchZones({
-            {
-                id = "booky_readalong_tap",
-                ges = "tap",
-                screen_zone = { ratio_x = zone.x, ratio_y = zone.y, ratio_w = zone.w * 0.25, ratio_h = zone.h },
-                handler = function()
-                    if not self.player or not self.ui.view.footer_visible then return false end
-                    self.player:toggle()
-                    return true
-                end,
-                overrides = { "readerfooter_tap", "readerconfigmenu_ext_tap", "readerconfigmenu_tap", "tap_forward", "tap_backward" },
-            },
-        })
+    if not ok or not zone or not self.ui.registerTouchZones then return end
+    self.ui:registerTouchZones({
+        {
+            id = "booky_readalong_tap",
+            ges = "tap",
+            screen_zone = { ratio_x = zone.x, ratio_y = zone.y, ratio_w = zone.w, ratio_h = zone.h },
+            handler = function(ges)
+                if not self.player or not self.ui.view.footer_visible then return false end
+                if not self:tapOnReadAlongLabel(footer, ges) then return false end
+                self.player:toggle()
+                return true
+            end,
+            overrides = { "readerfooter_tap", "readerconfigmenu_ext_tap", "readerconfigmenu_tap", "tap_forward", "tap_backward" },
+        },
+    })
+end
+
+-- tapOnReadAlongLabel reports whether a tap landed on the read-along's own
+-- words in the status bar. The bar's text is one line holding every item;
+-- where it was last drawn is noted (see watchFooterText), and the item's
+-- span is measured in the bar's font. Unsure means no: the tap goes on to
+-- the status bar as usual.
+function Booky:tapOnReadAlongLabel(footer, ges)
+    -- a bar showing one item at a time cycles items on tap; it keeps that
+    if footer.settings and not footer.settings.all_at_once and not footer.has_no_mode then return false end
+    local ft = footer.footer_text
+    self:watchFooterText(ft)
+    local label = self:readAlongLabel()
+    if not ft or not label or not self._footer_x or not ges or not ges.pos then return false end
+    local text = ft.text or ""
+    local at = text:find(label, 1, true)
+    if not at then return false end
+    local okr, RenderText = pcall(require, "ui/rendertext")
+    if not okr then return false end
+    local width = function(str)
+        local okw, size = pcall(function()
+            return RenderText:sizeUtf8Text(0, Screen:getWidth(), ft.face, str, true, ft.bold)
+        end)
+        return okw and size and size.x or nil
+    end
+    local before, own = width(text:sub(1, at - 1)), width(label)
+    if not before or not own then return false end
+    local slack = Screen:scaleBySize(8)
+    local x0 = self._footer_x + before
+    return ges.pos.x >= x0 - slack and ges.pos.x <= x0 + own + slack
+end
+
+-- watchFooterText notes where the status bar's text is drawn. The footer
+-- rebuilds that widget when its font changes; the new one is watched the
+-- next time it's needed.
+function Booky:watchFooterText(ft)
+    if not ft or ft._booky_watched then return end
+    ft._booky_watched = true
+    self._footer_x = nil
+    local paint = ft.paintTo
+    ft.paintTo = function(widget, bb, x, y)
+        self._footer_x = x
+        return paint(widget, bb, x, y)
     end
 end
 

@@ -273,9 +273,10 @@ func TestReadAlongControlStaysOffTheText(t *testing.T) {
 		body = body[:end+1]
 	}
 	for _, want := range []string{
-		"addAdditionalFooterContent",                        // shown in the status bar
-		`G_defaults:readSetting("DTAP_ZONE_MINIBAR")`,       // the status bar's own zone
-		"not self.ui.view.footer_visible then return false", // hidden bar: tap passes on
+		"addAdditionalFooterContent",                         // shown in the status bar
+		`G_defaults:readSetting("DTAP_ZONE_MINIBAR")`,        // the status bar's own zone
+		"not self.ui.view.footer_visible then return false",  // hidden bar: tap passes on
+		"tapOnReadAlongLabel(footer, ges) then return false", // only the item's own words
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("showReadAlongControls lacks %q", want)
