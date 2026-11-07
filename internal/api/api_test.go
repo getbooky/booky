@@ -106,6 +106,7 @@ func testServer(t *testing.T) *Server {
 		t.Fatal(err)
 	}
 	readAlong.EPUBFor = srv.EPUBFor
+	engine.ImportAudio = srv.ImportAudioFrom
 	return srv
 }
 

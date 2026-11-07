@@ -309,10 +309,9 @@ func (s *Server) handleAudiobookImport(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusAccepted, map[string]string{"status": "importing"})
 }
 
-// startAudioImport installs an audiobook in the background and queues its
-// read-along. cleanup, when set, is a temp dir to remove afterwards.
-func (s *Server) startAudioImport(bookID int64, parts []readalong.Part, move bool, cleanup string) error {
-	ctx, cancel := context.WithCancel(context.Background())
+// claimImport registers an audiobook import for the book, so the page can
+// show it and a second one can't start alongside. False when one is running.
+func (s *Server) claimImport(bookID int64, cancel context.CancelFunc) (*audioImport, bool) {
 	st := &audioImport{cancel: cancel}
 	if prev, busy := s.audioImports.LoadOrStore(bookID, st); busy {
 		p := prev.(*audioImport)
@@ -320,56 +319,98 @@ func (s *Server) startAudioImport(bookID int64, parts []readalong.Part, move boo
 		running := !p.done
 		p.mu.Unlock()
 		if running {
-			cancel()
-			return errors.New("an audiobook is already being added to this book")
+			return nil, false
 		}
 		s.audioImports.Store(bookID, st)
+	}
+	return st, true
+}
+
+// finishImport records how an import ended. A clean finish drops the
+// record; a failure stays, so the page can say what went wrong.
+func (s *Server) finishImport(bookID int64, st *audioImport, errMsg string) {
+	st.mu.Lock()
+	st.done, st.err = true, errMsg
+	st.mu.Unlock()
+	if errMsg == "" {
+		s.audioImports.CompareAndDelete(bookID, st)
+	}
+}
+
+var errImportBusy = errors.New("an audiobook is already being added to this book")
+
+// startAudioImport installs an audiobook in the background and queues its
+// read-along. cleanup, when set, is a temp dir to remove afterwards.
+func (s *Server) startAudioImport(bookID int64, parts []readalong.Part, move bool, cleanup string) error {
+	ctx, cancel := context.WithCancel(context.Background())
+	st, ok := s.claimImport(bookID, cancel)
+	if !ok {
+		cancel()
+		return errImportBusy
 	}
 	go func() {
 		defer cancel()
 		if cleanup != "" {
 			defer os.RemoveAll(cleanup)
 		}
-		finish := func(errMsg string) {
-			st.mu.Lock()
-			st.done, st.err = true, errMsg
-			st.mu.Unlock()
-			if errMsg == "" {
-				s.audioImports.CompareAndDelete(bookID, st)
-			}
-		}
-		home, err := s.audioHome(bookID)
-		if err != nil {
-			finish(err.Error())
-			return
-		}
-		inst, err := audiobook.Install(ctx, s.ReadAlong.Tools, parts, home, move)
-		if err != nil {
-			log.Printf("audiobook: import for book %d: %v", bookID, err) //nolint:gosec // G706: a number and our own error
-			if errors.Is(err, readalong.ErrNotAudio) {
-				finish(err.Error())
-			} else {
-				finish("Couldn't add the audiobook — the server log has the details.")
-			}
-			return
-		}
-		old, _ := s.Audiobooks.Get(bookID)
-		s.ReadAlong.Forget(bookID) // the old read-along matches the old audio
-		if err := s.Audiobooks.Put(bookID, inst.Path, inst.Format, inst.Size, inst.Duration); err != nil {
-			log.Printf("audiobook: record book %d: %v", bookID, err) //nolint:gosec // G706: a number and our own error
-			finish("Couldn't record the audiobook.")
-			return
-		}
-		if old != nil && old.Path != inst.Path {
-			if err := os.Remove(old.Path); err != nil && !os.IsNotExist(err) { //nolint:gosec // G703: a path Booky placed itself, from its own database
-				log.Printf("audiobook: remove replaced file: %v", err)
-			}
-		}
-		_ = s.Catalog.AddHistory(bookID, s.Catalog.TheLibrary(), "imported", inst.Path+" (audiobook)")
-		s.ReadAlong.Wake()
-		finish("")
+		msg, _ := s.installAudio(ctx, bookID, parts, move)
+		s.finishImport(bookID, st, msg)
 	}()
 	return nil
+}
+
+// ImportAudioFrom files a downloaded audiobook — a file, or a folder of
+// parts — for a book, and queues its read-along. It returns once the file
+// is in place; the acquisition engine calls it for finished downloads. The
+// source is left for the caller to clean up, except a single file, which
+// is moved.
+func (s *Server) ImportAudioFrom(ctx context.Context, bookID int64, path string) error {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	st, ok := s.claimImport(bookID, cancel)
+	if !ok {
+		return errImportBusy
+	}
+	parts, err := audiobook.Parts(path)
+	if err != nil {
+		s.finishImport(bookID, st, "The download had no usable audio.")
+		return err
+	}
+	msg, err := s.installAudio(ctx, bookID, parts, len(parts) == 1)
+	s.finishImport(bookID, st, msg)
+	return err
+}
+
+// installAudio puts an audiobook in place, records it, replaces any old one
+// and queues the read-along. On failure it returns a message fit to show
+// people; the error, with the detail, goes to the log.
+func (s *Server) installAudio(ctx context.Context, bookID int64, parts []readalong.Part, move bool) (string, error) {
+	home, err := s.audioHome(bookID)
+	if err != nil {
+		return err.Error(), err
+	}
+	inst, err := audiobook.Install(ctx, s.ReadAlong.Tools, parts, home, move)
+	if err != nil {
+		log.Printf("audiobook: import for book %d: %v", bookID, err) //nolint:gosec // G706: a number and our own error
+		if errors.Is(err, readalong.ErrNotAudio) {
+			return err.Error(), err
+		}
+		return "Couldn't add the audiobook — the server log has the details.", err
+	}
+	old, _ := s.Audiobooks.Get(bookID)
+	s.ReadAlong.Forget(bookID) // the old read-along matches the old audio
+	if err := s.Audiobooks.Put(bookID, inst.Path, inst.Format, inst.Size, inst.Duration); err != nil {
+		log.Printf("audiobook: record book %d: %v", bookID, err) //nolint:gosec // G706: a number and our own error
+		return "Couldn't record the audiobook.", err
+	}
+	if old != nil && old.Path != inst.Path {
+		if err := os.Remove(old.Path); err != nil && !os.IsNotExist(err) { //nolint:gosec // G703: a path Booky placed itself, from its own database
+			log.Printf("audiobook: remove replaced file: %v", err)
+		}
+	}
+	_ = s.Catalog.AddHistory(bookID, s.Catalog.TheLibrary(), "imported", inst.Path+" (audiobook)")
+	s.ReadAlong.Wake()
+	return "", nil
 }
 
 // POST /books/{id}/audiobook/rebuild — build the read-along again.

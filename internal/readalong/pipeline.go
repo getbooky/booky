@@ -112,9 +112,14 @@ func (t Tools) Build(ctx context.Context, j Job) (*Result, error) {
 
 	progress("Lining up the text", 0.99)
 	timings, stats := Align(book.Units, words)
-	if stats.Match < minMatch || stats.Coverage < minCoverage {
+	switch {
+	case stats.Match < minMatch:
 		return nil, fmt.Errorf("%w — only %.0f%% of the narration matched the text. Is it the same book and edition?",
 			ErrMismatch, 100*stats.Match)
+	case stats.Coverage < minCoverage:
+		// the narration is this book, but only a part of it
+		return nil, fmt.Errorf("%w — the narration covers only %.0f%% of the book. Is the audiobook complete?",
+			ErrMismatch, 100*stats.Coverage)
 	}
 	if err := book.WriteEdition(filepath.Join(tmp, EditionFile), timings, chunks); err != nil {
 		return nil, err

@@ -10,6 +10,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"unicode"
 	"unicode/utf8"
 )
 
@@ -33,6 +34,10 @@ type Profile struct {
 	Formats        []string // best first, e.g. ["epub","azw3","mobi"]
 	PreferredTerms []string // e.g. ["retail"]
 	AvoidedTerms   []string // e.g. ["scan","ocr"]
+	// RejectTerms drop a release outright, the way a wrong format does. The
+	// audiobook profile's skipped terms land here: an abridged reading isn't
+	// a worse copy of the book, it's a different text.
+	RejectTerms []string
 	// Languages the user accepts (canonical lowercase names, e.g. "english").
 	// A release whose language is detected and not in this list is rejected
 	// harder than a wrong format. Empty = accept everything. Releases that
@@ -44,6 +49,13 @@ type Profile struct {
 	// book would carry it, so it proves nothing and must not be penalized.
 	// Explicit per-release language metadata is unaffected by this.
 	BookTitle string
+	// Audio ranks audiobook releases: formats are read with DetectAudioFormat
+	// instead of the ebook list.
+	Audio bool
+	// MinBytes and MaxBytes reject releases outside a size range, the way a
+	// wrong format is rejected; 0 is no limit. A release that doesn't say
+	// its size isn't judged on it.
+	MinBytes, MaxBytes int64
 }
 
 var knownFormats = []string{"epub", "azw3", "azw", "mobi", "pdf", "cbz", "cbr", "djvu", "fb2", "txt"}
@@ -56,6 +68,52 @@ var formatRe = func() *regexp.Regexp {
 func DetectFormat(title string) string {
 	m := formatRe.FindString(title)
 	return strings.ToLower(m)
+}
+
+// audioFormatRe finds an audiobook format in a release title. "AAC" and
+// "M4A" are both the plain MP4 audio a chapterless M4B also is.
+var audioFormatRe = regexp.MustCompile(`(?i)\b(m4b|mp3|m4a|aac)\b`)
+
+// DetectAudioFormat pulls an audiobook format out of a release title:
+// m4b, mp3 or m4a, or "" when the title doesn't say.
+func DetectAudioFormat(title string) string {
+	m := strings.ToLower(audioFormatRe.FindString(title))
+	if m == "aac" {
+		return "m4a"
+	}
+	return m
+}
+
+// detect reads the release's format the way the profile ranks it.
+func (p Profile) detect(title string) string {
+	if p.Audio {
+		return DetectAudioFormat(title)
+	}
+	return DetectFormat(title)
+}
+
+// hasTerm reports whether title contains term as whole words, so the
+// avoided term "abridged" passes over "Unabridged" and "scan" over
+// "Scandal". Case doesn't matter.
+func hasTerm(title, term string) bool {
+	title, term = strings.ToLower(title), strings.ToLower(strings.TrimSpace(term))
+	if term == "" {
+		return false
+	}
+	isWord := func(r rune) bool { return unicode.IsLetter(r) || unicode.IsDigit(r) }
+	for from := 0; ; {
+		i := strings.Index(title[from:], term)
+		if i < 0 {
+			return false
+		}
+		start, end := from+i, from+i+len(term)
+		before, _ := utf8.DecodeLastRuneInString(title[:start])
+		after, _ := utf8.DecodeRuneInString(title[end:])
+		if (start == 0 || !isWord(before)) && (end == len(title) || !isWord(after)) {
+			return true
+		}
+		from = start + 1
+	}
 }
 
 // DownloadFilename picks the name to save a downloaded file under, best source
@@ -287,7 +345,7 @@ func Score(r Release, p Profile, sourceOrder []string) int {
 
 	format := r.Format
 	if format == "" {
-		format = DetectFormat(r.Title)
+		format = p.detect(r.Title)
 	}
 	rank := -1
 	for i, f := range p.Formats {
@@ -296,20 +354,25 @@ func Score(r Release, p Profile, sourceOrder []string) int {
 			break
 		}
 	}
-	if rank == -1 {
+	tooSmall := p.MinBytes > 0 && r.SizeBytes > 0 && r.SizeBytes < p.MinBytes
+	tooBig := p.MaxBytes > 0 && r.SizeBytes > p.MaxBytes
+	rejected := false
+	for _, t := range p.RejectTerms {
+		rejected = rejected || hasTerm(r.Title, t)
+	}
+	if rank == -1 || tooSmall || tooBig || rejected {
 		score -= formatWeight // unknown or unwanted format sinks below every listed one
 	} else {
 		score += (len(p.Formats) - rank) * formatWeight
 	}
 
-	lower := strings.ToLower(r.Title)
 	for _, t := range p.PreferredTerms {
-		if t != "" && strings.Contains(lower, strings.ToLower(t)) {
+		if hasTerm(r.Title, t) {
 			score += termWeight
 		}
 	}
 	for _, t := range p.AvoidedTerms {
-		if t != "" && strings.Contains(lower, strings.ToLower(t)) {
+		if hasTerm(r.Title, t) {
 			score -= termWeight
 		}
 	}
@@ -332,7 +395,7 @@ func Rank(releases []Release, p Profile, sourceOrder []string) []Release {
 	copy(scored, releases)
 	for i := range scored {
 		if scored[i].Format == "" {
-			scored[i].Format = DetectFormat(scored[i].Title)
+			scored[i].Format = p.detect(scored[i].Title)
 		}
 		scored[i].Score = Score(scored[i], p, sourceOrder)
 	}

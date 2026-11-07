@@ -142,6 +142,7 @@ func main() {
 		go server.KindleOnImport(bookID)
 	}
 	readAlong.EPUBFor = server.EPUBFor
+	engine.ImportAudio = server.ImportAudioFrom
 	// a watched list sharing a book that's already on disk: send on tag
 	watch.OnTagged = func(ch catalog.TagChange) {
 		go server.KindleOnTagged(ch.BookID, ch.Added, true)

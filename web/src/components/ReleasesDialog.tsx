@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from "react"
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { Button } from "@/components/ui/button"
 import { Tag, Fmt } from "@/components/bits"
-import { acquisition } from "@/api"
+import { acquisition, audiobooks } from "@/api"
 import type { ApiBook, ApiRelease, ApiSourceStat } from "@/api"
 import { toast } from "sonner"
 import { Download, Search, Zap } from "lucide-react"
@@ -28,12 +28,16 @@ const label = (name: string) => SOURCE_LABEL[name] ?? name
 // ReleasesDialog is the interactive search: every ranked candidate for a
 // book, best first, filterable by source, with a grab button each — plus a
 // one-click auto-grab that takes the top-ranked result.
-export function ReleasesDialog({ book, open, onOpenChange, onGrabbed }: {
+export function ReleasesDialog({ book, open, onOpenChange, onGrabbed, kind = "ebook" }: {
   book: ApiBook | null
   open: boolean
   onOpenChange: (v: boolean) => void
   onGrabbed?: () => void
+  /** what to search for: the ebook, or the audiobook */
+  kind?: "ebook" | "audiobook"
 }) {
+  const audio = kind === "audiobook"
+  const search = (b: ApiBook) => audio ? audiobooks.releases(b.id) : acquisition.releases(b.id, b.libraryId ?? 0)
   const [releases, setReleases] = useState<ApiRelease[] | null>(null)
   const [sources, setSources] = useState<ApiSourceStat[]>([])
   const [loading, setLoading] = useState(false)
@@ -51,12 +55,12 @@ export function ReleasesDialog({ book, open, onOpenChange, onGrabbed }: {
     setError("")
     setFilter(null)
     setLoading(true)
-    acquisition.releases(book.id, book.libraryId ?? 0)
+    search(book)
       .then(r => { if (live) { setReleases(r.releases ?? []); setSources(r.sources ?? []); setLoadedFor(book.id) } })
       .catch(e => { if (live) setError(e instanceof Error ? e.message : String(e)) })
       .finally(() => { if (live) setLoading(false) })
     return () => { live = false }
-  }, [open, book])
+  }, [open, book]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // Only trust the loaded data if it belongs to the book on screen right now —
   // closes the one-frame window where a previous book's releases could render
@@ -79,7 +83,8 @@ export function ReleasesDialog({ book, open, onOpenChange, onGrabbed }: {
     if (!book) return
     setGrabbing(rel.downloadUrl)
     try {
-      await acquisition.grab(book.id, book.libraryId ?? 0, rel)
+      if (audio) await audiobooks.grab(book.id, rel)
+      else await acquisition.grab(book.id, book.libraryId ?? 0, rel)
       toast.success(`Grabbed: ${rel.title}`)
       onOpenChange(false)
       onGrabbed?.()
@@ -94,7 +99,7 @@ export function ReleasesDialog({ book, open, onOpenChange, onGrabbed }: {
     if (!book) return
     setAutoGrabbing(true)
     try {
-      const r = await acquisition.autoGrab(book.id, book.libraryId ?? 0)
+      const r = audio ? await audiobooks.autoGrab(book.id) : await acquisition.autoGrab(book.id, book.libraryId ?? 0)
       if (r.grabbed) {
         toast.success("Grabbed the top-ranked release — watch Activity")
         onOpenChange(false)
@@ -114,14 +119,16 @@ export function ReleasesDialog({ book, open, onOpenChange, onGrabbed }: {
       <DialogContent className="max-w-2xl rounded-xl">
         <DialogHeader>
           <div className="flex items-center justify-between gap-3">
-            <DialogTitle className="font-book text-lg font-bold">Releases — {book?.title}</DialogTitle>
+            <DialogTitle className="font-book text-lg font-bold">{audio ? "Audiobook releases" : "Releases"} — {book?.title}</DialogTitle>
             <Button className="h-8 shrink-0" disabled={autoGrabbing || loading} onClick={autoGrab}>
               <Zap className="mr-1.5 h-3.5 w-3.5" />
               {autoGrabbing ? "Grabbing…" : "Auto-grab best"}
             </Button>
           </div>
           <p className="text-xs text-muted-foreground">
-            Best match first: format order, then preferred terms, then source priority. "Auto-grab best" takes the top-ranked candidate; usenet goes to SABnzbd, direct sources download immediately.
+            {audio
+              ? "Best match first, by the audiobook profile: format order, then preferred terms. Searched in Prowlarr's audiobook category; grabs go to SABnzbd, and the finished download is filed beside the ebook and lined up for read-along."
+              : "Best match first: format order, then preferred terms, then source priority. \"Auto-grab best\" takes the top-ranked candidate; usenet goes to SABnzbd, direct sources download immediately."}
           </p>
         </DialogHeader>
 

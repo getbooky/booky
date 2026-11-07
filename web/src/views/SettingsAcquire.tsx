@@ -4,7 +4,7 @@ import { Input } from "@/components/ui/input"
 import { Switch } from "@/components/ui/switch"
 import { PathInput } from "@/components/PathInput"
 import { api, acquisition } from "@/api"
-import type { ApiProfile } from "@/api"
+import type { ApiAudioProfile, ApiProfile } from "@/api"
 import { useApi } from "@/hooks/use-api"
 import { toast } from "sonner"
 import { ArrowDown, ArrowUp, X } from "lucide-react"
@@ -392,13 +392,129 @@ const ALL_FORMATS = ["epub", "azw3", "mobi", "pdf", "cbz"]
 
 export function ProfilesPanel() {
   const { data, loading, reload } = useApi(() => acquisition.profiles())
+  const audio = useApi(() => acquisition.audioProfile())
   const profile = data?.profiles?.[0]
-  if (profile) return <ProfileEditor key={profile.id} profile={profile} onSaved={reload} />
   return (
-    <Card title="Quality Profile">
-      <p className="text-[13px] text-muted-foreground">
-        {loading ? "loading…" : "No profile found — restart Booky and the default \"EPUB preferred\" profile is created automatically."}
-      </p>
+    <>
+      {profile
+        ? <ProfileEditor key={profile.id} profile={profile} onSaved={reload} />
+        : (
+          <Card title="Quality Profile">
+            <p className="text-[13px] text-muted-foreground">
+              {loading ? "loading…" : "No profile found — restart Booky and the default \"EPUB preferred\" profile is created automatically."}
+            </p>
+          </Card>
+        )}
+      {audio.data && <AudioProfileEditor profile={audio.data} onSaved={audio.reload} />}
+    </>
+  )
+}
+
+const AUDIO_FORMATS = ["m4b", "mp3", "m4a"]
+const AUDIO_FORMAT_NOTE: Record<string, string> = {
+  m4b: "one file with chapters",
+  mp3: "often many files — Booky joins them into one M4B",
+  m4a: "one file, usually without chapters",
+}
+
+// AudioProfileEditor: what Booky looks for when it searches for a book's
+// audiobook — used only for books whose audiobook is monitored.
+function AudioProfileEditor({ profile, onSaved }: { profile: ApiAudioProfile; onSaved: () => void }) {
+  const [formats, setFormats] = useState<string[]>(profile.formats)
+  const [languages, setLanguages] = useState<string[]>(splitTerms(profile.languages ?? ""))
+  const [preferred, setPreferred] = useState<string[]>(splitTerms(profile.preferredTerms))
+  const [avoided, setAvoided] = useState<string[]>(splitTerms(profile.avoidedTerms))
+  const [minMB, setMinMB] = useState(String(profile.minSizeMB || ""))
+  const [maxMB, setMaxMB] = useState(String(profile.maxSizeMB || ""))
+
+  const move = (i: number, dir: -1 | 1) => {
+    const next = [...formats]
+    const j = i + dir
+    if (j < 0 || j >= next.length) return
+    ;[next[i], next[j]] = [next[j], next[i]]
+    setFormats(next)
+  }
+  const unused = AUDIO_FORMATS.filter(f => !formats.includes(f))
+  const mb = (v: string) => Math.max(0, Math.floor(Number(v) || 0))
+
+  const save = async () => {
+    try {
+      await acquisition.updateAudioProfile({
+        formats, languages: languages.join("\n"),
+        preferredTerms: preferred.join(", "), avoidedTerms: avoided.join(", "),
+        minSizeMB: mb(minMB), maxSizeMB: mb(maxMB),
+      })
+      toast.success("Audiobook profile saved")
+      onSaved()
+    } catch (e) {
+      toast.error(`Couldn't save: ${e instanceof Error ? e.message : e}`)
+    }
+  }
+
+  return (
+    <Card title="Audiobook Profile"
+      desc="Used when Booky searches for a book's audiobook — only for books whose audiobook you've switched on. Searches Prowlarr's audiobook category; downloads go to SABnzbd.">
+      <div className="flex flex-col gap-5">
+        <div>
+          <Label>Formats, best first</Label>
+          <div className="flex max-w-[480px] flex-col">
+            {formats.map((f, i) => (
+              <div key={f} className="flex items-center gap-3 border-b border-linesoft py-2 last:border-b-0">
+                <span className="font-label w-4 text-right text-xs text-faint">{i + 1}</span>
+                <div className="flex flex-col">
+                  <button aria-label={`Move ${f} up`} onClick={() => move(i, -1)} disabled={i === 0}
+                    className={cn("text-faint hover:text-foreground", i === 0 && "opacity-30")}><ArrowUp className="h-3.5 w-3.5" /></button>
+                  <button aria-label={`Move ${f} down`} onClick={() => move(i, 1)} disabled={i === formats.length - 1}
+                    className={cn("text-faint hover:text-foreground", i === formats.length - 1 && "opacity-30")}><ArrowDown className="h-3.5 w-3.5" /></button>
+                </div>
+                <span className="w-12 text-[13.5px] font-medium uppercase">{f}</span>
+                <span className="flex-1 text-[12px] text-faint">{AUDIO_FORMAT_NOTE[f]}</span>
+                <button aria-label={`Remove ${f}`} disabled={formats.length === 1} onClick={() => setFormats(formats.filter(x => x !== f))}
+                  className={cn("text-faint hover:text-want", formats.length === 1 && "opacity-30")}><X className="h-3.5 w-3.5" /></button>
+              </div>
+            ))}
+          </div>
+          {unused.length > 0 && (
+            <div className="mt-2 flex flex-wrap gap-1.5">
+              {unused.map(f => (
+                <Button key={f} variant="outline" className="h-7 px-2 text-[11.5px] uppercase"
+                  onClick={() => setFormats([...formats, f])}>+ {f}</Button>
+              ))}
+            </div>
+          )}
+        </div>
+        <div>
+          <Label>Size</Label>
+          <div className="flex items-center gap-2 text-[12.5px] text-muted-foreground">
+            <Input inputMode="numeric" aria-label="Smallest size in MB" value={minMB} onChange={e => setMinMB(e.target.value.replace(/\D/g, ""))}
+              placeholder="0" className="h-8 w-24 font-label text-[11.5px]" />
+            <span>to</span>
+            <Input inputMode="numeric" aria-label="Largest size in MB" value={maxMB} onChange={e => setMaxMB(e.target.value.replace(/\D/g, ""))}
+              placeholder="no limit" className="h-8 w-24 font-label text-[11.5px]" />
+            <span>MB</span>
+          </div>
+          <p className="mt-1.5 text-xs text-faint">Releases outside this range are skipped — a few MB is a sample or a broken post, not a book.</p>
+        </div>
+        <div>
+          <Label>Languages</Label>
+          <ProfilePills items={languages} onChange={setLanguages} placeholder="e.g. english"
+            emptyNote="No languages — the filter is off, any language can be grabbed."
+            help="Releases in any other language are skipped." />
+        </div>
+        <div className="grid gap-4 md:grid-cols-2">
+          <div>
+            <Label>Preferred terms</Label>
+            <ProfilePills items={preferred} onChange={setPreferred} placeholder="e.g. unabridged"
+              help="Releases containing these rank higher within a format." />
+          </div>
+          <div>
+            <Label>Skip releases with</Label>
+            <ProfilePills items={avoided} onChange={setAvoided} placeholder="e.g. abridged"
+              help="Releases with these words are never grabbed, in any format — an abridged reading can't be read along with the full book. Whole words: “abridged” doesn't match “unabridged”." />
+          </div>
+        </div>
+        <Button className="h-9 w-fit" onClick={save}>Save audiobook profile</Button>
+      </div>
     </Card>
   )
 }

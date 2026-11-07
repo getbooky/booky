@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react"
-import { acquisition, api, canRead, coverUrl, kindle, tags as tagsApi } from "@/api"
+import { acquisition, api, audiobooks, canRead, coverUrl, kindle, tags as tagsApi } from "@/api"
 import type { ApiBook, ApiKindleDevice, ApiLibrary } from "@/api"
 import { AddToLibraryButton } from "@/components/AddToLibrary"
 import { Cover, hashColors } from "@/components/Cover"
@@ -407,6 +407,7 @@ export function BookDetail({ book: initial, onBack, onChanged, onRead, onReadAlo
   const [book, setBook] = useState(initial)
   const [editOpen, setEditOpen] = useState(false)
   const [searchOpen, setSearchOpen] = useState(false)
+  const [audioSearchOpen, setAudioSearchOpen] = useState(false)
   const [importOpen, setImportOpen] = useState(false)
   const [autoGrabbing, setAutoGrabbing] = useState(false)
   const [c1, c2] = hashColors(book.title)
@@ -460,6 +461,34 @@ export function BookDetail({ book: initial, onBack, onChanged, onRead, onReadAlo
       toast.error(`Auto-grab failed: ${e instanceof Error ? e.message : e}`)
     } finally {
       setAutoGrabbing(false)
+    }
+  }
+
+  // the audiobook has its own search and its own monitor switch
+  const autoGrabAudio = async () => {
+    setAutoGrabbing(true)
+    try {
+      const r = await audiobooks.autoGrab(book.id)
+      if (r.grabbed) {
+        toast.success("Grabbed the best audiobook release — watch Activity")
+        onChanged()
+      } else {
+        toast.warning("No grabbable audiobook found")
+      }
+    } catch (e) {
+      toast.error(`Auto-grab failed: ${e instanceof Error ? e.message : e}`)
+    } finally {
+      setAutoGrabbing(false)
+    }
+  }
+  const toggleAudioMonitored = async (v: boolean) => {
+    try {
+      await audiobooks.setMonitored(book.id, v)
+      setBook({ ...book, audioMonitored: v })
+      if (v && !book.audio) toast("Searching for the audiobook")
+      onChanged()
+    } catch (e) {
+      toast.error(`Couldn't update: ${e instanceof Error ? e.message : e}`)
     }
   }
 
@@ -609,6 +638,26 @@ export function BookDetail({ book: initial, onBack, onChanged, onRead, onReadAlo
           </DropdownMenu>
         )}
         </>)}
+        {format === "audiobook" && book.libraryId ? (<>
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Button variant="outline" size="icon" className={ICON_BTN} aria-label="Auto-grab best audiobook"
+              disabled={autoGrabbing} onClick={autoGrabAudio}>
+              <Zap className="h-4 w-4" />
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent>Auto-grab the best audiobook</TooltipContent>
+        </Tooltip>
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Button variant="outline" size="icon" className={ICON_BTN} aria-label="Search audiobook releases"
+              onClick={() => setAudioSearchOpen(true)}>
+              <Search className="h-4 w-4" />
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent>Search audiobook releases</TooltipContent>
+        </Tooltip>
+        </>) : null}
         <Tooltip>
           <TooltipTrigger asChild>
             <Button variant="outline" size="icon" className={ICON_BTN} aria-label="Refresh metadata" onClick={refresh}>
@@ -675,7 +724,7 @@ export function BookDetail({ book: initial, onBack, onChanged, onRead, onReadAlo
               <div className="mt-3 flex flex-wrap items-center gap-2">
                 {book.audio
                   ? <Tag kind={AUDIO_TAG[book.audio]?.kind ?? "dim"}>{AUDIO_TAG[book.audio]?.label ?? book.audio}</Tag>
-                  : <Tag kind="dim">No audiobook</Tag>}
+                  : book.audioMonitored ? <Tag kind="want">Wanted</Tag> : <Tag kind="dim">No audiobook</Tag>}
               </div>
             ) : (
             <div className="mt-3 flex flex-wrap items-center gap-2">
@@ -691,6 +740,15 @@ export function BookDetail({ book: initial, onBack, onChanged, onRead, onReadAlo
               {book.description || "No description cached yet — it arrives with the next metadata refresh."}
             </p>
 
+            {format === "audiobook" && book.libraryId ? (
+              <div className="mt-5 flex flex-wrap items-center gap-x-5 gap-y-3">
+                {/* separate from the ebook's: the EPUB can be wanted without the audiobook */}
+                <label className="flex items-center gap-2 text-[13px] text-muted-foreground">
+                  <Switch checked={!!book.audioMonitored} onCheckedChange={toggleAudioMonitored}
+                    aria-label="Monitor the audiobook" /> Monitored
+                </label>
+              </div>
+            ) : null}
             {format === "ebook" && (
             <div className="mt-5 flex flex-wrap items-center gap-x-5 gap-y-3">
               {/* reading is the one consumer action, so it leads with a label */}
@@ -755,6 +813,9 @@ export function BookDetail({ book: initial, onBack, onChanged, onRead, onReadAlo
         bookId={book.id} bookTitle={book.title} defaultLibraryId={book.libraryId}
         onImported={() => { refresh(); onChanged() }} />
       <ReleasesDialog book={searchOpen ? book : null} open={searchOpen} onOpenChange={setSearchOpen}
+        onGrabbed={() => { toast("Watch Activity for progress"); refresh(); onChanged() }} />
+      <ReleasesDialog kind="audiobook" book={audioSearchOpen ? book : null} open={audioSearchOpen}
+        onOpenChange={setAudioSearchOpen}
         onGrabbed={() => { toast("Watch Activity for progress"); refresh(); onChanged() }} />
     </section>
   )

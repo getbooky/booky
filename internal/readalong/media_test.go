@@ -342,3 +342,19 @@ func TestJoin(t *testing.T) {
 		t.Fatalf("chapters: %+v", pr.Chapters)
 	}
 }
+
+// A recording of only part of the book is refused, and says so — it's the
+// right book, so it mustn't be called the wrong one.
+func TestBuildRefusesAPartialAudiobook(t *testing.T) {
+	tools := realTools(t)
+	audio := filepath.Join(t.TempDir(), "part.mp3")
+	speak(t, tools, aliceSentences[:1], audio)
+	res, err := tools.Build(context.Background(), Job{EPUB: aliceEPUB(t), Audio: audio, Format: MP3,
+		OutDir: filepath.Join(t.TempDir(), "x")})
+	if res != nil {
+		t.Logf("accepted with %+v", res.Stats)
+	}
+	if !errors.Is(err, ErrMismatch) || !strings.Contains(err.Error(), "Is the audiobook complete?") {
+		t.Fatalf("err = %v, want a partial-audiobook mismatch", err)
+	}
+}

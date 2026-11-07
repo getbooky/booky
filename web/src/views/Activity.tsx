@@ -6,7 +6,7 @@ import { acquisition } from "@/api"
 import type { ApiQueueItem } from "@/api"
 import { useApi } from "@/hooks/use-api"
 import { ManualImportDialog } from "@/components/BookDetail"
-import { FolderInput, RefreshCw, X } from "lucide-react"
+import { FolderInput, Headphones, RefreshCw, X } from "lucide-react"
 import { toast } from "sonner"
 import { cn } from "@/lib/utils"
 import { formatAge, formatFull, formatWhen } from "@/lib/time"
@@ -65,7 +65,14 @@ export function ActivityView() {
               return (
                 <div key={q.id} className="grid grid-cols-[1fr_auto] items-center gap-4 border-b border-linesoft px-1 py-3">
                   <div className="min-w-0">
-                    <div className="text-[13.5px] font-semibold">{q.bookTitle}</div>
+                    <div className="flex items-center gap-1.5 text-[13.5px] font-semibold">
+                      {q.bookTitle}
+                      {q.kind === "audiobook" && (
+                        <span className="flex items-center gap-1 text-[11px] font-medium text-muted-foreground">
+                          <Headphones className="h-3 w-3" /> Audiobook
+                        </span>
+                      )}
+                    </div>
                     <div className="mt-0.5 truncate text-xs text-muted-foreground">{q.releaseTitle}</div>
                     <div className="mt-0.5 text-xs text-faint">
                       {q.source} · {q.protocol}{q.detail ? ` · ${q.detail}` : ""}
@@ -88,11 +95,15 @@ export function ActivityView() {
                             }}>
                             <RefreshCw className="mr-1 h-3 w-3" /> Retry import
                           </Button>
-                          <Button variant="outline" className="h-7 px-2 text-[12px]"
-                            title="Pick the file yourself and deliver it — resolves this row"
-                            onClick={() => setImportItem(q)}>
-                            <FolderInput className="mr-1 h-3 w-3" /> Manual import
-                          </Button>
+                          {/* manual import delivers an ebook; an audiobook is
+                              added from its book page instead */}
+                          {q.kind !== "audiobook" && (
+                            <Button variant="outline" className="h-7 px-2 text-[12px]"
+                              title="Pick the file yourself and deliver it — resolves this row"
+                              onClick={() => setImportItem(q)}>
+                              <FolderInput className="mr-1 h-3 w-3" /> Manual import
+                            </Button>
+                          )}
                         </>
                       )}
                       <Tag kind={tag.kind}>{tag.text}</Tag>

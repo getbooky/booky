@@ -626,6 +626,51 @@ func (w *Watcher) releaseDayPass(ctx context.Context) {
 			return
 		}
 	}
+
+	// audiobooks the book is monitored for, on the same taper
+	for _, t := range w.wantedAudio() {
+		rel, err := time.Parse("2006-01-02", t.releaseDate)
+		if err != nil || !taperDays[int(today.Sub(rel).Hours()/24)] || w.audioAttemptedToday(t.bookID) {
+			continue
+		}
+		log.Printf("watcher: release-day audiobook search for book %d", t.bookID)
+		if _, err := w.engine.AutoGrabAudio(ctx, t.bookID, t.libraryID); err != nil {
+			log.Printf("watcher: release-day audiobook grab: %v", err)
+		}
+		w.recordAudioAttempt(t.bookID)
+		if !w.pause(ctx, w.Pace) {
+			return
+		}
+	}
+}
+
+// audioTarget is a book whose audiobook is wanted and missing.
+type audioTarget struct {
+	bookID, libraryID  int64
+	title, releaseDate string
+}
+
+// wantedAudio lists books monitored for their audiobook that don't have
+// one yet.
+func (w *Watcher) wantedAudio() []audioTarget {
+	rows, err := w.db.Query(`
+		SELECT b.id, lb.library_id, b.title, COALESCE(b.release_date, '')
+		FROM books b JOIN library_books lb ON lb.book_id = b.id
+		WHERE lb.audio_monitored = 1
+		  AND NOT EXISTS (SELECT 1 FROM audiobooks au WHERE au.book_id = b.id)`)
+	if err != nil {
+		log.Printf("watcher: wanted audiobooks: %v", err)
+		return nil
+	}
+	defer rows.Close()
+	var out []audioTarget
+	for rows.Next() {
+		var t audioTarget
+		if err := rows.Scan(&t.bookID, &t.libraryID, &t.title, &t.releaseDate); err == nil {
+			out = append(out, t)
+		}
+	}
+	return out
 }
 
 // ---- weekly release-date refresh ----
@@ -701,6 +746,25 @@ func (w *Watcher) backlogPass(ctx context.Context) {
 
 	log.Printf("watcher: backlog pass over %d books", len(targets))
 	searched := 0
+	defer func() {
+		// then the missing audiobooks, out of the same weekly budget
+		for _, t := range w.wantedAudio() {
+			if ctx.Err() != nil || searched >= 50 {
+				return
+			}
+			if !released(t.releaseDate) || w.audioAttemptedToday(t.bookID) {
+				continue
+			}
+			searched++
+			if _, err := w.engine.AutoGrabAudio(ctx, t.bookID, t.libraryID); err != nil {
+				log.Printf("watcher: backlog audiobook %q: %v", t.title, err)
+			}
+			w.recordAudioAttempt(t.bookID)
+			if !w.pause(ctx, w.Pace) {
+				return
+			}
+		}
+	}()
 	for _, t := range targets {
 		if searched >= 50 { // weekly budget
 			log.Printf("watcher: backlog budget reached; %d books wait for next week", len(targets)-searched)
@@ -740,6 +804,20 @@ func (w *Watcher) recordAttempt(bookID int64) {
 		ON CONFLICT(book_id) DO UPDATE SET last_searched = datetime('now')`, bookID); err != nil {
 		log.Printf("watcher: record attempt: %v", err)
 	}
+}
+
+func (w *Watcher) recordAudioAttempt(bookID int64) {
+	if _, err := w.db.Exec(`INSERT INTO audio_search_attempts (book_id, last_searched) VALUES (?, datetime('now'))
+		ON CONFLICT(book_id) DO UPDATE SET last_searched = datetime('now')`, bookID); err != nil {
+		log.Printf("watcher: record audiobook attempt: %v", err)
+	}
+}
+
+func (w *Watcher) audioAttemptedToday(bookID int64) bool {
+	var n int
+	err := w.db.QueryRow(`SELECT COUNT(*) FROM audio_search_attempts
+		WHERE book_id = ? AND last_searched >= date('now')`, bookID).Scan(&n)
+	return err == nil && n > 0
 }
 
 func (w *Watcher) attemptedToday(bookID int64) bool {
