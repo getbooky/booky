@@ -2,10 +2,12 @@ package api
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 )
@@ -187,5 +189,123 @@ func TestDownloadedAudiobookIsFiled(t *testing.T) {
 	}
 	if err := f.srv.ImportAudioFrom(context.Background(), id, empty); err == nil {
 		t.Fatal("an empty download was filed")
+	}
+}
+
+// TestSeriesDownloadIsSplitIntoBooks: a series pack grabbed for one book
+// files each library book it holds with its own audiobook, leaves books the
+// library doesn't have, and never replaces an audiobook nobody asked to.
+func TestSeriesDownloadIsSplitIntoBooks(t *testing.T) {
+	if os.Getenv("BOOKY_READALONG_IT") == "" {
+		t.Skip("set BOOKY_READALONG_IT=1 to run against ffmpeg/vosk/espeak")
+	}
+	f := newScopedFixture(t)
+	root := t.TempDir()
+	f.srv.mediaRoot = root
+	if _, err := f.srv.db.Exec(`UPDATE libraries SET root_path = ?`, filepath.Join(root, "books")); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go f.srv.ReadAlong.Run(ctx)
+
+	texts := map[string][]string{
+		"The Glass Tide":   {"The tide came in made of glass and nobody could swim in it.", "Mara watched it shine from the old pier."},
+		"The Iron Moon":    {"Every night the iron moon rang like a bell over the harbour.", "The fishermen counted the strokes before they slept."},
+		"The Salt Crown":   {"The queen wore a crown of salt that melted in the rain.", "Her people learned to love the dry season best."},
+		"The Last Harbour": {"Nobody remembered who built the last harbour.", "It was older than the sea itself, they said."},
+	}
+	// the library has three of the four; one already has an audiobook
+	ids := map[string]int64{}
+	for _, title := range []string{"The Glass Tide", "The Iron Moon", "The Last Harbour"} {
+		id, _ := strconv.ParseInt(idStr(f.addBook(t, f.adminCooke, map[string]any{"title": title}, nil)["id"]), 10, 64)
+		ids[title] = id
+		epub := filepath.Join(root, "books", "Emmett Hale", title+".epub")
+		minimalEPUB(t, epub, texts[title])
+		if err := f.srv.Catalog.SetFile(f.lib, id, epub, "epub", 1); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := f.srv.db.Exec(`INSERT INTO audiobooks (book_id, file_path, format, status) VALUES (?, '/elsewhere/harbour.m4b', 'mov', 'ready')`, ids["The Last Harbour"]); err != nil {
+		t.Fatal(err)
+	}
+
+	// the download: one folder per book, the first in two parts
+	job := filepath.Join(root, "downloads", "Emmett Hale - Harbour Series (Books 1-4) MP3")
+	files := map[string][]byte{
+		"Book 1 - The Glass Tide/Part 1.mp3": spokenMP3(t, texts["The Glass Tide"][:1]),
+		"Book 1 - The Glass Tide/Part 2.mp3": spokenMP3(t, texts["The Glass Tide"][1:]),
+		"Book 2 - The Iron Moon/01.mp3":      spokenMP3(t, texts["The Iron Moon"]),
+		"Book 3 - The Salt Crown/01.mp3":     spokenMP3(t, texts["The Salt Crown"]),
+		"Book 4 - The Last Harbour/01.mp3":   spokenMP3(t, texts["The Last Harbour"]),
+		"Emmett Hale - Harbour Series.nfo":   []byte("release notes"),
+	}
+	for name, data := range files {
+		p := filepath.Join(job, name)
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, data, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// grabbed for book 2
+	if err := f.srv.ImportAudioFrom(context.Background(), ids["The Iron Moon"], job); err != nil {
+		t.Fatal(err)
+	}
+	// books 1 and 2 are filed beside their own ebooks, book 1 joined
+	for _, title := range []string{"The Glass Tide", "The Iron Moon"} {
+		matches, _ := filepath.Glob(filepath.Join(root, "books", "Emmett Hale", title+".m4b"))
+		if title == "The Iron Moon" {
+			matches, _ = filepath.Glob(filepath.Join(root, "books", "Emmett Hale", title+".mp3"))
+		}
+		if len(matches) != 1 {
+			entries, _ := os.ReadDir(filepath.Join(root, "books", "Emmett Hale"))
+			var names []string
+			for _, e := range entries {
+				names = append(names, e.Name())
+			}
+			t.Fatalf("%s: no audiobook beside the ebook; folder has %q", title, names)
+		}
+	}
+	// and both get their read-along
+	for _, title := range []string{"The Glass Tide", "The Iron Moon"} {
+		book := strconv.FormatInt(ids[title], 10)
+		waitFor(t, 120*time.Second, func() bool {
+			_, view := f.do(t, f.adminCooke, "GET", "/api/v1/books/"+book+"/audiobook", nil)
+			if view["status"] == "failed" {
+				t.Fatalf("%s read-along failed: %v", title, view["error"])
+			}
+			return view["readAlong"] == true
+		})
+	}
+	// the book that had an audiobook keeps it
+	a, err := f.srv.Audiobooks.Get(ids["The Last Harbour"])
+	if err != nil || a.Path != "/elsewhere/harbour.m4b" {
+		t.Fatalf("existing audiobook replaced: %+v %v", a, err)
+	}
+	// the history says what happened, naming the book not in the library
+	_, hist := f.do(t, f.adminCooke, "GET", "/api/v1/history", nil)
+	found := false
+	for _, h := range hist["history"].([]any) {
+		m := h.(map[string]any)
+		if m["kind"] == "series download" {
+			d := m["detail"].(string)
+			found = strings.Contains(d, "filed 2") && strings.Contains(d, "The Last Harbour") &&
+				strings.Contains(d, "not in your library: Book 3 - The Salt Crown")
+			if !found {
+				t.Errorf("summary: %s", d)
+			}
+		}
+	}
+	if !found {
+		t.Error("no series download summary in the history")
+	}
+
+	// a pack without the book it was grabbed for says so
+	other, _ := strconv.ParseInt(idStr(f.addBook(t, f.adminCooke, map[string]any{"title": "Nowhere Near"}, nil)["id"]), 10, 64)
+	if err := f.srv.ImportAudioFrom(context.Background(), other, job); !errors.Is(err, errNotInDownload) {
+		t.Fatalf("pack without the book: %v", err)
 	}
 }

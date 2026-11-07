@@ -12,6 +12,7 @@ import (
 
 	"github.com/getbooky/booky/internal/catalog"
 	"github.com/getbooky/booky/internal/epub"
+	"github.com/getbooky/booky/internal/release"
 )
 
 // NamingSettings is the slice of app settings Deliver needs; the api layer
@@ -223,6 +224,66 @@ func copyFile(src, dst string) error {
 		return err
 	}
 	return os.Rename(out.Name(), dst)
+}
+
+// FindBookFileFor locates the book's file under path. A download holding
+// several books (a series pack) would otherwise hand over its biggest file,
+// which is rarely the one wanted: when there are several, the files named
+// for the book are preferred — the largest of those — and when none is,
+// a pack with several differently named books is refused rather than
+// guessed at. A lone file, or several copies of one book in different
+// formats, goes as before.
+func FindBookFileFor(path, title, author string) (string, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return "", err
+	}
+	if !info.IsDir() {
+		return path, nil
+	}
+	type file struct {
+		path string
+		size int64
+	}
+	var files []file
+	err = filepath.WalkDir(path, func(p string, d os.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return err
+		}
+		if bookExts[strings.ToLower(filepath.Ext(p))] {
+			if fi, err := d.Info(); err == nil {
+				files = append(files, file{p, fi.Size()})
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return "", err
+	}
+	if len(files) == 0 {
+		return "", fmt.Errorf("no book file found under %s", path)
+	}
+	var best string
+	var bestSize int64 = -1
+	for _, f := range files {
+		name := strings.TrimSuffix(filepath.Base(f.path), filepath.Ext(f.path))
+		if release.TitleMatches(title, author, name) && f.size > bestSize {
+			best, bestSize = f.path, f.size
+		}
+	}
+	if best != "" {
+		return best, nil
+	}
+	// nothing named for the book: fine if it's all one book (same name in
+	// several formats), refused if it's several
+	names := map[string]bool{}
+	for _, f := range files {
+		names[strings.ToLower(strings.TrimSuffix(filepath.Base(f.path), filepath.Ext(f.path)))] = true
+	}
+	if len(names) > 1 {
+		return "", fmt.Errorf("the download holds %d different books and none is named %q", len(names), title)
+	}
+	return FindBookFile(path)
 }
 
 // FindBookFile locates the (largest) book file under path — which may be a

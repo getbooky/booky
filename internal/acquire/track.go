@@ -112,7 +112,11 @@ func (e *Engine) PollSab(ctx context.Context) {
 				e.importAudio(it, h.storage)
 				continue
 			}
-			path, err := importer.FindBookFile(h.storage)
+			title, author := "", ""
+			if b, err := e.catalog.GetBook(it.BookID); err == nil {
+				title, author = b.Title, b.Author
+			}
+			path, err := importer.FindBookFileFor(h.storage, title, author)
 			if err != nil {
 				// downloaded but no usable book inside — that's a verdict on
 				// the release, so block it and move down the list

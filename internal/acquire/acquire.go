@@ -170,8 +170,13 @@ type SourceStat struct {
 // first; then the rest — other titles, kept so a person can still look —
 // marked, and scored so nothing automatic ever takes them.
 func rankForBook(book *catalog.Book, rels []release.Release, profile release.Profile, order []string, stats []SourceStat) []release.Release {
-	var match, other []release.Release
+	var match, bundles, other []release.Release
 	for _, r := range rels {
+		// checked first: a bundle can name this book among others
+		if release.BundleFor(book.Title, book.Author, book.SeriesName, r.Title) {
+			bundles = append(bundles, r)
+			continue
+		}
 		if release.TitleMatches(book.Title, book.Author, r.Title) {
 			match = append(match, r)
 			continue
@@ -186,6 +191,13 @@ func rankForBook(book *catalog.Book, rels []release.Release, profile release.Pro
 		}
 	}
 	ranked := release.Rank(match, profile, order)
+	for _, r := range release.Rank(bundles, profile, order) {
+		r.Bundle = true
+		if r.Score > 0 {
+			r.Score = 0 // automatic grabs only take positive scores
+		}
+		ranked = append(ranked, r)
+	}
 	for _, r := range release.Rank(other, profile, order) {
 		r.TitleMismatch = true
 		if r.Score > 0 {

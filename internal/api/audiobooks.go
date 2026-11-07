@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 
@@ -297,6 +298,24 @@ func (s *Server) handleAudiobookImport(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, err)
 		return
 	}
+	// a series folder is split into its books, each filed with its own
+	if split, err := audiobook.SplitByBook(src, s.audioCandidates(id)); err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	} else if split.Bundle {
+		if st := s.importState(id); st != nil && !st.done {
+			writeErr(w, http.StatusConflict, errImportBusy)
+			return
+		}
+		//nolint:gosec // G118: the import must outlive the HTTP request by design
+		go func() {
+			if err := s.ImportAudioFrom(context.Background(), id, src); err != nil {
+				log.Printf("audiobook: series import for book %d: %v", id, err) //nolint:gosec // G706: a number and our own error
+			}
+		}()
+		writeJSON(w, http.StatusAccepted, map[string]string{"status": "importing"})
+		return
+	}
 	parts, err := audiobook.Parts(src)
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, err)
@@ -371,6 +390,16 @@ func (s *Server) ImportAudioFrom(ctx context.Context, bookID int64, path string)
 	if !ok {
 		return errImportBusy
 	}
+	split, err := audiobook.SplitByBook(path, s.audioCandidates(bookID))
+	if err != nil {
+		s.finishImport(bookID, st, "The download had no usable audio.")
+		return err
+	}
+	if split.Bundle {
+		msg, err := s.installSeries(ctx, bookID, split)
+		s.finishImport(bookID, st, msg)
+		return err
+	}
 	parts, err := audiobook.Parts(path)
 	if err != nil {
 		s.finishImport(bookID, st, "The download had no usable audio.")
@@ -379,6 +408,110 @@ func (s *Server) ImportAudioFrom(ctx context.Context, bookID int64, path string)
 	msg, err := s.installAudio(ctx, bookID, parts, len(parts) == 1)
 	s.finishImport(bookID, st, msg)
 	return err
+}
+
+// audioCandidates are the books a download for bookID might also hold: the
+// author's books in the library. The book itself comes first.
+func (s *Server) audioCandidates(bookID int64) []audiobook.BookRef {
+	book, err := s.Catalog.GetBook(bookID)
+	if err != nil {
+		return nil
+	}
+	out := []audiobook.BookRef{{ID: book.ID, Title: book.Title, Author: book.Author}}
+	books, err := s.Catalog.ListBooks(book.AuthorID, 0, 0)
+	if err != nil {
+		return out
+	}
+	seen := map[int64]bool{book.ID: true}
+	for _, b := range books {
+		if b.LibraryID == 0 || seen[b.ID] {
+			continue
+		}
+		seen[b.ID] = true
+		out = append(out, audiobook.BookRef{ID: b.ID, Title: b.Title, Author: b.Author})
+	}
+	return out
+}
+
+// errNotInDownload: a series pack didn't hold the book it was grabbed for.
+var errNotInDownload = errors.New("the download doesn't contain this book")
+
+// installSeries files each library book a series pack holds as that book's
+// audiobook. The book it was grabbed for is filed whatever it had before;
+// the others only when they have no audiobook yet — a pack never replaces
+// one nobody asked to replace. The outcome goes to the book's history, and
+// the returned message is shown on its page.
+func (s *Server) installSeries(ctx context.Context, bookID int64, split *audiobook.Split) (string, error) {
+	title := func(id int64) string {
+		if b, err := s.Catalog.GetBook(id); err == nil {
+			return b.Title
+		}
+		return fmt.Sprintf("book %d", id)
+	}
+	ids := make([]int64, 0, len(split.Books))
+	for id := range split.Books {
+		ids = append(ids, id)
+	}
+	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
+	var filed, kept, failed []string
+	var targetMsg string
+	var targetErr error
+	for _, id := range ids {
+		if id != bookID {
+			if _, err := s.Audiobooks.Get(id); !errors.Is(err, audiobook.ErrNone) {
+				kept = append(kept, title(id))
+				continue
+			}
+		}
+		parts := split.Books[id]
+		// another book of the pack is claimed while it's being filed, so
+		// its page shows the work and an upload can't race it
+		var claim *audioImport
+		if id != bookID {
+			c, ok := s.claimImport(id, func() {})
+			if !ok {
+				kept = append(kept, title(id))
+				continue
+			}
+			claim = c
+		}
+		// parts are copied, not moved: the pack's folder is cleaned up as a
+		// whole once everything is filed
+		msg, err := s.installAudio(ctx, id, parts, false)
+		if claim != nil {
+			s.finishImport(id, claim, msg)
+		}
+		if id == bookID {
+			targetMsg, targetErr = msg, err
+		}
+		if err != nil {
+			failed = append(failed, title(id))
+			continue
+		}
+		filed = append(filed, title(id))
+		if id != bookID {
+			_ = s.Catalog.AddHistory(id, s.Catalog.TheLibrary(), "imported", "audiobook from a series download, grabbed for "+title(bookID))
+		}
+	}
+	var report []string
+	if len(filed) > 0 {
+		report = append(report, fmt.Sprintf("filed %d: %s", len(filed), strings.Join(filed, ", ")))
+	}
+	if len(kept) > 0 {
+		report = append(report, "already had an audiobook (kept): "+strings.Join(kept, ", "))
+	}
+	if len(failed) > 0 {
+		report = append(report, "couldn't file: "+strings.Join(failed, ", "))
+	}
+	if len(split.Unmatched) > 0 {
+		report = append(report, "not in your library: "+strings.Join(split.Unmatched, ", "))
+	}
+	summary := fmt.Sprintf("series download with %d book(s) — %s", len(split.Books)+len(split.Unmatched), strings.Join(report, "; "))
+	_ = s.Catalog.AddHistory(bookID, s.Catalog.TheLibrary(), "series download", summary)
+	if _, ok := split.Books[bookID]; !ok {
+		return "The series download didn't contain this book — " + strings.Join(report, "; ") + ".", errNotInDownload
+	}
+	return targetMsg, targetErr
 }
 
 // installAudio puts an audiobook in place, records it, replaces any old one

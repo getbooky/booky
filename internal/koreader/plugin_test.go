@@ -226,3 +226,36 @@ func TestDeviceTimesCarryTheirZone(t *testing.T) {
 		}
 	}
 }
+
+// Audiobooks are big: the background sync (on wifi and on wake) must only
+// ever fetch book files. Read-along audio is downloaded when someone asks
+// for it, never on its own.
+func TestAutoSyncNeverFetchesAudio(t *testing.T) {
+	start := strings.Index(mainLua, "function Booky:autoSync()")
+	if start < 0 {
+		t.Fatal("autoSync not found")
+	}
+	body := mainLua[start:]
+	if end := strings.Index(body[1:], "\nfunction "); end > 0 {
+		body = body[:end+1]
+	}
+	for _, banned := range []string{"readalong", "fetchAudio", "/audio/"} {
+		if strings.Contains(body, banned) {
+			t.Errorf("autoSync mentions %q — background sync must not download audio", banned)
+		}
+	}
+	// and the hooks that run on their own don't either
+	for _, hook := range []string{"function Booky:onNetworkConnected()", "function Booky:onResume()", "function Booky:onReaderReady()"} {
+		i := strings.Index(mainLua, hook)
+		if i < 0 {
+			t.Fatalf("%s not found", hook)
+		}
+		h := mainLua[i:]
+		if end := strings.Index(h[1:], "\nfunction "); end > 0 {
+			h = h[:end+1]
+		}
+		if strings.Contains(h, "fetchAudio") || strings.Contains(h, "readalong:download") {
+			t.Errorf("%s downloads audio on its own", hook)
+		}
+	}
+}
