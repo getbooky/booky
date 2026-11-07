@@ -220,3 +220,33 @@ func TestPrepareBookRejectsJunk(t *testing.T) {
 		t.Error("a remote manifest href must fail")
 	}
 }
+
+func TestSpineFragments(t *testing.T) {
+	files := sampleBook()
+	// a cover image in the spine, an itemref naming nothing, and a document
+	// listed twice: the engine counts the first and the third, not the second
+	files["OEBPS/content.opf"] = `<?xml version="1.0"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="3.0"><metadata/><manifest>
+<item id="cover" href="cover.jpg" media-type="image/jpeg"/>
+<item id="c1" href="Text/chapter%201.xhtml" media-type="application/xhtml+xml"/>
+<item id="c2" href="Text/ch2.xhtml" media-type="application/xhtml+xml"/>
+</manifest><spine>
+<itemref idref="cover"/><itemref idref="missing"/><itemref idref="c1"/><itemref idref="c2"/><itemref idref="c1"/>
+</spine></package>`
+	got, err := SpineFragments(writeEPUB(t, files))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]int{"cover.jpg": 0, "Text/chapter%201.xhtml": 1, "Text/ch2.xhtml": 2}
+	if len(got) != len(want) {
+		t.Fatalf("got %v", got)
+	}
+	for k, v := range want {
+		if got[k] != v {
+			t.Fatalf("got %v, want %v", got, want)
+		}
+	}
+	if _, err := SpineFragments(filepath.Join(t.TempDir(), "nope.epub")); err == nil {
+		t.Error("a missing file read as a book")
+	}
+}

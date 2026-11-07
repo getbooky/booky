@@ -255,6 +255,32 @@ func (t Tools) EncodeChunk(ctx context.Context, src string, f Format, sp Span, d
 	return err
 }
 
+// Devices that can't decode compressed audio (a Kindle's sound path takes
+// raw PCM only) are sent chunks decoded to this: signed 16-bit little-endian,
+// mono, at DeviceRate. Speech loses nothing audible at this rate, and it
+// halves the bytes of 44.1 kHz.
+const (
+	DeviceRate        = 22050
+	DeviceBytesPerSec = DeviceRate * 2
+)
+
+// DecodePCM streams a chunk to w as raw PCM in the device format.
+func (t Tools) DecodePCM(ctx context.Context, chunk string, w io.Writer) error {
+	args := append(append([]string{"-nostdin", "-hide_banner", "-v", "error"},
+		input(MP3, chunk)...), "-map", "0:a:0", "-vn", "-ac", "1", "-ar", strconv.Itoa(DeviceRate), "-f", "s16le", "pipe:1")
+	cmd := exec.CommandContext(ctx, t.FFmpeg, args...) //nolint:gosec // G204: see run
+	stderr := tailBuffer{max: 2048}
+	cmd.Stdout = w
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		return fmt.Errorf("ffmpeg: %w: %s", err, strings.TrimSpace(stderr.String()))
+	}
+	return nil
+}
+
 // Transcribe turns one chunk's speech into words, with times shifted by
 // offset so they count from the start of the whole audiobook.
 func (t Tools) Transcribe(ctx context.Context, chunk string, offset float64) ([]Word, error) {

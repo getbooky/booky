@@ -50,39 +50,16 @@ func PrepareBook(epubPath string) (*Book, error) {
 	defer zr.Close()
 	b := &Book{src: epubPath, docs: map[string][]byte{}}
 
-	container, err := readEntry(&zr.Reader, "META-INF/container.xml", 1<<20)
-	if err != nil {
+	if b.opfName, b.opf, err = readOPF(&zr.Reader); err != nil {
 		return nil, err
 	}
-	var c struct {
-		Rootfiles []struct {
-			FullPath string `xml:"full-path,attr"`
-		} `xml:"rootfiles>rootfile"`
-	}
-	if err := xml.Unmarshal(container, &c); err != nil || len(c.Rootfiles) == 0 {
-		return nil, errors.New("epub has no package document")
-	}
-	b.opfName = c.Rootfiles[0].FullPath
 	b.opfDir = path.Dir(b.opfName)
 	if b.opfDir == "." {
 		b.opfDir = ""
 	}
-	if b.opf, err = readEntry(&zr.Reader, b.opfName, 4<<20); err != nil {
+	pkg, err := parsePackage(b.opf)
+	if err != nil {
 		return nil, err
-	}
-
-	var pkg struct {
-		Items []struct {
-			ID        string `xml:"id,attr"`
-			Href      string `xml:"href,attr"`
-			MediaType string `xml:"media-type,attr"`
-		} `xml:"manifest>item"`
-		Spine []struct {
-			IDRef string `xml:"idref,attr"`
-		} `xml:"spine>itemref"`
-	}
-	if err := xml.Unmarshal(b.opf, &pkg); err != nil {
-		return nil, fmt.Errorf("read package document: %w", err)
 	}
 	byID := map[string]int{}
 	for i, it := range pkg.Items {
@@ -122,6 +99,84 @@ func PrepareBook(epubPath string) (*Book, error) {
 		return nil, errors.New("epub has no text to read along with")
 	}
 	return b, nil
+}
+
+// opfPackage is the slice of the package document read here.
+type opfPackage struct {
+	Items []struct {
+		ID        string `xml:"id,attr"`
+		Href      string `xml:"href,attr"`
+		MediaType string `xml:"media-type,attr"`
+	} `xml:"manifest>item"`
+	Spine []struct {
+		IDRef string `xml:"idref,attr"`
+	} `xml:"spine>itemref"`
+}
+
+// readOPF finds and reads the package document.
+func readOPF(zr *zip.Reader) (name string, data []byte, err error) {
+	container, err := readEntry(zr, "META-INF/container.xml", 1<<20)
+	if err != nil {
+		return "", nil, err
+	}
+	var c struct {
+		Rootfiles []struct {
+			FullPath string `xml:"full-path,attr"`
+		} `xml:"rootfiles>rootfile"`
+	}
+	if err := xml.Unmarshal(container, &c); err != nil || len(c.Rootfiles) == 0 {
+		return "", nil, errors.New("epub has no package document")
+	}
+	name = c.Rootfiles[0].FullPath
+	data, err = readEntry(zr, name, 4<<20)
+	return name, data, err
+}
+
+func parsePackage(data []byte) (*opfPackage, error) {
+	var pkg opfPackage
+	if err := xml.Unmarshal(data, &pkg); err != nil {
+		return nil, fmt.Errorf("read package document: %w", err)
+	}
+	return &pkg, nil
+}
+
+// SpineFragments numbers the book's content documents the way KOReader's
+// engine does when it merges them into one document: every spine entry
+// that names a manifest item counts, from 0. The engine renames each id to
+// "_doc_fragment_<n>_ <id>" with this n, so a device needs it to find a
+// sentence. Keys are manifest hrefs, as the timing file names documents;
+// a document listed twice keeps its first number.
+func SpineFragments(epubPath string) (map[string]int, error) {
+	zr, err := zip.OpenReader(epubPath)
+	if err != nil {
+		return nil, fmt.Errorf("open epub: %w", err)
+	}
+	defer zr.Close()
+	_, data, err := readOPF(&zr.Reader)
+	if err != nil {
+		return nil, err
+	}
+	pkg, err := parsePackage(data)
+	if err != nil {
+		return nil, err
+	}
+	hrefOf := map[string]string{}
+	for _, it := range pkg.Items {
+		hrefOf[it.ID] = it.Href
+	}
+	out := map[string]int{}
+	n := 0
+	for _, ref := range pkg.Spine {
+		href, ok := hrefOf[ref.IDRef]
+		if !ok {
+			continue // the engine skips these too, without counting them
+		}
+		if _, seen := out[href]; !seen {
+			out[href] = n
+		}
+		n++
+	}
+	return out, nil
 }
 
 // zipName resolves a manifest href (relative to the OPF, URL-encoded) to the
