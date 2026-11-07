@@ -250,7 +250,7 @@ function Booky:onReaderReady()
         self.settings:saveSetting("readalong_hint_shown", true)
         self.settings:flush()
         UIManager:show(InfoMessage:new{
-            text = _("This book has a Booky read-along. It reads like any book — the audio plays only when you start it.\n\nTo start or stop the narration, tap "▶ Read-along" in the status bar (when it shows all items at once), or use the menu → Read-along. Bluetooth headphones need to be connected in the Kindle's settings.\n\nIt can also go on a gesture: Settings → Gestures → Booky read-along."),
+            text = _("This book has a Booky read-along. It reads like any book — the audio plays only when you start it.\n\nTo start or stop the narration, tap “▶ Read-along” in the status bar (when it shows all items at once), or use the menu → Read-along. Bluetooth headphones need to be connected in the Kindle's settings.\n\nIt can also go on a gesture: Settings → Gestures → Booky read-along."),
         })
     end
 end
@@ -322,6 +322,16 @@ function Booky:tapOnReadAlongLabel(footer, ges)
     end
     local before, own = width(text:sub(1, at - 1)), width(label)
     if not before or not own then return false end
+    -- the screen's corners are KOReader's own shortcuts (the bottom-left
+    -- one toggles the frontlight): a tap there is never ours
+    local sw, sh = Screen:getWidth(), Screen:getHeight()
+    for _k, name in ipairs({ "DTAP_ZONE_BOTTOM_LEFT", "DTAP_ZONE_BOTTOM_RIGHT" }) do
+        local okc, c = pcall(function() return G_defaults:readSetting(name) end)
+        if okc and c and ges.pos.x >= c.x * sw and ges.pos.x < (c.x + c.w) * sw
+            and ges.pos.y >= c.y * sh and ges.pos.y < (c.y + c.h) * sh then
+            return false
+        end
+    end
     local slack = Screen:scaleBySize(8)
     local x0 = self._footer_x + before
     return ges.pos.x >= x0 - slack and ges.pos.x <= x0 + own + slack
