@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -160,19 +161,20 @@ func (t Tools) Join(ctx context.Context, parts []Part, dst string) error {
 	if len(parts) == 0 {
 		return errors.New("no audio files")
 	}
-	// the chapter list, as an ffmetadata file ffmpeg reads alongside
-	var meta strings.Builder
-	meta.WriteString(";FFMETADATA1\n")
-	at := 0.0
-	for _, p := range parts {
+	probes := make([]*Probe, len(parts))
+	for i, p := range parts {
 		pr, err := t.Probe(ctx, p.Path, p.Format)
 		if err != nil {
 			return fmt.Errorf("%s: %w", filepath.Base(p.Path), err)
 		}
-		end := at + pr.Duration
+		probes[i] = pr
+	}
+	// the chapter list, as an ffmetadata file ffmpeg reads alongside
+	var meta strings.Builder
+	meta.WriteString(";FFMETADATA1\n")
+	for _, c := range joinedChapters(parts, probes) {
 		fmt.Fprintf(&meta, "[CHAPTER]\nTIMEBASE=1/1000\nSTART=%d\nEND=%d\ntitle=%s\n",
-			int64(at*1000), int64(end*1000), metaEscape(p.Title))
-		at = end
+			int64(c.Start*1000), int64(c.End*1000), metaEscape(c.Title))
 	}
 	metaFile, err := os.CreateTemp(filepath.Dir(dst), ".chapters-*.txt")
 	if err != nil {
@@ -192,10 +194,17 @@ func (t Tools) Join(ctx context.Context, parts []Part, dst string) error {
 		args = append(args, input(p.Format, p.Path)...)
 	}
 	args = append(args, "-protocol_whitelist", "file", "-f", "ffmetadata", "-i", "file:"+metaFile.Name())
-	// the filter graph is built from input numbers only — no names in it
+	// The filter graph is built from input numbers only — no names in it.
+	// concat needs every input alike, and parts aren't always encoded the
+	// same way (a 44.1 kHz stereo part 1, a 22 kHz mono part 2), so each is
+	// brought to one rate and layout first.
+	rate, layout := joinFormat(probes)
 	var graph strings.Builder
 	for i := range parts {
-		graph.WriteString("[" + strconv.Itoa(i) + ":a:0]")
+		fmt.Fprintf(&graph, "[%d:a:0]aresample=%d,aformat=sample_rates=%d:channel_layouts=%s[p%d];", i, rate, rate, layout, i)
+	}
+	for i := range parts {
+		fmt.Fprintf(&graph, "[p%d]", i)
 	}
 	fmt.Fprintf(&graph, "concat=n=%d:v=0:a=1[a]", len(parts))
 	metaIdx := strconv.Itoa(len(parts))
@@ -204,6 +213,57 @@ func (t Tools) Join(ctx context.Context, parts []Part, dst string) error {
 		"-c:a", "aac", "-b:a", "96k", "-f", "ipod", "-movflags", "+faststart", "-y", "file:"+dst)
 	_, err = run(ctx, t.FFmpeg, args...)
 	return err
+}
+
+// joinedChapters is the chapter list of parts played back to back: each
+// part's own chapters, moved to where the part starts, or — for a part
+// without chapters (an MP3, or an M4B with one mark) — the part as one
+// chapter named after its file.
+func joinedChapters(parts []Part, probes []*Probe) []Chapter {
+	var out []Chapter
+	at := 0.0
+	for i, p := range parts {
+		pr := probes[i]
+		if len(pr.Chapters) > 1 {
+			for _, c := range pr.Chapters {
+				start, end := at+c.Start, at+math.Min(c.End, pr.Duration)
+				if end <= start {
+					continue
+				}
+				title := c.Title
+				if title == "" {
+					title = p.Title
+				}
+				out = append(out, Chapter{Title: title, Start: start, End: end})
+			}
+		} else {
+			out = append(out, Chapter{Title: p.Title, Start: at, End: at + pr.Duration})
+		}
+		at += pr.Duration
+	}
+	return out
+}
+
+// joinFormat picks the rate and layout every part is brought to: the
+// highest rate among them (48 kHz at most), stereo if any part is.
+func joinFormat(probes []*Probe) (int, string) {
+	rate, stereo := 0, false
+	for _, p := range probes {
+		if p.SampleRate > rate {
+			rate = p.SampleRate
+		}
+		stereo = stereo || p.Channels > 1
+	}
+	if rate <= 0 {
+		rate = 44100
+	}
+	if rate > 48000 {
+		rate = 48000
+	}
+	if stereo {
+		return rate, "stereo"
+	}
+	return rate, "mono"
 }
 
 // metaEscape escapes a value for an ffmetadata file, where = ; # \ and line

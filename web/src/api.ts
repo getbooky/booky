@@ -321,6 +321,8 @@ export interface ApiRelease {
   score?: number
   /** named for another title (most often another book by the author) — never auto-grabbed */
   titleMismatch?: boolean
+  /** an audiobook posted as one of several separate downloads ("Part 1 of 2") — never auto-grabbed */
+  partOfSet?: boolean
 }
 
 export interface ApiSourceStat {

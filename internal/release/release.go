@@ -31,6 +31,9 @@ type Release struct {
 	// TitleMatches): another book by the author, most often. It is never
 	// grabbed automatically.
 	TitleMismatch bool `json:"titleMismatch,omitempty"`
+	// PartOfSet marks an audiobook release that is one piece of several
+	// separate downloads ("Part 1 of 2"). It is never grabbed automatically.
+	PartOfSet bool `json:"partOfSet,omitempty"`
 }
 
 // Profile is the slice of a quality profile that ranking needs.
@@ -360,7 +363,7 @@ func Score(r Release, p Profile, sourceOrder []string) int {
 	}
 	tooSmall := p.MinBytes > 0 && r.SizeBytes > 0 && r.SizeBytes < p.MinBytes
 	tooBig := p.MaxBytes > 0 && r.SizeBytes > p.MaxBytes
-	rejected := false
+	rejected := p.Audio && PartOfSet(r.Title)
 	for _, t := range p.RejectTerms {
 		rejected = rejected || hasTerm(r.Title, t)
 	}
@@ -401,6 +404,7 @@ func Rank(releases []Release, p Profile, sourceOrder []string) []Release {
 		if scored[i].Format == "" {
 			scored[i].Format = p.detect(scored[i].Title)
 		}
+		scored[i].PartOfSet = p.Audio && PartOfSet(scored[i].Title)
 		scored[i].Score = Score(scored[i], p, sourceOrder)
 	}
 	// insertion sort keeps it stable without importing sort for a custom less

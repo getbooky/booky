@@ -86,3 +86,57 @@ func TestDestination(t *testing.T) {
 		t.Fatal(got)
 	}
 }
+
+// mp4Head is the start of an M4B: an ftyp box with the M4B brand.
+var mp4Head = []byte("\x00\x00\x00\x18ftypM4B \x00\x00\x02\x00isomiso2 not really audio")
+
+func TestPartsKeepsOneCopy(t *testing.T) {
+	dir := t.TempDir()
+	write := func(rel string, body []byte) {
+		p := filepath.Join(dir, rel)
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, body, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	big := func(head []byte, n int) []byte { return append(append([]byte{}, head...), make([]byte, n)...) }
+	// the same book as two M4B parts and as MP3s, plus a preview clip
+	write("Book - Part 1.m4b", big(mp4Head, 4000))
+	write("Book - Part 2.m4b", big(mp4Head, 4000))
+	write("mp3/01.mp3", big(mp3Head, 1000))
+	write("mp3/02.mp3", big(mp3Head, 1000))
+	write("Book Sample.mp3", big(mp3Head, 100))
+	parts, err := Parts(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var titles []string
+	for _, p := range parts {
+		titles = append(titles, p.Title)
+	}
+	if strings.Join(titles, "|") != "Book - Part 1|Book - Part 2" {
+		t.Fatalf("parts %q — want the M4B copy only", titles)
+	}
+
+	// when the MP3s are the bigger copy, they win
+	write("mp3/03.mp3", big(mp3Head, 9000))
+	parts, _ = Parts(dir)
+	if len(parts) != 3 || parts[0].Format != readalong.MP3 {
+		t.Fatalf("parts %+v", parts)
+	}
+
+	// a lone sample is still used rather than nothing
+	only := t.TempDir()
+	if err := os.WriteFile(filepath.Join(only, "sample.mp3"), mp3Head, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if parts, err := Parts(only); err != nil || len(parts) != 1 {
+		t.Fatalf("lone sample: %v %v", parts, err)
+	}
+	// "Samples of..." in a real title isn't a preview clip
+	if sampleName.MatchString("Samplers Guide.mp3") {
+		t.Error("a word starting with sample read as a preview clip")
+	}
+}

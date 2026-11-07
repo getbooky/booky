@@ -1,6 +1,8 @@
 package release
 
 import (
+	"regexp"
+	"strconv"
 	"strings"
 	"unicode"
 )
@@ -170,6 +172,25 @@ func hasStandaloneRun(toks, want []string, author map[string]bool) bool {
 		okBefore := before == sep || author[before] || isNumber(before)
 		okAfter := after == sep || author[after] || isYear(after) || releaseWords[after]
 		if okBefore && okAfter {
+			return true
+		}
+	}
+	return false
+}
+
+// partOfSetRe finds a release that says it's one piece of a set: "Part 1 of
+// 2", "Pt.2 of 3", "CD 1 of 12", "Disc 2/2". Only the "N of M" forms count
+// — a bare "Part One" is often the book's own title.
+var partOfSetRe = regexp.MustCompile(`(?i)\b(?:part|pt|cd|disc|disk)\.?\s*(\d{1,3})\s*(?:of|/)\s*(\d{1,3})\b`)
+
+// PartOfSet reports whether a release names itself as one piece of several
+// separate downloads. An audiobook posted that way arrives half at a time,
+// and a grab would file half a book as if it were all of it.
+func PartOfSet(title string) bool {
+	for _, m := range partOfSetRe.FindAllStringSubmatch(title, -1) {
+		n, _ := strconv.Atoi(m[1])
+		of, _ := strconv.Atoi(m[2])
+		if of > 1 && n >= 1 && n <= of {
 			return true
 		}
 	}
