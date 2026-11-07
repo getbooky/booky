@@ -45,6 +45,8 @@ export function ReleasesDialog({ book, open, onOpenChange, onGrabbed, kind = "eb
   const [grabbing, setGrabbing] = useState<string | null>(null)
   const [autoGrabbing, setAutoGrabbing] = useState(false)
   const [filter, setFilter] = useState<string | null>(null) // null = all sources
+  // results named for other titles stay hidden unless asked for
+  const [showOthers, setShowOthers] = useState(false)
   const [loadedFor, setLoadedFor] = useState<number | null>(null) // book id the data belongs to
 
   useEffect(() => {
@@ -54,6 +56,7 @@ export function ReleasesDialog({ book, open, onOpenChange, onGrabbed, kind = "eb
     setSources([])
     setError("")
     setFilter(null)
+    setShowOthers(false)
     setLoading(true)
     search(book)
       .then(r => { if (live) { setReleases(r.releases ?? []); setSources(r.sources ?? []); setLoadedFor(book.id) } })
@@ -67,16 +70,19 @@ export function ReleasesDialog({ book, open, onOpenChange, onGrabbed, kind = "eb
   // (and be grabbed) under a newly-opened book before the effect resets state.
   const fresh = loadedFor === (book?.id ?? -1)
 
-  // sources that actually returned candidates, for the filter row
+  const matched = useMemo(() => (releases ?? []).filter(r => !r.titleMismatch), [releases])
+  const others = (releases?.length ?? 0) - matched.length
+
+  // sources that actually returned candidates for this book, for the filter row
   const present = useMemo(() => {
     const counts = new Map<string, number>()
-    for (const r of releases ?? []) counts.set(baseSource(r), (counts.get(baseSource(r)) ?? 0) + 1)
+    for (const r of matched) counts.set(baseSource(r), (counts.get(baseSource(r)) ?? 0) + 1)
     return counts
-  }, [releases])
+  }, [matched])
 
   const shown = useMemo(
-    () => (fresh ? releases ?? [] : []).filter(r => !filter || baseSource(r) === filter),
-    [releases, filter, fresh],
+    () => (fresh ? (showOthers ? releases ?? [] : matched) : []).filter(r => !filter || baseSource(r) === filter),
+    [releases, matched, showOthers, filter, fresh],
   )
 
   const grab = async (rel: ApiRelease) => {
@@ -138,14 +144,14 @@ export function ReleasesDialog({ book, open, onOpenChange, onGrabbed, kind = "eb
             <button
               onClick={() => setFilter(null)}
               className={cn("font-label rounded-md border px-2 py-1 text-[11px]", !filter ? "border-brass bg-brass/15 text-brass" : "text-muted-foreground hover:border-brass/50")}>
-              All{releases ? ` (${releases.length})` : ""}
+              All{releases ? ` (${matched.length})` : ""}
             </button>
             {sources.map(s => {
               const n = present.get(s.name) ?? 0
               // count what's actually shown (after torrent/blocklist filtering),
               // so the chip number never disagrees with the list
               const status = !s.configured ? "not set up" : s.error ? "failed" : `${n}`
-              const disabled = n === 0
+              const disabled = n === 0 && !(showOthers && s.mismatched)
               return (
                 <button key={s.name} disabled={disabled}
                   title={s.error || (!s.configured ? "Configure this source in Settings → Sources" : "")}
@@ -157,6 +163,7 @@ export function ReleasesDialog({ book, open, onOpenChange, onGrabbed, kind = "eb
                     s.error && "border-want/50 text-want",
                   )}>
                   {label(s.name)} · {status}
+                  {s.mismatched ? <span className="opacity-70"> (+{s.mismatched} other titles)</span> : null}
                 </button>
               )
             })}
@@ -174,8 +181,10 @@ export function ReleasesDialog({ book, open, onOpenChange, onGrabbed, kind = "eb
         {fresh && releases && shown.length === 0 && !loading && (
           <p className="py-4 text-[13px] text-muted-foreground">
             {filter
-              ? `No ${label(filter)} results — try another source or "All".`
-              : "Nothing found right now — the weekly backlog pass keeps trying."}
+              ? `No ${label(filter)} results for this book — try another source or "All".`
+              : others > 0
+                ? `None of the ${others} results is this book — they're named for other titles, usually the author's other books or the series. Nothing will be grabbed automatically; the weekly backlog pass keeps looking.`
+                : "Nothing found right now — the weekly backlog pass keeps trying."}
           </p>
         )}
         {shown.length > 0 && (
@@ -183,21 +192,30 @@ export function ReleasesDialog({ book, open, onOpenChange, onGrabbed, kind = "eb
             {shown.map(r => (
               <div key={r.downloadUrl + r.source} className="grid grid-cols-[1fr_auto] items-center gap-3 border-b border-linesoft px-1 py-2.5">
                 <div className="min-w-0">
-                  <div className="truncate text-[13px] font-medium">{r.title}</div>
+                  <div className={cn("truncate text-[13px] font-medium", r.titleMismatch && "text-muted-foreground")}>{r.title}</div>
                   <div className="mt-1 flex flex-wrap items-center gap-1.5 text-xs text-muted-foreground">
+                    {r.titleMismatch && <Tag kind="want">Different title?</Tag>}
                     {r.format && <Fmt>{r.format.toUpperCase()}</Fmt>}
                     <Tag kind="dim">{r.indexer ?? label(baseSource(r))}</Tag>
                     <span>{r.protocol}</span>
                     {r.sizeBytes ? <span>· {fmtSize(r.sizeBytes)}</span> : null}
                   </div>
                 </div>
-                <Button className="h-8" disabled={grabbing !== null} onClick={() => grab(r)}>
+                <Button className="h-8" variant={r.titleMismatch ? "outline" : "default"} disabled={grabbing !== null} onClick={() => grab(r)}>
                   <Download className="mr-1.5 h-3.5 w-3.5" />
                   {grabbing === r.downloadUrl ? "Grabbing…" : "Grab"}
                 </Button>
               </div>
             ))}
           </div>
+        )}
+        {fresh && others > 0 && (
+          <button className="w-fit text-[12.5px] text-muted-foreground underline-offset-2 hover:text-foreground hover:underline"
+            onClick={() => setShowOthers(v => !v)}>
+            {showOthers
+              ? "Hide results for other titles"
+              : `Show ${others} result${others === 1 ? "" : "s"} for other titles`}
+          </button>
         )}
       </DialogContent>
     </Dialog>

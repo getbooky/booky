@@ -253,3 +253,40 @@ func TestAudiobookGrabRefusesDirectSources(t *testing.T) {
 func releaseDirect() release.Release {
 	return release.Release{Title: "First Ember M4B", Source: "annas", Protocol: "direct", DownloadURL: "md5:abc"}
 }
+
+// A search that finds only the author's other books grabs nothing, and says
+// so: the releases come back flagged and counted, not ranked as hits.
+func TestOtherTitlesAreNeverGrabbed(t *testing.T) {
+	e, _, _, bookID, libID := testEngine(t) // the book is "First Ember" by Mara Voss
+	prowlarr := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`[
+			{"title":"Mara Voss - Last Ember (First Ember #2) M4B","size":400000000,"downloadUrl":"http://x/nzb/2","indexer":"ndx","protocol":"usenet"},
+			{"title":"First Ember 3: The Cinder Crown - Mara Voss M4B","size":400000000,"downloadUrl":"http://x/nzb/3","indexer":"ndx","protocol":"usenet"}]`))
+	}))
+	t.Cleanup(prowlarr.Close)
+	sabCalls := 0
+	sab := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sabCalls++
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	t.Cleanup(sab.Close)
+	for k, v := range map[string]string{"prowlarr_url": prowlarr.URL, "prowlarr_api_key": "k", "sab_url": sab.URL, "sab_api_key": "k"} {
+		if err := e.settings.Set(k, v); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rels, stats, err := e.SearchAudio(context.Background(), bookID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rels) != 2 || !rels[0].TitleMismatch || !rels[1].TitleMismatch || rels[0].Score > 0 {
+		t.Fatalf("releases = %+v", rels)
+	}
+	if stats[0].Count != 2 || stats[0].Mismatched != 2 {
+		t.Fatalf("stats = %+v", stats)
+	}
+	grabbed, err := e.AutoGrabAudio(context.Background(), bookID, libID)
+	if err != nil || grabbed || sabCalls != 0 {
+		t.Fatalf("auto-grab took another book: grabbed=%v err=%v sab calls=%d", grabbed, err, sabCalls)
+	}
+}

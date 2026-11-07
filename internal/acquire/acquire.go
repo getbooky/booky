@@ -161,7 +161,39 @@ type SourceStat struct {
 	Configured bool   `json:"configured"`
 	Disabled   bool   `json:"disabled,omitempty"`
 	Count      int    `json:"count"`
+	// Mismatched is how many of Count were named for other titles
+	Mismatched int    `json:"mismatched,omitempty"`
 	Error      string `json:"error,omitempty"`
+}
+
+// rankForBook ranks releases for a book: those named for it first, best
+// first; then the rest — other titles, kept so a person can still look —
+// marked, and scored so nothing automatic ever takes them.
+func rankForBook(book *catalog.Book, rels []release.Release, profile release.Profile, order []string, stats []SourceStat) []release.Release {
+	var match, other []release.Release
+	for _, r := range rels {
+		if release.TitleMatches(book.Title, book.Author, r.Title) {
+			match = append(match, r)
+			continue
+		}
+		r.TitleMismatch = true
+		other = append(other, r)
+		name, _, _ := strings.Cut(r.Source, ":")
+		for i := range stats {
+			if stats[i].Name == name {
+				stats[i].Mismatched++
+			}
+		}
+	}
+	ranked := release.Rank(match, profile, order)
+	for _, r := range release.Rank(other, profile, order) {
+		r.TitleMismatch = true
+		if r.Score > 0 {
+			r.Score = 0 // automatic grabs only take positive scores
+		}
+		ranked = append(ranked, r)
+	}
+	return ranked
 }
 
 // sourceEnabled reads a per-source kill switch; anything but an explicit
@@ -227,7 +259,7 @@ func (e *Engine) SearchDetailed(ctx context.Context, bookID, libraryID, profileI
 		return nil, stats, err
 	}
 	profile.BookTitle = book.Title
-	return release.Rank(all, profile, e.sourceOrder()), stats, nil
+	return rankForBook(book, all, profile, e.sourceOrder(), stats), stats, nil
 }
 
 func (e *Engine) dropBlocked(bookID int64, rels []release.Release) ([]release.Release, error) {
@@ -264,6 +296,9 @@ func (e *Engine) Block(bookID int64, rel release.Release, reason string) error {
 	return err
 }
 
+// ErrNoClient means there's nothing set up to download a release with.
+var ErrNoClient = errors.New("no download client")
+
 // Grab downloads a chosen release. Usenet goes to SABnzbd under Booky's
 // category; direct sources resolve and download immediately. Either way a
 // queue row tracks it. Returns the queue id.
@@ -285,7 +320,9 @@ func (e *Engine) grab(ctx context.Context, bookID, libraryID int64, rel release.
 		// cancelled request says nothing about it, and blocklisting those
 		// poisons every candidate tried during a gated window ("keyless
 		// downloads always fail" forever, even after the wall lifts)
-		transient := errors.Is(cause, directdl.ErrPartnersGated) ||
+		// nor is a missing download client: that's this install's setup, and
+		// blocklisting would lose the right release for good
+		transient := errors.Is(cause, directdl.ErrPartnersGated) || errors.Is(cause, ErrNoClient) ||
 			errors.Is(cause, context.Canceled) || errors.Is(cause, context.DeadlineExceeded)
 		if !transient {
 			if err := e.Block(bookID, rel, cause.Error()); err != nil {
@@ -304,7 +341,7 @@ func (e *Engine) grab(ctx context.Context, bookID, libraryID int64, rel release.
 	case "usenet":
 		sab := e.Sab()
 		if !sab.Configured() {
-			return fail(fmt.Errorf("SABnzbd is not configured"))
+			return fail(fmt.Errorf("SABnzbd is not configured: %w", ErrNoClient))
 		}
 		nzoID, err := sab.AddURL(ctx, rel.DownloadURL, rel.Title)
 		if err != nil {
@@ -361,7 +398,7 @@ func (e *Engine) grab(ctx context.Context, bookID, libraryID int64, rel release.
 		// torrents ride through Prowlarr's download URL too, but a torrent
 		// client integration is not built yet — refuse loudly instead of
 		// pretending.
-		return fail(fmt.Errorf("no download client for protocol %q", rel.Protocol))
+		return fail(fmt.Errorf("no download client for protocol %q: %w", rel.Protocol, ErrNoClient))
 	}
 }
 

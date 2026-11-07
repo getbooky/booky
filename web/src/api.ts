@@ -319,12 +319,16 @@ export interface ApiRelease {
   infoUrl?: string
   indexer?: string
   score?: number
+  /** named for another title (most often another book by the author) — never auto-grabbed */
+  titleMismatch?: boolean
 }
 
 export interface ApiSourceStat {
   name: string
   configured: boolean
   count: number
+  /** how many of count were named for other titles */
+  mismatched?: number
   error?: string
 }
 

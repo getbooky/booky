@@ -27,6 +27,10 @@ type Release struct {
 	Language    string `json:"language,omitempty"`
 	// Score is filled by Rank for display; higher is better.
 	Score int `json:"score"`
+	// TitleMismatch marks a release whose name isn't the book's title (see
+	// TitleMatches): another book by the author, most often. It is never
+	// grabbed automatically.
+	TitleMismatch bool `json:"titleMismatch,omitempty"`
 }
 
 // Profile is the slice of a quality profile that ranking needs.

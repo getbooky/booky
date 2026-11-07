@@ -16,8 +16,27 @@ const param = (url: string, key: string, value: string | number) =>
 // any cover changes. Only sessions that actually change one pay for it, and
 // the re-requests come back 304.
 const COVER_RETRIES = 5
+// Covers that have loaded somewhere on the page. The same book can sit in
+// two rows at once; each card retries a missing cover on its own schedule
+// and gives up after a few tries, so a card that started while the server
+// was still fetching the cover could stay on the placeholder while its twin
+// showed the art. Once one card loads a cover, every card with that cover
+// tries again.
+const loadedCovers = new Map<string, number>()
+const loadedListeners = new Set<() => void>()
+function subscribeLoaded(fn: () => void) {
+  loadedListeners.add(fn)
+  return () => void loadedListeners.delete(fn)
+}
+function markCoverLoaded(src: string) {
+  if (loadedCovers.has(src)) return
+  loadedCovers.set(src, Date.now())
+  for (const fn of loadedListeners) fn()
+}
+
 function useCoverSrc(src?: string): { imgSrc?: string; loaded: boolean; onError: () => void; onLoad: () => void } {
   const [attempt, setAttempt] = useState(0)
+  const loadedElsewhere = useSyncExternalStore(subscribeLoaded, () => (src && loadedCovers.get(src)) || 0)
   // loaded gates the img's visibility: a missing cover must show the gradient
   // fallback, never the browser's broken-image glyph, while retries wait
   const [loaded, setLoaded] = useState(false)
@@ -33,11 +52,17 @@ function useCoverSrc(src?: string): { imgSrc?: string; loaded: boolean; onError:
     window.clearTimeout(timer.current)
     timer.current = window.setTimeout(() => setAttempt(a => a + 1), 5000 * (attempt + 1))
   }
-  const onLoad = () => setLoaded(true)
-  if (!src || attempt > COVER_RETRIES) return { imgSrc: undefined, loaded: false, onError, onLoad }
+  const onLoad = () => {
+    setLoaded(true)
+    if (src) markCoverLoaded(src)
+  }
+  // a card that failed earlier takes the cover another card just loaded
+  const rescued = loadedElsewhere > 0 && attempt > 0
+  if (!src || (attempt > COVER_RETRIES && !rescued)) return { imgSrc: undefined, loaded: false, onError, onLoad }
   let out = src
   if (gen) out = param(out, "v", gen)
-  if (attempt > 0) out = param(out, "r", attempt)
+  if (rescued) out = param(out, "ok", loadedElsewhere)
+  else if (attempt > 0) out = param(out, "r", attempt)
   return { imgSrc: out, loaded, onError, onLoad }
 }
 

@@ -172,6 +172,11 @@ func TestGrabUsenetWithoutSabFails(t *testing.T) {
 	if len(items) != 1 || items[0].Status != "failed" {
 		t.Fatalf("queue should record the failure: %+v", items)
 	}
+	// ...but the release isn't to blame: once SAB is set up it must still
+	// be grabbable
+	if kept, _ := e.dropBlocked(bookID, []release.Release{rel}); len(kept) != 1 {
+		t.Fatal("a release was blocklisted because no download client was set up")
+	}
 }
 
 // A completed SAB job is imported into the library AND removed from SAB

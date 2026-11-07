@@ -92,7 +92,7 @@ func (e *Engine) SearchAudio(ctx context.Context, bookID int64) ([]release.Relea
 		return nil, stats, err
 	}
 	profile.BookTitle = book.Title
-	return release.Rank(all, profile, e.sourceOrder()), stats, nil
+	return rankForBook(book, all, profile, e.sourceOrder(), stats), stats, nil
 }
 
 // GrabAudio sends an audiobook release to SABnzbd and tracks it in the
