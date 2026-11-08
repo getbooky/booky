@@ -678,6 +678,57 @@ function M.new(plugin)
     local Player = {}
     Player.__index = Player
 
+    -- volume reads the Kindle's audio volume (0-100), or nil elsewhere.
+    function RA:volume()
+        if not Device:isKindle() then return nil end
+        local h = io.popen("lipc-get-prop com.lab126.audiomgrd speakerVolume 2>/dev/null")
+        if not h then return nil end
+        local v = tonumber((h:read("*a") or ""):match("(%d+)"))
+        h:close()
+        return v
+    end
+
+    -- setVolume sets it; the Kindle has no volume buttons.
+    function RA:setVolume(v)
+        v = math.max(0, math.min(100, math.floor(tonumber(v) or 50)))
+        os.execute("lipc-set-prop com.lab126.audiomgrd speakerVolume " .. v .. " >>" .. U.shellQuote(LOG) .. " 2>&1")
+        note("volume set to", v, "now reads", self:volume())
+    end
+
+    -- soundTest plays two seconds of hiss through the same path the
+    -- narration takes, and logs what the audio sink offers — for audio
+    -- that plays but isn't heard. done(ok) says whether the player ran
+    -- to the end.
+    function RA:soundTest(done)
+        local backend = self:backend()
+        local sink = U.sinkCommand(backend, 22050)
+        if not sink then
+            note("sound test: no player here (", backend, ")")
+            return done(false)
+        end
+        note("sound test: player", backend)
+        if backend == "gst1" or backend == "gst010" then
+            local inspect = backend == "gst1" and "gst-inspect-1.0" or "gst-inspect-0.10"
+            os.execute(inspect .. " mixersink 2>&1 | grep -iE 'stream-type|enum|\\(|volume|mute|device' | head -40 >>"
+                .. U.shellQuote(LOG))
+            os.execute("lipc-set-prop com.lab126.audiomgrd setFocus Music >>" .. U.shellQuote(LOG) .. " 2>&1")
+        end
+        local pid = spawn("head -c 88200 /dev/urandom | " .. sink)
+        local waited = 0
+        local function check()
+            if alive(pid) and waited < 10 then
+                waited = waited + 0.5
+                UIManager:scheduleIn(0.5, check)
+                return
+            end
+            local ok = not alive(pid)
+            if not ok then killGroup(pid, 9) end
+            note("sound test:", ok and "the player finished" or "the player hung; killed")
+            done(ok)
+        end
+        UIManager:scheduleIn(0.5, check)
+    end
+
     -- backend picks how to make sound here.
     function RA:backend()
         if self._backend then return self._backend end

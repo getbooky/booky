@@ -97,6 +97,7 @@ local Button = require("ui/widget/button")
 local CenterContainer = require("ui/widget/container/centercontainer")
 local ConfirmBox = require("ui/widget/confirmbox")
 local DataStorage = require("datastorage")
+local Device = require("device")
 local Dispatcher = require("dispatcher")
 local Font = require("ui/font")
 local FrameContainer = require("ui/widget/container/framecontainer")
@@ -553,6 +554,46 @@ function Booky:readAlongMenu()
                             if touchmenu_instance then touchmenu_instance:updateItems() end
                         end,
                     })
+                end,
+            },
+            {
+                text_func = function()
+                    local v = self.readalong:volume()
+                    return _("Volume") .. (v and (": " .. v) or "")
+                end,
+                enabled_func = function() return Device:isKindle() end,
+                help_text = _("The Kindle's audio volume, 0 to 100. The Kindle has no volume buttons."),
+                keep_menu_open = true,
+                callback = function(touchmenu_instance)
+                    local SpinWidget = require("ui/widget/spinwidget")
+                    UIManager:show(SpinWidget:new{
+                        title_text = _("Volume"),
+                        value = self.readalong:volume() or 50,
+                        value_min = 0,
+                        value_max = 100,
+                        value_step = 5,
+                        value_hold_step = 20,
+                        default_value = 50,
+                        ok_text = _("Set"),
+                        callback = function(spin)
+                            self.readalong:setVolume(spin.value)
+                            if touchmenu_instance then touchmenu_instance:updateItems() end
+                        end,
+                    })
+                end,
+            },
+            {
+                text = _("Sound test"),
+                help_text = _("Plays two seconds of hiss the way the narration plays. Hearing it means sound gets through; the playback log notes what the Kindle's audio offers."),
+                callback = function()
+                    if p.playing then p:pause() end
+                    UIManager:show(InfoMessage:new{ text = _("Booky: playing two seconds of hiss…"), timeout = 2 })
+                    self.readalong:soundTest(function(ok)
+                        UIManager:show(InfoMessage:new{
+                            text = ok and _("Did you hear a hiss?\n\nIf not, sound isn't getting from the Kindle to the headphones. The playback log has the details.")
+                                or _("The test couldn't play. The playback log has the details."),
+                        })
+                    end)
                 end,
             },
             {
