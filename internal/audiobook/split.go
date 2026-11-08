@@ -137,6 +137,23 @@ func bookName(name string) string {
 	return strings.ToLower(strings.TrimSpace(partMarker.ReplaceAllString(name, "")))
 }
 
+// partOf finds where a part number starts in a piece's name: "A Court of
+// Mist and Fury_ Part 1 (A Court of Thorns and Roses #2)" is part 1 of A
+// Court of Mist and Fury.
+var partOf = regexp.MustCompile(`(?i)[\s._-]*\b(?:part|pt|cd|disc|disk)\.?\s*\d{1,3}\b.*$`)
+
+// matchesBook reports whether a piece's name is the book's: as it stands,
+// or with the part number and whatever follows it taken off.
+func matchesBook(b BookRef, name string) bool {
+	if release.TitleMatches(b.Title, b.Author, name) {
+		return true
+	}
+	if bare := strings.TrimSpace(partOf.ReplaceAllString(name, "")); bare != "" && bare != name {
+		return release.TitleMatches(b.Title, b.Author, bare)
+	}
+	return false
+}
+
 func split(entries []piece, books []BookRef) (*Split, error) {
 	// what each piece matches; the longest title wins, so "A Court of
 	// Thorns and Roses" doesn't take what "...Roses: Special Edition" fits
@@ -145,7 +162,7 @@ func split(entries []piece, books []BookRef) (*Split, error) {
 	for i, e := range entries {
 		best := -1
 		for j, b := range books {
-			if release.TitleMatches(b.Title, b.Author, e.name) && (best < 0 || len(b.Title) > len(books[best].Title)) {
+			if matchesBook(b, e.name) && (best < 0 || len(b.Title) > len(books[best].Title)) {
 				best = j
 			}
 		}
