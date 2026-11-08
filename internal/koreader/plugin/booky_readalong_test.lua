@@ -61,6 +61,13 @@ check("nextWake stream end first", U.nextWake(units, 1, 1.5, 2), 0.5)
 check("nextWake clamp high", U.nextWake({ { begin = 0 } }, 1, 0, 1000), 5)
 check("nextWake clamp low", U.nextWake(units, 1, 2.49, 100), 0.05)
 
+-- a sentence running onto the next page turns it when its words get there
+check("spill halfway", U.spillAt(10, 14, 50, 100), 12)
+check("spill at its start", U.spillAt(10, 14, 0, 100), 10)
+check("spill unmeasured: midway", U.spillAt(10, 14, nil, 100), 12)
+check("spill clamped", U.spillAt(10, 14, 150, 100), 14)
+check("spill empty sentence", U.spillAt(10, 14, 3, 0), 12)
+
 -- speeds: tenths, 0.5 to 2
 check("clampSpeed rounds", U.clampSpeed(1.26), 1.3)
 check("clampSpeed low", U.clampSpeed(0.1), 0.5)

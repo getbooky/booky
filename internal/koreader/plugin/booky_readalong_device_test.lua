@@ -28,7 +28,14 @@ local manifests = {}
 local function stub(name, value) package.preload[name] = function() return value end end
 stub("device", { isKindle = function() return false end })
 stub("ui/event", { new = function(_, ...) return { ... } end })
-stub("ui/geometry", { new = function(_, t) return t end })
+local Geom = {}
+Geom.__index = Geom
+function Geom.new(_, t) return setmetatable(t, Geom) end
+function Geom:combine(o)
+    local x, y = math.min(self.x, o.x), math.min(self.y, o.y)
+    return Geom:new{ x = x, y = y, w = math.max(self.x + self.w, o.x + o.w) - x, h = math.max(self.y + self.h, o.y + o.h) - y }
+end
+stub("ui/geometry", Geom)
 stub("ui/widget/infomessage", { new = function(_, t) return t end })
 stub("ui/network/manager", { isOnline = function() return true end })
 stub("ui/uimanager", {
@@ -213,6 +220,45 @@ p:pause()
 reader._stretcher = false
 check("no speed change without the stretcher", p:setSpeed(1.5), false)
 check("normal speed always", p:setSpeed(1), true)
+reader:detach()
+tasks = {}
+
+-- a sentence running onto the next page: the page turns when the
+-- narration reaches its words there, and the highlight follows
+reader._stretcher = false
+settings.data.readalong_speed = 1
+local cur, turned = 1, {}
+local doc = {
+    file = book,
+    getCurrentPage = function() return cur end,
+    getVisiblePageCount = function() return 1 end,
+    getNormalizedXPointer = function(_, id) return "/body/p[1]" end,
+    getTextFromXPointer = function() return "abcdefghij" end, -- 10 characters
+    getPageFromXPointer = function(_, xp) return xp:match("%.0$") and 1 or 2 end, -- starts on 1, ends on 2
+    getPageXPointer = function(_, page) return "/body/p[1]/text().5" end, -- page 2 starts at its 6th character
+    getTextFromXPointers = function() return "abcde" end,
+    getScreenBoxesFromPositions = function() return { { x = 0, y = 0, w = 10, h = 10 } } end,
+}
+local ui = {
+    document = doc, rolling = true, dialog = {},
+    view = { view_mode = "page", highlight = { temp = {} } },
+    handleEvent = function(_, ev)
+        if ev[1] == "GotoPage" then cur = ev[2]; table.insert(turned, ev[2]) end
+    end,
+}
+local pl = reader:attach(ui)
+pl.delay = 0
+pl:play(1.2) -- the sentence runs 1 to 2; half its text is on page 1
+check("sentence starts on screen: no turn", #turned, 0)
+check("not yet past page 1's words", cur, 1)
+pl.started_pos = 1.6 -- the narration is past the words on page 1
+pl:tick()
+check("turned to page 2 mid-sentence", cur, 2)
+check("turned once", #turned, 1)
+check("highlight on the new page", ui.view.highlight.temp[2] ~= nil, true)
+pl:show(1)
+check("doesn't turn back to where the sentence began", cur, 2)
+pl:stop(true)
 reader:detach()
 tasks = {}
 
