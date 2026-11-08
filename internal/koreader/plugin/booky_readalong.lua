@@ -101,15 +101,18 @@ function U.feedCommand(segments)
     return "{ " .. table.concat(parts, "; ") .. "; }"
 end
 
--- sinkCommand is the player that reads PCM from stdin.
+-- sinkCommand is the player that reads PCM from stdin. The GStreamer ones
+-- run with -e, so asked to stop (SIGINT) they finish the stream and let go
+-- of the Kindle's audio service cleanly, and without -q, so the log shows
+-- what the pipeline did.
 function U.sinkCommand(backend, rate)
     rate = tostring(rate)
     if backend == "gst010" then
-        return "gst-launch-0.10 -q fdsrc fd=0 name=bookyra"
+        return "gst-launch-0.10 -e fdsrc fd=0 name=bookyra"
             .. " ! audio/x-raw-int,endianness=1234,signed=true,width=16,depth=16,rate=" .. rate .. ",channels=1"
             .. " ! mixersink stream-type=Music sync=true"
     elseif backend == "gst1" then
-        return "gst-launch-1.0 -q fdsrc fd=0 name=bookyra do-timestamp=true"
+        return "gst-launch-1.0 -e fdsrc fd=0 name=bookyra do-timestamp=true"
             .. " ! audio/x-raw,format=S16LE,rate=" .. rate .. ",channels=1,layout=interleaved"
             .. " ! mixersink stream-type=Music sync=true"
     elseif backend == "aplay" then
@@ -143,11 +146,11 @@ end
 function U.keepaliveCommand(backend, rate)
     rate = tostring(rate)
     if backend == "gst010" then
-        return "gst-launch-0.10 -q filesrc location=/dev/zero name=bookyka"
+        return "gst-launch-0.10 -q -e filesrc location=/dev/zero name=bookyka"
             .. " ! audio/x-raw-int,endianness=1234,signed=true,width=16,depth=16,rate=" .. rate .. ",channels=1"
             .. " ! mixersink stream-type=Music sync=true"
     elseif backend == "gst1" then
-        return "gst-launch-1.0 -q filesrc location=/dev/zero name=bookyka"
+        return "gst-launch-1.0 -q -e filesrc location=/dev/zero name=bookyka"
             .. " ! audio/x-raw,format=S16LE,rate=" .. rate .. ",channels=1,layout=interleaved"
             .. " ! mixersink stream-type=Music sync=true"
     end
@@ -311,6 +314,20 @@ function M.new(plugin)
         if not pid then return false end
         local ok, r = pcall(function() return ffi.C.kill(pid, 0) end)
         return ok and r == 0
+    end
+
+    -- stopGroup asks a player's process group to stop (SIGINT: GStreamer
+    -- run with -e finishes the stream and releases the audio service),
+    -- waiting up to a second, and kills what's left.
+    local function stopGroup(pid)
+        if not pid or not alive(pid) then return end
+        killGroup(pid, 2)
+        for _i = 1, 10 do
+            if not alive(pid) then return end
+            os.execute("sleep 0.1")
+        end
+        note("player", pid, "didn't stop when asked; killing it")
+        killGroup(pid, 9)
     end
 
     -- spawn runs cmd in its own process group, logging to LOG; returns pid.
@@ -711,7 +728,7 @@ function M.new(plugin)
         note("keeping the Bluetooth link awake, pid", pid)
         UIManager:scheduleIn(600, function()
             if shared.keepalive == pid then
-                killGroup(pid, 9)
+                stopGroup(pid)
                 shared.keepalive = nil
             end
         end)
@@ -724,9 +741,9 @@ function M.new(plugin)
         if not pid then return end
         shared.keepalive = nil
         if delay and delay > 0 then
-            UIManager:scheduleIn(delay, function() killGroup(pid, 9) end)
+            UIManager:scheduleIn(delay, function() stopGroup(pid) end)
         else
-            killGroup(pid, 9)
+            stopGroup(pid)
         end
     end
 
@@ -865,6 +882,10 @@ function M.new(plugin)
         if self.backend ~= "clock" then
             if self.backend == "gst010" or self.backend == "gst1" then
                 os.execute("lipc-set-prop com.lab126.audiomgrd setFocus Music >>" .. U.shellQuote(LOG) .. " 2>&1")
+                -- what the Kindle's audio manager says it's doing (focus,
+                -- volume, outputs), for audio that plays but isn't heard
+                os.execute("command -v lipc-probe >/dev/null 2>&1 && lipc-probe -v com.lab126.audiomgrd 2>&1 | head -40 >>"
+                    .. U.shellQuote(LOG))
             end
             local segments = {}
             for k = c, last do
@@ -905,7 +926,7 @@ function M.new(plugin)
 
     function Player:killContent()
         if self.pid then
-            killGroup(self.pid, 9)
+            stopGroup(self.pid)
             self.pid = nil
         end
         -- belt and braces, for a shell that didn't make a process group
