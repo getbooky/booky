@@ -62,8 +62,8 @@ func TestBuiltPluginZipIsValidLua(t *testing.T) {
 		mustCompile(t, f.Name, string(src))
 		seen++
 	}
-	if seen != 4 {
-		t.Errorf("compiled %d lua files, want the 4 the plugin ships", seen)
+	if seen != 5 {
+		t.Errorf("compiled %d lua files, want the 5 the plugin ships", seen)
 	}
 }
 

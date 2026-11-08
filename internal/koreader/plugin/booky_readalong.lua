@@ -120,6 +120,25 @@ function U.sinkCommand(backend, rate)
     return nil
 end
 
+-- Speeds: 0.5× to 2×, in tenths.
+U.MIN_SPEED, U.MAX_SPEED = 0.5, 2.0
+
+-- clampSpeed rounds a speed to a tenth and keeps it in range.
+function U.clampSpeed(x)
+    x = tonumber(x) or 1
+    x = math.floor(x * 10 + 0.5) / 10
+    if x < U.MIN_SPEED then x = U.MIN_SPEED elseif x > U.MAX_SPEED then x = U.MAX_SPEED end
+    return x
+end
+
+-- stretchCommand is the step that plays the PCM at speed without changing
+-- its pitch, run by KOReader's LuaJIT; nil at normal speed.
+function U.stretchCommand(luajit, script, speed, rate)
+    if not luajit or not script or speed == 1 then return nil end
+    return U.shellQuote(luajit) .. " " .. U.shellQuote(script) .. " "
+        .. string.format("%.1f", speed) .. " " .. tostring(math.floor(rate))
+end
+
 -- keepaliveCommand streams silence into the mixer so Bluetooth stays awake.
 function U.keepaliveCommand(backend, rate)
     rate = tostring(rate)
@@ -141,7 +160,8 @@ end
 -- patterns in its own command line, and an unbracketed one matches that
 -- shell, killing it before the next command runs.
 function U.strayKillCommand()
-    return "pkill -9 -f '[n]ame=bookyra' >/dev/null 2>&1; pkill -9 -f '/[.]booky-readalong/' >/dev/null 2>&1"
+    return "pkill -9 -f '[n]ame=bookyra' >/dev/null 2>&1; pkill -9 -f '/[.]booky-readalong/' >/dev/null 2>&1;"
+        .. " pkill -9 -f '[b]ooky_stretch[.]lua' >/dev/null 2>&1"
 end
 
 -- firstUnitFrom returns the first unit (by index) whose page is >= page,
@@ -164,10 +184,11 @@ end
 
 -- nextWake is how long to sleep before the next sentence starts (or the
 -- streamed audio runs out), clamped so the clock is checked now and then.
-function U.nextWake(units, i, pos, streamEnd)
+-- Positions are in the book's time; at speed, they pass speed times faster.
+function U.nextWake(units, i, pos, streamEnd, speed)
     local nextAt = streamEnd
     if units[i + 1] and units[i + 1].begin < nextAt then nextAt = units[i + 1].begin end
-    return math.min(5, math.max(0.05, nextAt - pos))
+    return math.min(5, math.max(0.05, (nextAt - pos) / (speed or 1)))
 end
 
 -- elementXPointer cuts a reading position down to the element it's in:
@@ -622,6 +643,29 @@ function M.new(plugin)
         return b
     end
 
+    -- stretcher finds what plays the narration at another speed: KOReader's
+    -- own LuaJIT (KOReader runs from its folder) and the stretch script
+    -- beside this file. nil when either is missing.
+    function RA:stretcher()
+        if self._stretcher ~= nil then return self._stretcher or nil end
+        local here = debug.getinfo(1, "S").source:match("^@(.*/)") or ""
+        local script = here .. "booky_stretch.lua"
+        local luajit
+        for _k, cand in ipairs({ ((lfs.currentdir and lfs.currentdir()) or ".") .. "/luajit", "/usr/bin/luajit", "/usr/local/bin/luajit" }) do
+            if lfs.attributes(cand, "mode") == "file" then
+                luajit = cand
+                break
+            end
+        end
+        if luajit and lfs.attributes(script, "mode") == "file" then
+            self._stretcher = { luajit = luajit, script = script }
+        else
+            self._stretcher = false
+            logger.info("Booky read-along: no speed control — luajit", luajit, "script", script)
+        end
+        return self._stretcher or nil
+    end
+
     -- open starts following the open document, if it is a read-along.
     function RA:attach(ui)
         local doc = ui and ui.document
@@ -636,7 +680,9 @@ function M.new(plugin)
             playing = false, pos = 0, current = 0,
             follow = self.settings:readSetting("readalong_follow") ~= false,
             delay = tonumber(self.settings:readSetting("readalong_delay")) or 0.3,
+            speed = U.clampSpeed(self.settings:readSetting("readalong_speed") or 1),
         }, Player)
+        if not self:stretcher() then p.speed = 1 end
         local saved = self:localPosition(info.id)
         p.pos = saved and saved.pos or 0
         if shared.player and shared.player ~= p then shared.player:stop(true) end
@@ -683,7 +729,26 @@ function M.new(plugin)
     function Player:now()
         if not self.playing then return self.pos end
         local elapsed = time.to_number(time.now() - self.started_at)
-        return self.started_pos + math.max(0, elapsed - self.delay)
+        return self.started_pos + math.max(0, elapsed - self.delay) * (self.playing_speed or 1)
+    end
+
+    -- setSpeed changes how fast the narration plays; playing, it carries
+    -- on from where it is at the new speed. Kept for every book.
+    function Player:setSpeed(x)
+        x = U.clampSpeed(x)
+        if x ~= 1 and not self.ra:stretcher() then return false end
+        self.speed = x
+        self.ra.settings:saveSetting("readalong_speed", x)
+        self.ra.settings:flush()
+        if self.playing then
+            local pos = self:now()
+            self:killContent()
+            self.playing = false
+            self:play(pos)
+        else
+            self:changed()
+        end
+        return true
     end
 
     -- streamEnd is where the downloaded audio runs out, from chunk c on.
@@ -732,9 +797,14 @@ function M.new(plugin)
                     skip = k == c and U.pcmOffset(self.pos, self.chunks[c].start, self.rate) or 0,
                 })
             end
-            self.pid = spawn(U.feedCommand(segments) .. " | " .. U.sinkCommand(self.backend, self.rate))
+            local stretch
+            local st = self.ra:stretcher()
+            if st then stretch = U.stretchCommand(st.luajit, st.script, self.speed, self.rate) end
+            self.pid = spawn(U.feedCommand(segments) .. (stretch and (" | " .. stretch) or "")
+                .. " | " .. U.sinkCommand(self.backend, self.rate))
             self.spawned_at = time.now()
         end
+        self.playing_speed = self.speed
         self.playing = true
         self.started_at = time.now()
         self.started_pos = self.pos
@@ -909,7 +979,7 @@ function M.new(plugin)
             if i > 0 then self:show(i) end
         end
         self._tick = self._tick or function() self:tick() end
-        UIManager:scheduleIn(U.nextWake(self.units, i, pos, self.stream_end), self._tick)
+        UIManager:scheduleIn(U.nextWake(self.units, i, pos, self.stream_end, self.playing_speed), self._tick)
     end
 
     -- show highlights sentence i, turning the page to it first if needed.

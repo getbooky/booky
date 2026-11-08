@@ -29,10 +29,11 @@ func (s *Store) BuildPlugin(w io.Writer, d *Device, serverURL string) error {
 		"_meta.lua":           metaLua,
 		"main.lua":            mainLua,
 		"booky_readalong.lua": readAlongLua,
+		"booky_stretch.lua":   stretchLua,
 		"config.lua":          configLua(d, serverURL),
 	}
 	// deterministic order keeps zips byte-comparable for the same inputs
-	for _, name := range []string{"_meta.lua", "main.lua", "booky_readalong.lua", "config.lua"} {
+	for _, name := range []string{"_meta.lua", "main.lua", "booky_readalong.lua", "booky_stretch.lua", "config.lua"} {
 		f, err := zw.Create(name)
 		if err != nil {
 			return err
@@ -71,6 +72,13 @@ return {
 //
 //go:embed plugin/booky_readalong.lua
 var readAlongLua string
+
+// stretchLua changes the narration's speed without changing its pitch; the
+// read-along runs it with KOReader's LuaJIT between the audio and the
+// player (plugin/booky_stretch_test.lua).
+//
+//go:embed plugin/booky_stretch.lua
+var stretchLua string
 
 const metaLua = `local _ = require("gettext")
 return {
@@ -527,6 +535,34 @@ function Booky:readAlongMenu()
                 text_func = function() return p.playing and _("Pause") or _("Play") end,
                 keep_menu_open = false,
                 callback = function() p:toggle() end,
+            },
+            {
+                text_func = function()
+                    return _("Speed: ") .. string.format("%.1f", p.speed) .. "×"
+                end,
+                enabled_func = function() return self.readalong:stretcher() ~= nil end,
+                help_text = _("How fast the narration plays, without changing the voice's pitch. Kept for every read-along."),
+                keep_menu_open = true,
+                callback = function(touchmenu_instance)
+                    local SpinWidget = require("ui/widget/spinwidget")
+                    UIManager:show(SpinWidget:new{
+                        title_text = _("Narration speed"),
+                        info_text = _("0.5× to 2×. The voice keeps its pitch."),
+                        value = p.speed,
+                        value_min = ReadAlong.util.MIN_SPEED,
+                        value_max = ReadAlong.util.MAX_SPEED,
+                        value_step = 0.1,
+                        value_hold_step = 0.5,
+                        precision = "%.1f",
+                        unit = "×",
+                        default_value = 1,
+                        ok_text = _("Set"),
+                        callback = function(spin)
+                            p:setSpeed(spin.value)
+                            if touchmenu_instance then touchmenu_instance:updateItems() end
+                        end,
+                    })
+                end,
             },
             {
                 text = _("Previous sentence"),

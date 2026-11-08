@@ -58,6 +58,15 @@ jobs:
           version: latest
       - name: Test (race)
         run: go test -race ./...
+      # the KOReader plugin's Lua, under LuaJIT as on the devices (go test
+      # runs most of it too, but the speed changer needs LuaJIT's ffi)
+      - name: Plugin Lua tests (LuaJIT)
+        working-directory: internal/koreader/plugin
+        run: |
+          sudo apt-get install -y --no-install-recommends luajit
+          for t in booky_readalong_test.lua booky_readalong_device_test.lua booky_stretch_test.lua; do
+            luajit "$t"
+          done
       - name: Vulnerability check
         run: |
           go install golang.org/x/vuln/cmd/govulncheck@latest
