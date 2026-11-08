@@ -397,12 +397,80 @@ local function closeFileDialog()
     end
 end
 
--- readAlongFileButtons adds, for a book with a read-along, a long-press
--- action that frees its audio. The book stays and reads as before; pressing
--- play downloads the audio it needs again. (Deleting the book itself is the
--- file browser's own Delete, which clears the audio too.)
+-- inDownloads reports whether path is a file Booky put in its download
+-- folder (or might have).
+function Booky:inDownloads(path)
+    local root = self:downloadRoot()
+    return root ~= nil and type(path) == "string" and path:sub(1, #root + 1) == root .. "/"
+end
+
+-- addReadAlongTo finds the Booky book behind a file on the device and
+-- swaps in its read-along edition. reopen: the file was open in the
+-- reader, which has just been closed; it opens again once the read-along
+-- is in, at the same place.
+function Booky:addReadAlongTo(path, reopen)
+    if not NetworkMgr:isOnline() then
+        UIManager:show(InfoMessage:new{ text = _("Booky: no network connection") })
+        return
+    end
+    UIManager:show(InfoMessage:new{ text = _("Booky: getting the read-along…"), timeout = 1 })
+    UIManager:scheduleIn(0.2, function()
+        local books, err = self:fetchCatalog()
+        if not books then
+            UIManager:show(InfoMessage:new{ text = _("Booky: couldn't reach the server: ") .. tostring(err) })
+            return
+        end
+        local book
+        for _i, b in ipairs(books) do
+            if self:bookDest(b) == path then book = b end
+        end
+        if not book then
+            UIManager:show(InfoMessage:new{ text = _("Booky: this file didn't come from Booky, or Booky has since renamed it.") })
+            if reopen then self:openBook(path) end
+            return
+        end
+        if not book.readAlong then
+            UIManager:show(InfoMessage:new{
+                text = _("Booky: no read-along for this book yet.\n\nAdd its audiobook in Booky. Once Booky has lined it up with the text, it can be added here."),
+            })
+            if reopen then self:openBook(path) end
+            return
+        end
+        self.readalong:download(book, function(file)
+            self:markDownloaded(book)
+            if reopen then
+                self:openBook(file)
+                return
+            end
+            UIManager:show(ConfirmBox:new{
+                text = _("Read-along added: ") .. (book.title or "?")
+                    .. "\n\n" .. _("It reads like any book — start the narration from the status bar or the menu whenever you want. Open it now?"),
+                ok_text = _("Open"),
+                ok_callback = function() self:openBook(file) end,
+            })
+        end, { closed = reopen })
+    end)
+end
+
+-- readAlongFileButtons adds long-press actions in the file browser: for a
+-- book with a read-along, freeing its audio (the book stays and reads as
+-- before; pressing play downloads the audio it needs again — deleting the
+-- book is the browser's own Delete, which clears the audio too); for any
+-- other book from Booky, adding its read-along.
 function Booky:readAlongFileButtons(file, is_file)
-    if not is_file or not self.readalong:bookFor(file) then return nil end
+    if not is_file then return nil end
+    if not self.readalong:bookFor(file) then
+        if not self:inDownloads(file) then return nil end
+        return {
+            {
+                text = _("Booky: add read-along"),
+                callback = function()
+                    closeFileDialog()
+                    self:addReadAlongTo(file)
+                end,
+            },
+        }
+    end
     local info = self.readalong:bookFor(file)
     local bytes = self.readalong:audioBytes(info.id)
     return {
@@ -502,10 +570,27 @@ end
 
 function Booky:addToMainMenu(menu_items)
     if self.player then menu_items.booky_readalong = self:readAlongMenu() end
+    local items = {}
+    -- in a Booky book without its read-along: add it from here
+    local open = self.ui and self.ui.document and self.ui.document.file
+    if open and not self.player and self:inDownloads(open) then
+        table.insert(items, {
+            text = _("Add the read-along to this book"),
+            callback = function()
+                -- the file can't be swapped while it's open: close it,
+                -- swap it, open it again at the same place
+                local path = open
+                self.ui:onClose()
+                UIManager:scheduleIn(0.5, function() self:addReadAlongTo(path, true) end)
+            end,
+        })
+    end
     menu_items.booky = {
         text = _("Booky"),
         sorting_hint = "tools",
-        sub_item_table = {
+        sub_item_table = items,
+    }
+    for _i, item in ipairs({
             {
                 text = _("Browse library"),
                 callback = function() self:browse() end,
@@ -548,8 +633,9 @@ function Booky:addToMainMenu(menu_items)
                     })
                 end,
             },
-        },
-    }
+    }) do
+        table.insert(items, item)
+    end
 end
 
 function Booky:onBookySync()

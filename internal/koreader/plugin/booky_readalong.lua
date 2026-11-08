@@ -361,8 +361,10 @@ function M.new(plugin)
 
     -- download gets the manifest and edition now (small), then the audio
     -- chunk by chunk in the background. done(edition_path) runs once the
-    -- book can be opened; audio keeps arriving after.
-    function RA:download(book, done)
+    -- book can be opened; audio keeps arriving after. opts.closed: the
+    -- caller closed the book in the reader just now (its plugin's ui may
+    -- still name the file).
+    function RA:download(book, done, opts)
         local dir = self:dir(book.id)
         if not dir then return end
         lfs.mkdir(plugin:downloadRoot() .. "/.booky-readalong")
@@ -376,7 +378,7 @@ function M.new(plugin)
         local edition = self:editionPath(book)
         -- the file can't be swapped while it's open
         local open = plugin.ui and plugin.ui.document and plugin.ui.document.file
-        if open == edition then
+        if open == edition and not (opts and opts.closed) then
             toast(_("Booky: close the book first, then add its read-along."), 5)
             return
         end
