@@ -190,6 +190,23 @@ local function drain_until_playing()
 end
 drain_until_playing()
 check("plays once it arrives", p.playing, true)
+
+-- speed: tenths from 0.5 to 2, kept for every book, and the clock (and so
+-- the highlight) runs at it
+reader._stretcher = { luajit = "/k/luajit", script = "/k/booky_stretch.lua" }
+check("set speed", p:setSpeed(1.27), true)
+check("speed in tenths", p.speed, 1.3)
+check("speed kept", settings.data.readalong_speed, 1.3)
+check("still playing", p.playing, true)
+check("playing at speed", p.playing_speed, 1.3)
+p.started_at, p.started_pos, p.delay = os.time() - 10, 100, 0
+check("the clock runs at speed", p:now(), 113)
+p:setSpeed(9)
+check("speed capped", p.speed, 2)
+p:pause()
+reader._stretcher = false
+check("no speed change without the stretcher", p:setSpeed(1.5), false)
+check("normal speed always", p:setSpeed(1), true)
 reader:detach()
 tasks = {}
 

@@ -61,6 +61,15 @@ check("nextWake stream end first", U.nextWake(units, 1, 1.5, 2), 0.5)
 check("nextWake clamp high", U.nextWake({ { begin = 0 } }, 1, 0, 1000), 5)
 check("nextWake clamp low", U.nextWake(units, 1, 2.49, 100), 0.05)
 
+-- speeds: tenths, 0.5 to 2
+check("clampSpeed rounds", U.clampSpeed(1.26), 1.3)
+check("clampSpeed low", U.clampSpeed(0.1), 0.5)
+check("clampSpeed high", U.clampSpeed(3), 2)
+check("clampSpeed junk", U.clampSpeed("x"), 1)
+check("no stretch at 1x", U.stretchCommand("/k/luajit", "/p/s.lua", 1, 22050), nil)
+check("stretch command", U.stretchCommand("/k/luajit", "/p/it's.lua", 1.5, 22050), "'/k/luajit' '/p/it'\\''s.lua' 1.5 22050")
+check("nextWake at speed", U.nextWake(units, 1, 1.5, 100, 2), 0.5)
+
 -- player commands
 local gst = U.sinkCommand("gst010", 22050)
 check("gst010 sink", gst:find("mixersink stream-type=Music sync=true", 1, true) ~= nil, true)
