@@ -135,6 +135,15 @@ function U.keepaliveCommand(backend, rate)
     return nil
 end
 
+-- strayKillCommand kills any player left behind: the content pipeline (its
+-- gst-launch is named bookyra) and whatever is reading the chunk files. One
+-- letter of each pattern is bracketed: the shell running this has the
+-- patterns in its own command line, and an unbracketed one matches that
+-- shell, killing it before the next command runs.
+function U.strayKillCommand()
+    return "pkill -9 -f '[n]ame=bookyra' >/dev/null 2>&1; pkill -9 -f '/[.]booky-readalong/' >/dev/null 2>&1"
+end
+
 -- firstUnitFrom returns the first unit (by index) whose page is >= page,
 -- given pageOf(i) — a binary search, since units run in reading order.
 -- Returns nil when every unit is on an earlier page.
@@ -754,7 +763,7 @@ function M.new(plugin)
             self.pid = nil
         end
         -- belt and braces, for a shell that didn't make a process group
-        os.execute("pkill -9 -f 'name=bookyra' >/dev/null 2>&1; pkill -9 -f '/.booky-readalong/' >/dev/null 2>&1")
+        os.execute(U.strayKillCommand())
     end
 
     function Player:pause()
