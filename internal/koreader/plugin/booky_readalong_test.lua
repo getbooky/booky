@@ -92,6 +92,19 @@ check("feed from offset, then next chunk", run(U.feedCommand({ { path = a, skip 
 check("feed from start", run(U.feedCommand({ { path = a, skip = 0 } })), "0123456789")
 check("feed one chunk late", run(U.feedCommand({ { path = b, skip = 3 } })), "de")
 check("shellQuote round trip", run("printf %s " .. U.shellQuote("it's $HOME `x` \"q\"")), "it's $HOME `x` \"q\"")
+-- the stray-player cleanup runs to the end, and kills a reader of chunks
+-- (where pkill exists; the reader is cleaned up either way)
+if run("command -v pkill >/dev/null 2>&1 && echo yes") == "yes\n" then
+    local stray = dir .. "/.booky-readalong/1/0001.pcm"
+    os.execute("mkdir -p " .. U.shellQuote(dir .. "/.booky-readalong/1") .. " && : > " .. U.shellQuote(stray))
+    local pid = run("tail -f " .. U.shellQuote(stray) .. " >/dev/null 2>&1 & echo $!"):match("%d+")
+    os.execute("sleep 0.3")
+    check("stray cleanup runs to the end", run(U.strayKillCommand() .. "; echo done"), "done\n")
+    os.execute("sleep 0.3")
+    -- (a killed process nobody has reaped yet is a zombie: gone all the same)
+    check("stray reader killed", run("if [ -d /proc/" .. pid .. " ] && ! grep -q 'State:.*Z' /proc/" .. pid .. "/status; then echo alive; else echo gone; fi"), "gone\n")
+    os.execute("kill -9 " .. pid .. " >/dev/null 2>&1")
+end
 os.execute("rm -rf " .. U.shellQuote(dir))
 
 -- validManifest: only what the server promises gets trusted
