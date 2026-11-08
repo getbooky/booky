@@ -198,6 +198,7 @@ export function ReleasesDialog({ book, open, onOpenChange, onGrabbed, kind = "eb
                   <div className={cn("truncate text-[13px] font-medium", r.titleMismatch && "text-muted-foreground")}>{r.title}</div>
                   <div className="mt-1 flex flex-wrap items-center gap-1.5 text-xs text-muted-foreground">
                     {r.titleMismatch && <Tag kind="want">Different title?</Tag>}
+                    {r.authorMissing && <Tag kind="want">Author not named</Tag>}
                     {r.partOfSet && <Tag kind="want">Only part of the book</Tag>}
                     {r.bundle && <Tag kind="info">Several books</Tag>}
                     {r.parts && r.parts.length > 0 && <Tag kind="info">{r.parts.length} downloads, joined</Tag>}
@@ -207,7 +208,7 @@ export function ReleasesDialog({ book, open, onOpenChange, onGrabbed, kind = "eb
                     {r.sizeBytes ? <span>· {fmtSize(r.sizeBytes)}</span> : null}
                   </div>
                 </div>
-                <Button className="h-8" variant={r.titleMismatch || r.bundle ? "outline" : "default"} disabled={grabbing !== null} onClick={() => grab(r)}>
+                <Button className="h-8" variant={r.titleMismatch || r.bundle || r.authorMissing ? "outline" : "default"} disabled={grabbing !== null} onClick={() => grab(r)}>
                   <Download className="mr-1.5 h-3.5 w-3.5" />
                   {grabbing === r.downloadUrl ? "Grabbing…" : "Grab"}
                 </Button>

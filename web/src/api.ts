@@ -329,6 +329,8 @@ export interface ApiRelease {
   /** a whole set: one book posted as separate downloads, every part found. Grabbing it grabs every
    * part, and they're joined in order once all are in */
   parts?: ApiRelease[]
+  /** an audiobook release that doesn't name the book's author — books share titles, so it's never auto-grabbed */
+  authorMissing?: boolean
 }
 
 export interface ApiSourceStat {

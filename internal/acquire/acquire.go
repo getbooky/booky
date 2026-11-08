@@ -172,22 +172,34 @@ type SourceStat struct {
 // first; then the rest — other titles, kept so a person can still look —
 // marked, and scored so nothing automatic ever takes them.
 func rankForBook(book *catalog.Book, rels []release.Release, profile release.Profile, order []string, stats []SourceStat) []release.Release {
-	var match, packs, bundles, other []release.Release
+	var match, packs, unnamed, bundles, other []release.Release
 	for _, r := range rels {
+		// an audiobook found by its title or series alone must name the
+		// author to be taken: other authors' books share titles
+		authorOK := !profile.Audio || release.AuthorNamed(book.Author, r.Title)
 		// checked first: a bundle can name this book among others. For an
 		// audiobook, a pack named for the book or its series may be grabbed
 		// on its own (it's split into its books when it arrives); any other
 		// pack is only offered.
 		if release.BundleFor(book.Title, book.Author, book.SeriesName, r.Title) {
-			if profile.Audio && release.BundleNames(book.Title, book.Author, book.SeriesName, r.Title) {
+			switch {
+			case profile.Audio && release.BundleNames(book.Title, book.Author, book.SeriesName, r.Title) && authorOK:
 				packs = append(packs, r)
-			} else {
+			case !authorOK:
+				r.AuthorMissing = true
+				bundles = append(bundles, r)
+			default:
 				bundles = append(bundles, r)
 			}
 			continue
 		}
 		if release.TitleMatches(book.Title, book.Author, r.Title) {
-			match = append(match, r)
+			if authorOK {
+				match = append(match, r)
+			} else {
+				r.AuthorMissing = true
+				unnamed = append(unnamed, r)
+			}
 			continue
 		}
 		r.TitleMismatch = true
@@ -207,6 +219,13 @@ func rankForBook(book *catalog.Book, rels []release.Release, profile release.Pro
 	})
 	for _, r := range release.Rank(packs, profile, order) {
 		r.Bundle = true
+		ranked = append(ranked, r)
+	}
+	for _, r := range release.Rank(unnamed, profile, order) {
+		r.AuthorMissing = true
+		if r.Score > 0 {
+			r.Score = 0 // offered, never taken automatically
+		}
 		ranked = append(ranked, r)
 	}
 	for _, r := range release.Rank(bundles, profile, order) {

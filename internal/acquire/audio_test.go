@@ -24,6 +24,9 @@ type fakeAudioIndexers struct {
 	jobStatus func(nzo string) string
 	// results is Prowlarr's answer; empty means the First Ember list
 	results string
+	// byQuery, when set, answers each query on its own
+	byQuery func(q string) string
+	queries []string // what was searched for
 }
 
 func (f *fakeAudioIndexers) start(t *testing.T, e *Engine) {
@@ -31,6 +34,13 @@ func (f *fakeAudioIndexers) start(t *testing.T, e *Engine) {
 	prowlarr := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if got := r.URL.Query().Get("categories"); got != "3030" {
 			t.Errorf("audiobook search in category %q, want 3030", got)
+		}
+		f.mu.Lock()
+		f.queries = append(f.queries, r.URL.Query().Get("query"))
+		f.mu.Unlock()
+		if f.byQuery != nil {
+			_, _ = w.Write([]byte(f.byQuery(r.URL.Query().Get("query"))))
+			return
 		}
 		if f.results != "" {
 			_, _ = w.Write([]byte(f.results))

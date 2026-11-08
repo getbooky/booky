@@ -7,6 +7,7 @@ import (
 	"log"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/getbooky/booky/internal/audiobook"
@@ -67,21 +68,19 @@ func (e *Engine) SearchAudio(ctx context.Context, bookID int64) ([]release.Relea
 	if err != nil {
 		return nil, nil, err
 	}
-	query := strings.TrimSpace(book.Title + " " + book.Author)
 	p := e.Prowlarr()
 	st := SourceStat{Name: "prowlarr", Configured: p.Configured(), Disabled: !e.sourceEnabled("prowlarr_enabled")}
 	var all []release.Release
 	if st.Configured && !st.Disabled {
-		rels, err := p.SearchIn(ctx, query, prowlarr.CategoryAudiobooks)
+		rels, err := e.searchAudioQueries(ctx, p, audioQueries(book.Title, book.Author, book.SeriesName))
 		if err != nil {
 			st.Error = err.Error()
 			log.Printf("acquire: prowlarr audiobook search: %v", err)
-		} else {
-			st.Count = len(rels)
-			for _, r := range rels {
-				if r.Protocol != "torrent" { // as for ebooks: usenet only
-					all = append(all, r)
-				}
+		}
+		st.Count = len(rels)
+		for _, r := range rels {
+			if r.Protocol != "torrent" { // as for ebooks: usenet only
+				all = append(all, r)
 			}
 		}
 	}
@@ -97,6 +96,67 @@ func (e *Engine) SearchAudio(ctx context.Context, bookID int64) ([]release.Relea
 	}
 	profile.BookTitle = book.Title
 	return rankForBook(book, all, profile, e.sourceOrder(), stats), stats, nil
+}
+
+// audioQueries are the searches run for a book's audiobook. Indexers want
+// every word of a query in a release's name, and audiobook names are
+// ragged: the author cut short ("… Sarah J"), or left out. So beside
+// title and author, the title is searched alone; and a series pack names
+// only its series, not the second book, so the series is searched too.
+func audioQueries(title, author, series string) []string {
+	var out []string
+	seen := map[string]bool{}
+	add := func(q string) {
+		q = strings.Join(strings.Fields(q), " ")
+		if q != "" && !seen[strings.ToLower(q)] {
+			seen[strings.ToLower(q)] = true
+			out = append(out, q)
+		}
+	}
+	add(title + " " + author)
+	add(title)
+	add(series)
+	return out
+}
+
+// searchAudioQueries runs the queries at once and merges what they find,
+// each release once. It fails only when every query does.
+func (e *Engine) searchAudioQueries(ctx context.Context, p *prowlarr.Client, queries []string) ([]release.Release, error) {
+	results := make([][]release.Release, len(queries))
+	errs := make([]error, len(queries))
+	var wg sync.WaitGroup
+	for i, q := range queries {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			results[i], errs[i] = p.SearchIn(ctx, q, prowlarr.CategoryAudiobooks)
+		}()
+	}
+	wg.Wait()
+	var out []release.Release
+	seen := map[string]bool{}
+	failed := 0
+	for i, rels := range results {
+		if errs[i] != nil {
+			failed++
+			log.Printf("acquire: prowlarr audiobook search %q: %v", queries[i], errs[i])
+			continue
+		}
+		for _, r := range rels {
+			key := r.DownloadURL
+			if key == "" {
+				key = r.Indexer + "\x00" + r.Title
+			}
+			if !seen[key] {
+				seen[key] = true
+				out = append(out, r)
+			}
+		}
+	}
+	if failed == len(queries) {
+		return nil, errs[0]
+	}
+	return out, nil
 }
 
 // groupSets turns every complete set — one book posted as "Part 1 of N"

@@ -122,6 +122,9 @@ func TestBundle(t *testing.T) {
 		"ACOTAR #1-3 epub":                                       true,
 		"The Expanse Vol. 1 to 6":                                true,
 		"Harry Potter Complete Collection":                       true,
+		"A Court of Thorns and Roses Series Books 1 4 Sarah J":   true, // the dash stripped by the indexer
+		"The Expanse Vols 1 6 MP3":                               true,
+		"Book 3 12 Hours Unabridged":                             false, // a singular book number is no range
 		"Throne of Glass Box Set":                                true,
 		"The Hunger Games Trilogy (Unabridged)":                  true,
 		"Sarah J. Maas - A Court of Thorns and Roses Series M4B": true,
@@ -142,6 +145,16 @@ func TestBundle(t *testing.T) {
 
 func TestBundleFor(t *testing.T) {
 	const maas = "Sarah J. Maas"
+	// as nzbgeek lists it: the dash and the author's surname cut off
+	const geek = "A Court of Thorns and Roses Series Books 1 4 Sarah J"
+	for _, book := range []string{"A Court of Thorns and Roses", "A Court of Mist and Fury"} {
+		if !BundleFor(book, maas, "A Court of Thorns and Roses", geek) {
+			t.Errorf("%s: the series pack should be offered", book)
+		}
+		if !BundleNames(book, maas, "A Court of Thorns and Roses", geek) {
+			t.Errorf("%s: the series pack names the series, so it may be grabbed", book)
+		}
+	}
 	if !BundleFor("A Court of Mist and Fury", maas, "A Court of Thorns and Roses", "ACOTAR Books 1-4 - Sarah J. Maas M4B") {
 		t.Error("the author's series pack should be offered")
 	}
@@ -196,5 +209,45 @@ func TestBundleNames(t *testing.T) {
 	}
 	if BundleNames("A Court of Mist and Fury", maas, "A Court of Thorns and Roses", "Throne of Glass Box Set - Sarah J. Maas") {
 		t.Error("another series' pack was taken")
+	}
+}
+
+func TestAuthorNamed(t *testing.T) {
+	cases := []struct {
+		author, release string
+		want            bool
+	}{
+		{"Sarah J. Maas", "Sarah J. Maas - A Court of Thorns and Roses M4B", true},
+		{"Sarah J. Maas", "A Court of Thorns and Roses (Maas) MP3", true},
+		{"Sarah J. Maas", "A Court of Thorns and Roses Series Books 1 4 Sarah J", true}, // cut short
+		{"Sarah J. Maas", "A Court of Thorns and Roses Sarah J M4B 64kbps", true},
+		{"Sarah J. Maas", "A Court of Thorns and Roses Unabridged M4B", false},
+		{"Stephen King", "It - Stephen Chbosky", false}, // same first name, another author
+		{"Stephen King", "It - Stephen", true},          // cut short at the first name
+		{"Rebecca Yarros", "Fourth Wing - Jane Doe Unabridged", false},
+		{"J. R. R. Tolkien", "The Hobbit - J R R", false}, // initials alone say too little
+		{"", "Anything", true},
+	}
+	for _, c := range cases {
+		if got := AuthorNamed(c.author, c.release); got != c.want {
+			t.Errorf("AuthorNamed(%q, %q) = %v, want %v", c.author, c.release, got, c.want)
+		}
+	}
+}
+
+// An audiobook release that names no format still comes from the audiobook
+// category: it ranks as the least wanted format, not as no audio at all.
+// One that names an ebook format doesn't.
+func TestAudioWithoutAFormatInItsName(t *testing.T) {
+	p := Profile{Audio: true, Formats: []string{"m4b", "mp3"}}
+	plain := Score(Release{Title: "A Court of Thorns and Roses Series Books 1 4 Sarah J"}, p, nil)
+	mp3 := Score(Release{Title: "A Court of Thorns and Roses Sarah J. Maas MP3"}, p, nil)
+	m4b := Score(Release{Title: "A Court of Thorns and Roses Sarah J. Maas M4B"}, p, nil)
+	epub := Score(Release{Title: "A Court of Thorns and Roses Sarah J. Maas EPUB"}, p, nil)
+	if plain <= 0 || plain != mp3 || m4b <= plain {
+		t.Errorf("no format %d, mp3 %d, m4b %d", plain, mp3, m4b)
+	}
+	if epub > 0 {
+		t.Errorf("an ebook in the audiobook category scored %d", epub)
 	}
 }

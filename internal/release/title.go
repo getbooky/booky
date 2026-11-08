@@ -45,6 +45,53 @@ func TitleMatches(bookTitle, author, releaseTitle string) bool {
 	return hasStandaloneRun(toks, full, authorWords) || hasStandaloneRun(toks, want, authorWords)
 }
 
+// AuthorNamed reports whether a release name names the book's author: their
+// surname anywhere, or — since indexers cut long names short ("… Sarah J")
+// — the start of their name at the very end of the release name. A first
+// name alone elsewhere doesn't count: "It - Stephen Chbosky" isn't by
+// Stephen King. With no author to look for, any release passes.
+func AuthorNamed(author, releaseTitle string) bool {
+	aw := words(author)
+	if len(aw) == 0 {
+		return true
+	}
+	rw := words(releaseTitle)
+	surname := aw[len(aw)-1]
+	for _, w := range rw {
+		if w == surname {
+			return true
+		}
+	}
+	// the cut-short name: trailing format words and numbers set aside
+	end := len(rw)
+	for end > 0 && (releaseWords[rw[end-1]] || isNumber(rw[end-1]) || isNumber(strings.TrimSuffix(rw[end-1], "kbps"))) {
+		end--
+	}
+	rw = rw[:end]
+	if len(aw[0]) < 2 {
+		return false // an initial alone says too little
+	}
+	// the name's last k words are the author's first k, the last of them
+	// perhaps cut off mid-word ("Mara V")
+	for k := len(aw); k >= 1; k-- {
+		if k > len(rw) {
+			continue
+		}
+		tail := rw[len(rw)-k:]
+		ok := true
+		for i, w := range tail {
+			if w != aw[i] && (i != k-1 || i == 0 || !strings.HasPrefix(aw[i], w)) {
+				ok = false
+				break
+			}
+		}
+		if ok {
+			return true
+		}
+	}
+	return false
+}
+
 // sep marks a boundary between parts of a release name.
 const sep = "\x00"
 
@@ -199,7 +246,10 @@ func PartOfSet(title string) bool {
 
 // bundleRe finds a release that says it holds several books: a range of
 // book numbers ("Books 1-4", "#1-3", "Vol. 1 to 6") or a collection word.
+// Some indexers strip the dash, leaving "Books 1 4": after a plural, two
+// numbers side by side are a range too.
 var bundleRe = regexp.MustCompile(`(?i)(?:\b(?:books?|bk|vols?|volumes?)\.?|#)\s*\d{1,3}\s*(?:-|–|—|to|thru|through|&|and)\s*\d{1,3}\b` +
+	`|\b(?:books|vols|volumes)\.?\s*\d{1,3}\s+\d{1,3}\b` +
 	`|\b(?:box(?:ed)?[ -]?set|collection|omnibus|anthology|complete series|series set|bundle)\b` +
 	`|\b(?:trilogy|duology|quartet|series)\s*(?:$|[\[({]|\b(?:m4b|mp3|epub|unabridged|audiobook)\b)`)
 
