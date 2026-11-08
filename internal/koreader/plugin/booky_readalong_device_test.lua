@@ -262,6 +262,55 @@ pl:stop(true)
 reader:detach()
 tasks = {}
 
+-- long-pressing a word starts the narration at that word's sentence
+manifests.three_units = function()
+    return {
+        audio = { format = "s16le", rate = 22050, channels = 1 },
+        chunks = { { n = 1, start = 0, duration = 900 } },
+        units = {
+            { id = "booky-s1", frag = 1, begin = 1, ["end"] = 4 },
+            { id = "booky-s2", frag = 1, begin = 5, ["end"] = 8 },
+            { id = "booky-s3", frag = 1, begin = 9, ["end"] = 12 },
+        },
+    }
+end
+local book2 = root .. "/Other.epub"
+settings.data.readalong_books[book2] = { id = 8, libraryId = 1, title = "Other" }
+sh("mkdir -p " .. shq(reader:dir(8)))
+f = assert(io.open(reader:dir(8) .. "/manifest.json", "wb"))
+f:write("three_units")
+f:close()
+-- sentence k is the element /p[k]; positions compare by element, then offset
+local function where(xp)
+    local k, off = xp:match("/p%[(%d+)%]/text%(%)%.(%d+)")
+    return tonumber(k) or 0, tonumber(off) or 0
+end
+local doc2 = {
+    file = book2,
+    getCurrentPage = function() return 1 end,
+    getNormalizedXPointer = function(_, id) return "/p[" .. id:match("booky%-s(%d+)") .. "]" end,
+    getTextFromXPointer = function() return "a sentence" end,
+    getPageFromXPointer = function() return 1 end,
+    getScreenBoxesFromPositions = function() return { { x = 0, y = 0, w = 10, h = 10 } } end,
+    compareXPointers = function(_, a, b)
+        local ka, oa = where(a)
+        local kb, ob = where(b)
+        if ka == kb and oa == ob then return 0 end
+        return (kb > ka or (kb == ka and ob > oa)) and 1 or -1
+    end,
+}
+local pl2 = reader:attach({ document = doc2, rolling = true, dialog = {},
+    view = { view_mode = "page", highlight = { temp = {} } }, handleEvent = function() end })
+check("the pressed word's sentence", pl2:unitAtXPointer("/p[2]/text().4"), 2)
+check("its first word", pl2:unitAtXPointer("/p[3]/text().0"), 3)
+check("before every sentence", pl2:unitAtXPointer("/p[0]/text().0"), nil)
+check("play from there", pl2:playFrom("/p[2]/text().4"), true)
+check("from that sentence's start", pl2.pos, 5)
+check("nothing to play from", pl2:playFrom(nil), false)
+pl2:stop(true)
+reader:detach()
+tasks = {}
+
 sh("rm -rf " .. shq(root))
 if failures > 0 then
     io.stderr:write(failures .. " failure(s)\n")

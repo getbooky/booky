@@ -185,6 +185,22 @@ function U.firstUnitFrom(n, pageOf, page)
     return found
 end
 
+-- lastAtOrBefore returns the last index in 1..n for which atOrBefore(i)
+-- holds — a binary search, since the units run in reading order — or nil.
+function U.lastAtOrBefore(n, atOrBefore)
+    local lo, hi, found = 1, n, nil
+    while lo <= hi do
+        local mid = math.floor((lo + hi) / 2)
+        if atOrBefore(mid) then
+            found = mid
+            lo = mid + 1
+        else
+            hi = mid - 1
+        end
+    end
+    return found
+end
+
 -- nextWake is how long to sleep before the next sentence starts (or the
 -- streamed audio runs out), clamped so the clock is checked now and then.
 -- Positions are in the book's time; at speed, they pass speed times faster.
@@ -1105,6 +1121,35 @@ function M.new(plugin)
         local first = U.firstUnitFrom(#self.units, function(k) return self:pageOf(k) end, page)
         if first then return self:play(self.units[first].begin) end
         return self:play()
+    end
+
+    -- unitAtXPointer is the sentence holding a position in the book (a
+    -- word long-pressed, say): the last one starting at or before it.
+    function Player:unitAtXPointer(xp)
+        local doc = self.ui.document
+        if not xp or not doc.compareXPointers then return nil end
+        -- crengine: compareXPointers(a, b) is 1 when b is after a, 0 when
+        -- they're the same place, -1 when b is before
+        return U.lastAtOrBefore(#self.units, function(k)
+            local r = self:range(k)
+            if not r then return true end -- unresolved: let neighbours decide
+            local ok, c = pcall(function() return doc:compareXPointers(r.pos0, xp) end)
+            return ok and c ~= nil and c >= 0
+        end)
+    end
+
+    -- playFrom starts the narration at the sentence holding xp, playing or
+    -- not. Returns whether one was found.
+    function Player:playFrom(xp)
+        local i = self:unitAtXPointer(xp)
+        if not i then return false end
+        note("play from a chosen sentence", i, "of", #self.units)
+        if self.playing then
+            self:killContent()
+            self.playing = false
+        end
+        self:play(self.units[i].begin)
+        return true
     end
 
     function Player:skip(n)

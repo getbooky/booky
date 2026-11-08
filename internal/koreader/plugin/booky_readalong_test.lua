@@ -61,6 +61,13 @@ check("nextWake stream end first", U.nextWake(units, 1, 1.5, 2), 0.5)
 check("nextWake clamp high", U.nextWake({ { begin = 0 } }, 1, 0, 1000), 5)
 check("nextWake clamp low", U.nextWake(units, 1, 2.49, 100), 0.05)
 
+-- lastAtOrBefore: the sentence holding a position
+local starts = { 10, 20, 30, 40 }
+check("lastAtOrBefore middle", U.lastAtOrBefore(4, function(i) return starts[i] <= 25 end), 2)
+check("lastAtOrBefore exact", U.lastAtOrBefore(4, function(i) return starts[i] <= 30 end), 3)
+check("lastAtOrBefore last", U.lastAtOrBefore(4, function(i) return starts[i] <= 99 end), 4)
+check("lastAtOrBefore before all", U.lastAtOrBefore(4, function(i) return starts[i] <= 5 end), nil)
+
 -- a sentence running onto the next page turns it when its words get there
 check("spill halfway", U.spillAt(10, 14, 50, 100), 12)
 check("spill at its start", U.spillAt(10, 14, 0, 100), 10)
