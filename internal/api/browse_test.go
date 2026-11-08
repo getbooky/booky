@@ -162,3 +162,41 @@ func TestDownloadsDirSettingFencedToMediaMount(t *testing.T) {
 		t.Fatalf("clear downloads_dir: %d %s", rec.Code, rec.Body)
 	}
 }
+
+// ?audio=1 lists a folder's audio files too, for picking an audiobook's
+// parts one by one; other files and hidden ones stay out.
+func TestBrowseListsAudioFiles(t *testing.T) {
+	srv := testServer(t)
+	h := srv.Handler()
+	mount := t.TempDir()
+	srv.mediaRoot = mount
+	job := filepath.Join(mount, "downloads", "pack")
+	if err := os.MkdirAll(filepath.Join(job, "Silver Flames"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"Book_ Part 1.m4b", "Book_ Part 2.M4B", "cover.jpg", "info.nfo", ".hidden.mp3"} {
+		if err := os.WriteFile(filepath.Join(job, name), []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rec, out := doJSON(t, h, "GET", "/api/v1/system/browse?audio=1&path="+job+"/", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("browse: %d %s", rec.Code, rec.Body)
+	}
+	files, _ := out["files"].([]any)
+	if len(files) != 2 {
+		t.Fatalf("files = %v", out["files"])
+	}
+	for _, f := range files {
+		if filepath.Dir(f.(string)) != job {
+			t.Errorf("file %v not a full path in the folder", f)
+		}
+	}
+	if dirs, _ := out["dirs"].([]any); len(dirs) != 1 {
+		t.Errorf("dirs = %v", out["dirs"])
+	}
+	// without the flag, the listing is as it was
+	if _, out = doJSON(t, h, "GET", "/api/v1/system/browse?path="+job+"/", nil); out["files"] != nil {
+		t.Errorf("files listed without asking: %v", out["files"])
+	}
+}

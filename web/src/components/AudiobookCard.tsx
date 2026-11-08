@@ -119,6 +119,17 @@ export function AudiobookCard({ book, onReadAlong, onChanged }: {
     }
     void load()
   }
+  const importPaths = async (paths: string[]) => {
+    try {
+      await audiobooks.importPaths(book.id, paths)
+      setPathOpen(false)
+      setPath("")
+      toast.success(paths.length > 1 ? `Adding the audiobook — joining ${paths.length} parts` : "Adding the audiobook")
+    } catch (e) {
+      toast.error(`Import failed: ${e instanceof Error ? e.message : e}`)
+    }
+    void load()
+  }
   const rebuild = async () => {
     try { await audiobooks.rebuild(book.id); toast("Lining it up again") } catch (e) { toast.error(`${e instanceof Error ? e.message : e}`) }
     void load()
@@ -246,10 +257,8 @@ export function AudiobookCard({ book, onReadAlong, onChanged }: {
       {ab?.status && listening && <ListenPlayer bookId={book.id} />}
 
       {pathOpen && (
-        <div className="mt-3 flex flex-wrap items-center gap-2">
-          <PathInput value={path} onChange={setPath} placeholder="/data/downloads/… (a file, or a folder of parts)" className="min-w-[280px] flex-1" />
-          <Button className="h-9" disabled={!path.trim()} onClick={() => void importPath()}>Import</Button>
-        </div>
+        <ServerImport path={path} setPath={setPath} onImport={() => void importPath()}
+          onImportFiles={paths => void importPaths(paths)} />
       )}
     </div>
   )
@@ -300,5 +309,74 @@ function ListenPlayer({ bookId }: { bookId: number }) {
   return (
     // eslint-disable-next-line jsx-a11y/media-has-caption -- an audiobook; the text is the book
     <audio ref={audio} controls preload="metadata" className="mt-3 w-full" src={audiobooks.fileUrl(bookId)} />
+  )
+}
+
+// ServerImport picks an audiobook on the server: a whole folder (or one
+// file) typed or chosen, or — once a folder is chosen — some of its audio
+// files ticked one by one, imported as this book's parts in name order.
+function ServerImport({ path, setPath, onImport, onImportFiles }: {
+  path: string
+  setPath: (p: string) => void
+  onImport: () => void
+  onImportFiles: (paths: string[]) => void
+}) {
+  // the listing remembers which folder it's for: one for another is ignored
+  const [listing, setListing] = useState<{ folder: string; files: string[] }>({ folder: "", files: [] })
+  const [picked, setPicked] = useState<Set<string>>(new Set())
+  const folder = path.trim().endsWith("/") ? path.trim() : ""
+  useEffect(() => {
+    if (!folder) return
+    let live = true
+    const t = setTimeout(() => {
+      audiobooks.browseAudio(folder)
+        .then(r => {
+          if (!live) return
+          const sorted = [...(r.files ?? [])].sort((a, b) => a.localeCompare(b, undefined, { numeric: true, sensitivity: "base" }))
+          setListing({ folder, files: sorted })
+          setPicked(new Set())
+        })
+        .catch(() => { if (live) setListing({ folder, files: [] }) })
+    }, 150)
+    return () => { live = false; clearTimeout(t) }
+  }, [folder])
+  const files = folder && listing.folder === folder ? listing.files : []
+  const toggle = (f: string) => setPicked(prev => {
+    const next = new Set(prev)
+    if (next.has(f)) next.delete(f)
+    else next.add(f)
+    return next
+  })
+  const chosen = files.filter(f => picked.has(f)) // in name order
+  const name = (f: string) => f.slice(f.lastIndexOf("/") + 1)
+  return (
+    <div className="mt-3">
+      <div className="flex flex-wrap items-center gap-2">
+        <PathInput value={path} onChange={setPath} placeholder="/data/downloads/… (a file, or a folder of parts)" className="min-w-[280px] flex-1" />
+        <Button className="h-9" disabled={!path.trim() || chosen.length > 0} onClick={onImport}>
+          {folder ? "Import folder" : "Import"}
+        </Button>
+      </div>
+      {files.length > 0 && (
+        <div className="mt-2 rounded-md border">
+          <p className="border-b px-3 py-2 text-[11.5px] text-muted-foreground">
+            Or tick this book's files — its parts are joined in name order. A folder holding several books is split into them when it's imported whole.
+          </p>
+          <div className="max-h-[240px] overflow-y-auto">
+            {files.map(f => (
+              <label key={f} className="flex cursor-pointer items-center gap-2 border-b border-linesoft px-3 py-1.5 text-[12px] last:border-b-0 hover:bg-surface2">
+                <input type="checkbox" checked={picked.has(f)} onChange={() => toggle(f)} />
+                <span className="truncate" title={f}>{name(f)}</span>
+              </label>
+            ))}
+          </div>
+          <div className="flex justify-end border-t px-3 py-2">
+            <Button className="h-8" disabled={chosen.length === 0} onClick={() => onImportFiles(chosen)}>
+              {chosen.length > 1 ? `Import ${chosen.length} files as one audiobook` : "Import this file"}
+            </Button>
+          </div>
+        </div>
+      )}
+    </div>
   )
 }

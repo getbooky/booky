@@ -9,9 +9,9 @@ import (
 )
 
 var acotar = []BookRef{
-	{ID: 1, Title: "A Court of Thorns and Roses", Author: "Sarah J. Maas"},
-	{ID: 2, Title: "A Court of Mist and Fury", Author: "Sarah J. Maas"},
-	{ID: 3, Title: "A Court of Wings and Ruin", Author: "Sarah J. Maas"},
+	{ID: 1, Title: "A Court of Thorns and Roses", Author: "Sarah J. Maas", Series: "A Court of Thorns and Roses"},
+	{ID: 2, Title: "A Court of Mist and Fury", Author: "Sarah J. Maas", Series: "A Court of Thorns and Roses"},
+	{ID: 3, Title: "A Court of Wings and Ruin", Author: "Sarah J. Maas", Series: "A Court of Thorns and Roses"},
 }
 
 // tree makes a download folder from relative names; .m4b files get an M4B
@@ -134,5 +134,91 @@ func TestSplitSeriesFiles(t *testing.T) {
 	}
 	if !s.Bundle || len(s.Books[1]) != 0 || len(s.Books[2]) != 1 || len(s.Books[3]) != 1 {
 		t.Fatalf("series-prefixed names: %+v", s)
+	}
+}
+
+// A pack whose files name their part before the series in brackets, as
+// one on nzbgeek does: every book's parts are found, joined in order, and
+// the series in brackets doesn't make a file book one.
+func TestSplitSeriesFilesInParts(t *testing.T) {
+	dir := tree(t,
+		"[ACOTAR #4] A Court of Silver Flames [GraphicAudio] (chapterized)/01.m4b",
+		"A Court of Frost and Starlight_ Part 1 (A Court of Thorns and Roses #4) (Unabridged).m4b",
+		"A Court of Mist and Fury_ Part 1 (A Court of Thorns and Roses #2) (Unabridged).m4b",
+		"A Court of Mist and Fury_ Part 2 (A Court of Thorns and Roses #2) (Unabridged).m4b",
+		"A Court of Thorns and Roses_ Part 1 (A Court of Thorns and Roses #1) (Unabridged).m4b",
+		"A Court of Thorns and Roses_ Part 2 (A Court of Thorns and Roses #1) (Unabridged).m4b",
+		"A Court of Wings and Ruin_ Part 1 (A Court of Thorns and Roses #3) (Unabridged).m4b",
+		"A Court of Wings and Ruin_ Part 2 (A Court of Thorns and Roses #3) (Unabridged).m4b",
+		"A Court of Wings and Ruin_ Part 3 (A Court of Thorns and Roses #3).m4b",
+	)
+	s, err := SplitByBook(dir, acotar)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !s.Bundle {
+		t.Fatal("not seen as a pack")
+	}
+	for id, want := range map[int64]int{1: 2, 2: 2, 3: 3} {
+		if got := len(s.Books[id]); got != want {
+			t.Errorf("book %d: %d parts, want %d (%+v)", id, got, want, s)
+		}
+	}
+	for id := int64(1); id <= 3; id++ {
+		parts := s.Books[id]
+		for i := 1; i < len(parts); i++ {
+			if parts[i-1].Path > parts[i].Path {
+				t.Errorf("book %d parts out of order: %v", id, parts)
+			}
+		}
+	}
+	if len(s.Unmatched) != 2 { // Frost and Starlight, Silver Flames: not in the test library
+		t.Errorf("unmatched %q", s.Unmatched)
+	}
+}
+
+// The series' name first, when the series is named for its first book:
+// each file still goes to its own book, and book one's own files to it.
+func TestSplitSeriesNameFirst(t *testing.T) {
+	for name, files := range map[string][]string{
+		"dash": {
+			"A Court of Thorns and Roses - A Court of Thorns and Roses.m4b",
+			"A Court of Thorns and Roses - A Court of Mist and Fury.m4b",
+			"A Court of Thorns and Roses - A Court of Wings and Ruin.m4b",
+		},
+		"numbered, in parts": {
+			"A Court of Thorns and Roses 1 - A Court of Thorns and Roses_ Part 1.m4b",
+			"A Court of Thorns and Roses 1 - A Court of Thorns and Roses_ Part 2.m4b",
+			"A Court of Thorns and Roses 2 - A Court of Mist and Fury_ Part 1.m4b",
+			"A Court of Thorns and Roses 2 - A Court of Mist and Fury_ Part 2.m4b",
+			"A Court of Thorns and Roses 3 - A Court of Wings and Ruin_ Part 1.m4b",
+		},
+		"series, part, title": {
+			"A Court of Thorns and Roses - Book 1 - A Court of Thorns and Roses.m4b",
+			"A Court of Thorns and Roses - Book 2 - A Court of Mist and Fury.m4b",
+			"A Court of Thorns and Roses - Book 3 - A Court of Wings and Ruin.m4b",
+		},
+	} {
+		s, err := SplitByBook(tree(t, files...), acotar)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !s.Bundle || len(s.Unmatched) != 0 {
+			t.Fatalf("%s: %+v", name, s)
+		}
+		for id := int64(1); id <= 3; id++ {
+			parts := s.Books[id]
+			if len(parts) == 0 {
+				t.Errorf("%s: book %d has no parts: %+v", name, id, s)
+			}
+			for _, p := range parts {
+				if id > 1 && !strings.Contains(p.Path, acotar[id-1].Title) {
+					t.Errorf("%s: book %d got %s", name, id, p.Path)
+				}
+				if id == 1 && (strings.Contains(p.Path, "Mist") || strings.Contains(p.Path, "Wings")) {
+					t.Errorf("%s: book one got %s", name, p.Path)
+				}
+			}
+		}
 	}
 }

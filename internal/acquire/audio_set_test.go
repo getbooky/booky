@@ -296,8 +296,8 @@ func TestAudioPackWithoutTheBookMovesOn(t *testing.T) {
 	if len(f.added) != 2 || f.added[0] == f.added[1] {
 		t.Fatalf("sent to SAB: %q", f.added)
 	}
-	if fmt.Sprint(f.deleted) != "[nzo_1]" {
-		t.Errorf("the useless pack is left at SAB: %q", f.deleted)
+	if len(f.deleted) != 0 {
+		t.Errorf("the pack's files were deleted (%q): if Booky misjudged it, they're needed", f.deleted)
 	}
 	var n int
 	if err := e.db.QueryRow(`SELECT COUNT(*) FROM blocklist WHERE book_id = ?`, book).Scan(&n); err != nil || n != 1 {

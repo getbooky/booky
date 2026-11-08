@@ -9,6 +9,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/getbooky/booky/internal/audiobook"
 )
 
 // LogRing keeps the last maxLines of log output in memory so the Logs
@@ -117,19 +119,32 @@ func (s *Server) handleBrowse(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"dirs": []string{}})
 		return
 	}
-	dirs := []string{}
+	// ?audio=1 also lists the folder's audio files, for picking an
+	// audiobook's parts one by one
+	wantAudio := r.URL.Query().Get("audio") == "1"
+	dirs, files := []string{}, []string{}
 	for _, e := range entries {
 		name := e.Name()
-		if !e.IsDir() || strings.HasPrefix(name, ".") {
+		if strings.HasPrefix(name, ".") {
+			continue
+		}
+		if !e.IsDir() {
+			if wantAudio && e.Type().IsRegular() && audiobook.IsAudioFile(name) && len(files) < 200 &&
+				(partial == "" || strings.HasPrefix(strings.ToLower(name), partial)) {
+				files = append(files, filepath.Join(dir, name))
+			}
 			continue
 		}
 		if partial != "" && !strings.HasPrefix(strings.ToLower(name), partial) {
 			continue
 		}
-		dirs = append(dirs, filepath.Join(dir, name)+"/")
-		if len(dirs) >= 25 {
-			break
+		if len(dirs) < 25 {
+			dirs = append(dirs, filepath.Join(dir, name)+"/")
 		}
+	}
+	if wantAudio {
+		writeJSON(w, http.StatusOK, map[string]any{"dirs": dirs, "files": files})
+		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"dirs": dirs})
 }

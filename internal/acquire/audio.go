@@ -338,7 +338,8 @@ func (e *Engine) inFlight(bookID, libraryID int64, kind string) bool {
 // since joining a many-part book reads them for minutes.
 //
 // A pack grabbed for a book it turns out not to hold is a verdict on the
-// release: it's blocklisted and the next one tried.
+// release: it's blocklisted and the next one tried. Its files stay at SAB,
+// so a pack Booky misjudged can still be imported by hand.
 func (e *Engine) importAudio(rows []QueueItem, storages []string) {
 	lead := rows[0]
 	if e.ImportAudio == nil {
@@ -359,7 +360,6 @@ func (e *Engine) importAudio(rows []QueueItem, storages []string) {
 		err := e.ImportAudio(ctx, lead.BookID, storages)
 		switch {
 		case errors.Is(err, audiobook.ErrNotInDownload) && len(rows) == 1:
-			e.clearSabJob(ctx, lead.ExternalID)
 			e.failAndCascade(ctx, lead, err.Error())
 			return
 		case err != nil:
