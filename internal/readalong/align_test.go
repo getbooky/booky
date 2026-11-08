@@ -229,3 +229,31 @@ func TestTokenize(t *testing.T) {
 		t.Fatalf("got %q", got)
 	}
 }
+
+// TestSameBook: a narration heard through heavy noise is still this book;
+// a narration of a different book that shares the vocabulary — the same
+// author, the same characters — is not, however many words it shares.
+func TestSameBook(t *testing.T) {
+	for seed := int64(1); seed <= 3; seed++ {
+		r := rand.New(rand.NewSource(seed)) //nolint:gosec // G404: deterministic test noise
+		units := synthBook(r, 1200)
+		other := synthBook(r, 1200) // drawn from the same vocabulary
+		words, _ := narrate(units, nil)
+		for _, wrong := range []float64{0, 0.3, 0.55} {
+			heard := garble(r, words, wrong, 0.05, 0.05)
+			_, s := Align(units, heard)
+			s.Baseline = Baseline(units, heard)
+			if !s.SameBook() {
+				t.Errorf("seed %d, %.0f%% misheard: the right book refused (%+v)", seed, 100*wrong, s)
+			}
+			_, o := Align(other, heard)
+			o.Baseline = Baseline(other, heard)
+			if o.SameBook() {
+				t.Errorf("seed %d, %.0f%% misheard: a different book accepted (%+v)", seed, 100*wrong, o)
+			}
+			if wrong == 0.55 && s.Match >= 0.45 {
+				t.Errorf("seed %d: the noisy narration matched %.2f — not the case this test is for", seed, s.Match)
+			}
+		}
+	}
+}

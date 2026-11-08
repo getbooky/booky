@@ -35,6 +35,47 @@ type Stats struct {
 	// texts still share their "the"s and "of"s, so this stays well short of
 	// a real pairing, which Coverage (borrowed times included) can't tell.
 	Match float64 `json:"match"`
+	// Baseline is the Match the same narration gets against the book with
+	// its sentences in reverse order: the words and names the two share,
+	// without the order that only the right book has. A narration of this
+	// book beats it by far, however much music or sound the recognizer had
+	// to hear through; a different book — even one with the same characters
+	// — scores about the same either way.
+	Baseline float64 `json:"baseline"`
+}
+
+// Thresholds for SameBook. A different book shares about a quarter of its
+// words with any narration, so matching minMatch is enough. Below that, the
+// order has to show: in tests on real narration, the right book — with
+// music mixed in and half its words misheard — beat its baseline by 0.21
+// or more and at least 2.5 times over, while a different book, or the same
+// story's other chapters, did so by 0.08 at most.
+const (
+	minMatch  = 0.45
+	minExcess = 0.12
+	minRatio  = 1.5
+)
+
+// SameBook reports whether the narration is this book: enough of it
+// matches, or its words come in this book's order, not just from its
+// vocabulary. (A narration of a sentence or two has no order to show —
+// one sentence reads the same either way round — but matches well.)
+func (s Stats) SameBook() bool {
+	if s.Match >= minMatch {
+		return true
+	}
+	return s.Match-s.Baseline >= minExcess && s.Match >= minRatio*s.Baseline
+}
+
+// Baseline works out Stats.Baseline: the match against the book's units
+// in reverse order.
+func Baseline(units []Unit, words []Word) float64 {
+	rev := make([]Unit, len(units))
+	for i, u := range units {
+		rev[len(units)-1-i] = u
+	}
+	_, s := Align(rev, words)
+	return s.Match
 }
 
 const (
