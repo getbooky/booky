@@ -38,6 +38,9 @@ type Release struct {
 	// may include this one. Never grabbed automatically; grabbed by hand,
 	// the download is split and each book in it filed with its own.
 	Bundle bool `json:"bundle,omitempty"`
+	// AuthorMissing: an audiobook release that doesn't name the book's
+	// author. Books share titles, so it's only offered, never auto-grabbed.
+	AuthorMissing bool `json:"authorMissing,omitempty"`
 	// Parts, when set, makes this release a whole set: one book posted as
 	// separate downloads ("Part 1 of 2", "Part 2 of 2"), every part found.
 	// Grabbing it grabs every part; they're joined in order once all are in.
@@ -368,6 +371,13 @@ func Score(r Release, p Profile, sourceOrder []string) int {
 			rank = i
 			break
 		}
+	}
+	// audiobook names often carry no format at all ("… Books 1 4 Sarah
+	// J"); the search's audiobook category already says it's audio, so it
+	// counts as the least wanted listed format — unless the name says it's
+	// an ebook
+	if p.Audio && format == "" && rank == -1 && len(p.Formats) > 0 && DetectFormat(r.Title) == "" {
+		rank = len(p.Formats) - 1
 	}
 	tooSmall := p.MinBytes > 0 && r.SizeBytes > 0 && r.SizeBytes < p.MinBytes
 	tooBig := p.MaxBytes > 0 && r.SizeBytes > p.MaxBytes

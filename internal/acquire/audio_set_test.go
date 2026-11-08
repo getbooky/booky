@@ -3,6 +3,7 @@ package acquire
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -301,5 +302,70 @@ func TestAudioPackWithoutTheBookMovesOn(t *testing.T) {
 	var n int
 	if err := e.db.QueryRow(`SELECT COUNT(*) FROM blocklist WHERE book_id = ?`, book).Scan(&n); err != nil || n != 1 {
 		t.Errorf("blocklisted %d (%v)", n, err)
+	}
+}
+
+// The search asks for the title alone and the series too: a release can
+// cut the author's name short, and a pack names only its series. What
+// several queries find comes back once.
+func TestAudioSearchAsksByTitleAndSeries(t *testing.T) {
+	e, _, _, _, libID := testEngine(t)
+	pack := `{"title":"The Ember Saga Series Books 1 3 Mara V","size":1500000000,"downloadUrl":"http://x/nzb/geek","indexer":"geek","protocol":"usenet"}`
+	f := &fakeAudioIndexers{
+		byQuery: func(q string) string {
+			switch q {
+			case "Ash and Iron":
+				return "[" + pack + `,{"title":"Ash and Iron Mara Voss MP3","size":300000000,"downloadUrl":"http://x/nzb/one","indexer":"ndx","protocol":"usenet"}]`
+			case "The Ember Saga":
+				return "[" + pack + "]"
+			}
+			return "[]" // the full name is never in the pack's name
+		},
+		jobStatus: func(string) string { return "Downloading" },
+	}
+	f.start(t, e)
+	book := seriesBook(t, e, libID)
+	rels, stats, err := e.SearchAudio(context.Background(), book)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sort.Strings(f.queries)
+	if fmt.Sprint(f.queries) != "[Ash and Iron Ash and Iron Mara Voss The Ember Saga]" {
+		t.Errorf("searched for %q", f.queries)
+	}
+	if len(rels) != 2 || stats[0].Count != 2 {
+		t.Fatalf("found %d (count %d): %+v", len(rels), stats[0].Count, rels)
+	}
+	if rels[0].DownloadURL != "http://x/nzb/one" || rels[1].DownloadURL != "http://x/nzb/geek" || !rels[1].Bundle || rels[1].Score <= 0 {
+		t.Errorf("ranked: %+v", rels)
+	}
+}
+
+// Books share titles: a release naming another author, or none, is
+// offered but never grabbed on its own.
+func TestAudioSameTitleOtherAuthorIsNeverGrabbed(t *testing.T) {
+	e, _, _, bookID, libID := testEngine(t)
+	f := &fakeAudioIndexers{
+		results: `[
+			{"title":"First Ember - Jane Doe Unabridged M4B","size":400000000,"downloadUrl":"http://x/nzb/doe","indexer":"ndx","protocol":"usenet"},
+			{"title":"First Ember (Unabridged) M4B","size":400000000,"downloadUrl":"http://x/nzb/anon","indexer":"ndx","protocol":"usenet"},
+			{"title":"Embers Collection Books 1 4 M4B","size":900000000,"downloadUrl":"http://x/nzb/pack","indexer":"ndx","protocol":"usenet"}]`,
+		jobStatus: func(string) string { return "Downloading" },
+	}
+	f.start(t, e)
+	rels, _, err := e.SearchAudio(context.Background(), bookID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range rels {
+		if r.Score > 0 {
+			t.Errorf("grabbable: %+v", r)
+		}
+		if strings.Contains(r.Title, "First Ember") && !r.AuthorMissing {
+			t.Errorf("not flagged: %+v", r)
+		}
+	}
+	if ok, err := e.AutoGrabAudio(context.Background(), bookID, libID); err != nil || ok {
+		t.Fatalf("AutoGrabAudio = %v, %v (sent %q)", ok, err, f.added)
 	}
 }
