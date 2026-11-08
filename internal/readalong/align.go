@@ -35,6 +35,12 @@ type Stats struct {
 	// texts still share their "the"s and "of"s, so this stays well short of
 	// a real pairing, which Coverage (borrowed times included) can't tell.
 	Match float64 `json:"match"`
+	// Verbatim is the share of words (out of the same smaller side) heard
+	// in runs of at least verbatimRun book words in a row. Unrelated texts
+	// share words, and the odd common phrase, but hardly ever long runs —
+	// while a narration does, even one full of music and sound effects that
+	// keep the recognizer from hearing much of it.
+	Verbatim float64 `json:"verbatim"`
 }
 
 const (
@@ -97,6 +103,7 @@ func Align(units []Unit, words []Word) ([]Timing, Stats) {
 		}
 	}
 	interpolate(start, end, timed, match)
+	verbatim := verbatimWords(match)
 
 	// a unit runs from its first timed word to its last
 	stats := Stats{Words: len(book), HeardWords: len(heard), MatchedWords: matched, Units: len(units)}
@@ -127,6 +134,7 @@ func Align(units []Unit, words []Word) ([]Timing, Stats) {
 	}
 	if n := min(stats.Words, stats.HeardWords); n > 0 {
 		stats.Match = float64(matched) / float64(n)
+		stats.Verbatim = float64(verbatim) / float64(n)
 	}
 	return out, stats
 }
@@ -332,4 +340,30 @@ func smooth(t []Timing) {
 			t[i].End = t[i+1].Begin
 		}
 	}
+}
+
+// verbatimRun is how many book words in a row, heard in a row, make a run.
+var verbatimRun = 6
+
+// verbatimWords counts the book words matched in runs of verbatimRun or
+// more consecutive words heard consecutively.
+func verbatimWords(match []int) int {
+	total, run := 0, 0
+	for i, m := range match {
+		switch {
+		case m < 0:
+			run = 0
+			continue
+		case i > 0 && match[i-1] >= 0 && m == match[i-1]+1:
+			run++
+		default:
+			run = 1
+		}
+		if run == verbatimRun {
+			total += verbatimRun
+		} else if run > verbatimRun {
+			total++
+		}
+	}
+	return total
 }

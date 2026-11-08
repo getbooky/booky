@@ -229,3 +229,23 @@ func TestTokenize(t *testing.T) {
 		t.Fatalf("got %q", got)
 	}
 }
+
+func TestVerbatimWords(t *testing.T) {
+	defer func(n int) { verbatimRun = n }(verbatimRun)
+	verbatimRun = 3
+	cases := []struct {
+		match []int
+		want  int
+	}{
+		{[]int{0, 1, 2, 3}, 4},             // one run
+		{[]int{0, 1, -1, 5, 6}, 0},         // too short
+		{[]int{0, 2, 4, 6}, 0},             // matched, but not heard in a row
+		{[]int{4, 5, 6, -1, 9, 10, 11}, 6}, // two runs
+		{nil, 0},
+	}
+	for _, c := range cases {
+		if got := verbatimWords(c.match); got != c.want {
+			t.Errorf("verbatimWords(%v) = %d, want %d", c.match, got, c.want)
+		}
+	}
+}
