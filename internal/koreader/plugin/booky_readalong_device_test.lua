@@ -190,6 +190,12 @@ local function drain_until_playing()
 end
 drain_until_playing()
 check("plays once it arrives", p.playing, true)
+-- the playback log has what happened, for when audio doesn't play
+local log = reader:logTail(20)
+check("log: the play", log:find("play book 7", 1, true) ~= nil, true)
+check("log: the wait", log:find("waiting for part 1", 1, true) ~= nil, true)
+check("log: the failed part", log:find("part 1 failed to download", 1, true) ~= nil, true)
+check("log tail is short", select(2, reader:logTail(3):gsub("\n", "")) <= 2, true)
 
 -- speed: tenths from 0.5 to 2, kept for every book, and the clock (and so
 -- the highlight) runs at it

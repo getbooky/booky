@@ -310,19 +310,10 @@ end
 -- where it was last drawn is noted (see watchFooterText), and the item's
 -- span is measured in the bar's font. Unsure means no: the tap goes on to
 -- the status bar as usual.
--- tapLog notes why a tap on the status bar was or wasn't the read-along's,
--- in the read-along's log (/tmp/booky-readalong.log), for tracking down a
--- tap that does nothing on some device.
-local function tapLog(...)
-    local f = io.open("/tmp/booky-readalong.log", "a")
-    if not f then return end
-    local parts = {}
-    for i = 1, select("#", ...) do parts[i] = tostring((select(i, ...))) end
-    f:write(os.date("%H:%M:%S"), " status bar tap: ", table.concat(parts, " "), "\n")
-    f:close()
-end
-
 function Booky:tapOnReadAlongLabel(footer, ges)
+    -- why a tap on the status bar was or wasn't the read-along's, in the
+    -- playback log, for tracking down a tap that does nothing on some device
+    local tapLog = function(...) self.readalong.note("status bar tap:", ...) end
     -- a bar showing one item at a time cycles items on tap; it keeps that
     if footer.settings and not footer.settings.all_at_once and not footer.has_no_mode then
         tapLog("ignored: the status bar shows one item at a time")
@@ -565,6 +556,18 @@ function Booky:readAlongMenu()
                 end,
             },
             {
+                text = _("Playback log"),
+                help_text = _("What the read-along did lately, for tracking down audio that doesn't play."),
+                keep_menu_open = true,
+                callback = function()
+                    local TextViewer = require("ui/widget/textviewer")
+                    UIManager:show(TextViewer:new{
+                        title = _("Read-along playback log"),
+                        text = self.readalong:logTail(80) ~= "" and self.readalong:logTail(80) or _("Nothing logged yet."),
+                    })
+                end,
+            },
+            {
                 text = _("Previous sentence"),
                 keep_menu_open = true,
                 callback = function() p:skip(-1) end,
@@ -684,6 +687,18 @@ function Booky:addToMainMenu(menu_items)
                         callback = function() self:setViewStyle("mosaic") end,
                     },
                 },
+            },
+            {
+                text = _("Read-along playback log"),
+                help_text = _("What the read-along did lately, for tracking down audio that doesn't play."),
+                callback = function()
+                    local TextViewer = require("ui/widget/textviewer")
+                    local tail = self.readalong:logTail(80)
+                    UIManager:show(TextViewer:new{
+                        title = _("Read-along playback log"),
+                        text = tail ~= "" and tail or _("Nothing logged yet."),
+                    })
+                end,
             },
             {
                 text = _("About"),

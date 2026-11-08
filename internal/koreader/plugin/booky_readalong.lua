@@ -33,7 +33,7 @@ local M = {}
 -- player. Downloads in flight, by book; a generation per book that bumps
 -- when its audio is freed, so a download already running stops and doesn't
 -- bring it back; and the player now following a book, if any.
-local shared = { fetching = {}, gen = {}, player = nil }
+local shared = { fetching = {}, gen = {}, player = nil, keepalive = nil }
 
 -- ---------------------------------------------------------------------
 -- Pure helpers (no KOReader): exported for the tests.
@@ -252,8 +252,42 @@ function M.new(plugin)
     local _ = require("gettext")
     pcall(ffi.cdef, "int kill(int pid, int sig);")
 
+    -- the playback log: in KOReader's own folder, so it outlasts a reboot
+    -- (the Kindle empties /tmp), and kept small
     local LOG = "/tmp/booky-readalong.log"
-    local RA = { plugin = plugin, settings = plugin.settings }
+    local okds, DataStorage = pcall(require, "datastorage")
+    if okds and DataStorage and DataStorage.getDataDir then
+        LOG = DataStorage:getDataDir() .. "/booky-readalong.log"
+    end
+    if (lfs.attributes(LOG, "size") or 0) > 256 * 1024 then
+        os.rename(LOG, LOG .. ".old")
+    end
+    local RA = { plugin = plugin, settings = plugin.settings, LOG = LOG }
+
+    -- note writes one timestamped line to the playback log.
+    local function note(...)
+        local f = io.open(LOG, "a")
+        if not f then return end
+        local parts = {}
+        for i = 1, select("#", ...) do parts[i] = tostring((select(i, ...))) end
+        f:write(os.date("%m-%d %H:%M:%S "), table.concat(parts, " "), "\n")
+        f:close()
+    end
+    RA.note = note
+
+    -- logTail returns the log's last n lines, newest last.
+    function RA:logTail(n)
+        local f = io.open(LOG, "rb")
+        if not f then return "" end
+        local size = f:seek("end")
+        f:seek("set", math.max(0, size - 64 * 1024))
+        local data = f:read("*a") or ""
+        f:close()
+        local lines = {}
+        for line in data:gmatch("[^\n]+") do lines[#lines + 1] = line end
+        local from = math.max(1, #lines - n + 1)
+        return table.concat(lines, "\n", from)
+    end
 
     local function toast(text, timeout)
         UIManager:show(InfoMessage:new{ text = text, timeout = timeout or 3 })
@@ -666,13 +700,48 @@ function M.new(plugin)
         return self._stretcher or nil
     end
 
+    -- startKeepalive streams silence for a while, so the Bluetooth link
+    -- stays awake between plays — a pause, or a move to another book. It's
+    -- shared: the next play, in whichever book, ends it.
+    function RA:startKeepalive(backend, rate)
+        local cmd = U.keepaliveCommand(backend, rate)
+        if not cmd or shared.keepalive then return end
+        local pid = spawn(cmd)
+        shared.keepalive = pid
+        note("keeping the Bluetooth link awake, pid", pid)
+        UIManager:scheduleIn(600, function()
+            if shared.keepalive == pid then
+                killGroup(pid, 9)
+                shared.keepalive = nil
+            end
+        end)
+    end
+
+    -- endKeepalive stops the silence after delay seconds (once a new stream
+    -- has the link).
+    function RA:endKeepalive(delay)
+        local pid = shared.keepalive
+        if not pid then return end
+        shared.keepalive = nil
+        if delay and delay > 0 then
+            UIManager:scheduleIn(delay, function() killGroup(pid, 9) end)
+        else
+            killGroup(pid, 9)
+        end
+    end
+
     -- open starts following the open document, if it is a read-along.
     function RA:attach(ui)
         local doc = ui and ui.document
         local info = doc and self:bookFor(doc.file)
         if not info then return nil end
         local m = self:loadManifest(info.id)
-        if not m then return nil end
+        if not m then
+            note("book", info.id, "has no usable manifest on the device")
+            return nil
+        end
+        local have, total = self:audioReady(info.id)
+        note("opened book", info.id, "audio parts on device", have, "of", total)
         local p = setmetatable({
             ra = self, ui = ui, info = info, book_id = info.id, m = m,
             rate = m.audio.rate, units = m.units, chunks = m.chunks,
@@ -692,7 +761,10 @@ function M.new(plugin)
     end
 
     function RA:detach()
-        if self.player then self.player:stop(true) end
+        if self.player then
+            note("closed book", self.player.book_id)
+            self.player:stop(true, true)
+        end
         if shared.player == self.player then shared.player = nil end
         self.player = nil
     end
@@ -769,13 +841,17 @@ function M.new(plugin)
     function Player:play(pos)
         if pos then self.pos = math.max(0, pos) end
         local c = U.chunkAt(self.chunks, self.pos)
+        note("play book", self.book_id, "at", string.format("%.1f", self.pos), "part", c, "of", #self.chunks,
+            "on device", self:haveChunk(c), "player", self.backend, "speed", self.speed)
         if not self:haveChunk(c) then
             self.playing = false
             self:release() -- no need to keep the device awake while waiting
             if self.ra:fetchAudio(self.book_id, c) then
+                note("waiting for part", c, "to download")
                 self.waiting = c
                 toast(_("Booky: downloading the audio for this part — playback starts when it arrives"), 4)
             else
+                note("part", c, "isn't on the device and can't be downloaded now")
                 self.waiting = nil
                 toast(_("Booky: the audio for this part isn't on the device yet. Connect to wifi, then press play again."), 5)
             end
@@ -788,7 +864,7 @@ function M.new(plugin)
         self.stream_end = stream_end
         if self.backend ~= "clock" then
             if self.backend == "gst010" or self.backend == "gst1" then
-                os.execute("lipc-set-prop com.lab126.audiomgrd setFocus Music >/dev/null 2>&1")
+                os.execute("lipc-set-prop com.lab126.audiomgrd setFocus Music >>" .. U.shellQuote(LOG) .. " 2>&1")
             end
             local segments = {}
             for k = c, last do
@@ -800,8 +876,10 @@ function M.new(plugin)
             local stretch
             local st = self.ra:stretcher()
             if st then stretch = U.stretchCommand(st.luajit, st.script, self.speed, self.rate) end
-            self.pid = spawn(U.feedCommand(segments) .. (stretch and (" | " .. stretch) or "")
-                .. " | " .. U.sinkCommand(self.backend, self.rate))
+            local cmd = U.feedCommand(segments) .. (stretch and (" | " .. stretch) or "")
+                .. " | " .. U.sinkCommand(self.backend, self.rate)
+            self.pid = spawn(cmd)
+            note("started pid", self.pid, "parts", c, "to", last, "until", string.format("%.0f", stream_end))
             self.spawned_at = time.now()
         end
         self.playing_speed = self.speed
@@ -809,11 +887,7 @@ function M.new(plugin)
         self.started_at = time.now()
         self.started_pos = self.pos
         -- the silence can stop once the content stream is up
-        if self.keepalive then
-            local ka = self.keepalive
-            self.keepalive = nil
-            UIManager:scheduleIn(1.5, function() killGroup(ka, 9) end)
-        end
+        self.ra:endKeepalive(1.5)
         if not self.standby_prevented then
             UIManager:preventStandby()
             self.standby_prevented = true
@@ -840,36 +914,29 @@ function M.new(plugin)
 
     function Player:pause()
         if not self.playing then return end
+        note("pause book", self.book_id, "at", string.format("%.1f", self:now()))
         self.pos = self:now()
         self.playing = false
         UIManager:unschedule(self._tick)
         self:killContent()
-        -- keep the Bluetooth link awake for a while, then let it sleep
-        local ka = U.keepaliveCommand(self.backend, self.rate)
-        if ka and not self.keepalive then
-            self.keepalive = spawn(ka)
-            local ka_pid = self.keepalive
-            UIManager:scheduleIn(600, function()
-                if self.keepalive == ka_pid then
-                    killGroup(ka_pid, 9)
-                    self.keepalive = nil
-                end
-            end)
-        end
+        self.ra:startKeepalive(self.backend, self.rate)
         self:release()
         self:savePosition()
         self:changed()
     end
 
-    function Player:stop(quiet)
+    -- stop ends playback. keepLink: the reader is moving to another book —
+    -- the Bluetooth link is kept awake as on a pause, for the next one.
+    function Player:stop(quiet, keepLink)
         local was = self.playing
         if self.playing then self.pos = self:now() end
         self.playing = false
         UIManager:unschedule(self._tick)
         self:killContent()
-        if self.keepalive then
-            killGroup(self.keepalive, 9)
-            self.keepalive = nil
+        if keepLink then
+            if was then self.ra:startKeepalive(self.backend, self.rate) end
+        else
+            self.ra:endKeepalive(0)
         end
         self:release()
         self:unhighlight()
@@ -932,6 +999,7 @@ function M.new(plugin)
     -- was waiting for it starts, or stops waiting and says why.
     function Player:onChunkArrived(n, ok)
         if self.waiting ~= n then return end
+        note("part", n, ok and "downloaded" or "failed to download")
         if ok then return self:play() end
         self.waiting = nil
         toast(_("Booky: couldn't download the audio for this part. Check the connection, then press play again."), 5)
@@ -947,9 +1015,11 @@ function M.new(plugin)
         -- (no headphones, no player), or the sound path dropped it
         if self.pid and not alive(self.pid) and pos < self.stream_end - 2 then
             local young = time.to_number(time.now() - self.spawned_at) < 3
+            note("the player stopped by itself after", string.format("%.1f", time.to_number(time.now() - self.spawned_at)), "s",
+                "at", string.format("%.1f", pos), "of", string.format("%.0f", self.stream_end))
             self:pause()
             if young then
-                toast(_("Booky: couldn't play audio. Connect Bluetooth headphones in the Kindle's settings, then try again.\nDetails: ") .. LOG, 8)
+                toast(_("Booky: couldn't play audio. Connect Bluetooth headphones in the Kindle's settings, then try again.\nDetails: menu → Read-along → Playback log."), 8)
             else
                 toast(_("Booky: the audio stopped — paused. Check the headphones, then play again."), 6)
             end
