@@ -185,6 +185,22 @@ function U.firstUnitFrom(n, pageOf, page)
     return found
 end
 
+-- lastAtOrBefore returns the last index in 1..n for which atOrBefore(i)
+-- holds — a binary search, since the units run in reading order — or nil.
+function U.lastAtOrBefore(n, atOrBefore)
+    local lo, hi, found = 1, n, nil
+    while lo <= hi do
+        local mid = math.floor((lo + hi) / 2)
+        if atOrBefore(mid) then
+            found = mid
+            lo = mid + 1
+        else
+            hi = mid - 1
+        end
+    end
+    return found
+end
+
 -- nextWake is how long to sleep before the next sentence starts (or the
 -- streamed audio runs out), clamped so the clock is checked now and then.
 -- Positions are in the book's time; at speed, they pass speed times faster.
@@ -192,6 +208,16 @@ function U.nextWake(units, i, pos, streamEnd, speed)
     local nextAt = streamEnd
     if units[i + 1] and units[i + 1].begin < nextAt then nextAt = units[i + 1].begin end
     return math.min(5, math.max(0.05, (nextAt - pos) / (speed or 1)))
+end
+
+-- spillAt is when, in the book's time, a sentence's narration reaches the
+-- words on the next page: its share of the sentence's characters (before
+-- of total) into the time it's spoken.
+function U.spillAt(begin, finish, before, total)
+    local frac = 0.5
+    if total and total > 0 and before then frac = before / total end
+    if frac < 0 then frac = 0 elseif frac > 1 then frac = 1 end
+    return begin + (finish - begin) * frac
 end
 
 -- elementXPointer cuts a reading position down to the element it's in:
@@ -853,9 +879,48 @@ function M.new(plugin)
         local text = ""
         pcall(function() text = doc:getTextFromXPointer(el) or "" end)
         local n = U.utf8len(text)
-        r = { el = el, pos0 = el .. "/text().0", pos1 = el .. "/text()." .. tostring(n) }
+        r = { el = el, pos0 = el .. "/text().0", pos1 = el .. "/text()." .. tostring(n), len = n }
         self._ranges[i] = r
         return r
+    end
+
+    -- pages i's sentence starts and ends on
+    function Player:pagesOf(i)
+        local r = self:range(i)
+        if not r then return nil end
+        local doc = self.ui.document
+        local ok0, p0 = pcall(function() return doc:getPageFromXPointer(r.pos0) end)
+        local ok1, p1 = pcall(function() return doc:getPageFromXPointer(r.pos1) end)
+        if not ok0 or not p0 then return nil end
+        return p0, (ok1 and p1) or p0
+    end
+
+    -- spill: when the sentence being read runs on past the page(s) on
+    -- screen, the time its narration reaches the next page's words, and
+    -- that page; nil when it ends on screen. Worked out once per sentence
+    -- and page shown.
+    function Player:spill(i)
+        local ui, doc = self.ui, self.ui.document
+        if not ui.rolling or ui.view.view_mode ~= "page" then return nil end
+        local cur = doc:getCurrentPage()
+        local s = self._spill
+        if s and s.i == i and s.cur == cur then return s.at, s.page end
+        s = { i = i, cur = cur }
+        self._spill = s
+        local u, r = self.units[i], self:range(i)
+        local _p0, p1 = self:pagesOf(i)
+        if not r or not p1 then return nil end
+        local visible = doc.getVisiblePageCount and doc:getVisiblePageCount() or 1
+        local last = cur + visible - 1
+        if p1 <= last then return nil end
+        local before
+        local okx, xp = pcall(function() return doc:getPageXPointer(last + 1) end)
+        if okx and xp then
+            local okt, text = pcall(function() return doc:getTextFromXPointers(r.pos0, xp) end)
+            if okt and type(text) == "string" then before = U.utf8len(text) end
+        end
+        s.at, s.page = U.spillAt(u.begin, u["end"], before, r.len), last + 1
+        return s.at, s.page
     end
 
     function Player:pageOf(i)
@@ -1049,11 +1114,42 @@ function M.new(plugin)
         local doc = self.ui.document
         local page = doc:getCurrentPage()
         local i = U.unitAt(self.units, self.pos)
-        local here = i > 0 and self:pageOf(i)
-        if here == page then return self:play() end
+        -- the narration's sentence, if it's on this page (or runs onto it)
+        local p0, p1
+        if i > 0 then p0, p1 = self:pagesOf(i) end
+        if p0 and p0 <= page and page <= p1 then return self:play() end
         local first = U.firstUnitFrom(#self.units, function(k) return self:pageOf(k) end, page)
         if first then return self:play(self.units[first].begin) end
         return self:play()
+    end
+
+    -- unitAtXPointer is the sentence holding a position in the book (a
+    -- word long-pressed, say): the last one starting at or before it.
+    function Player:unitAtXPointer(xp)
+        local doc = self.ui.document
+        if not xp or not doc.compareXPointers then return nil end
+        -- crengine: compareXPointers(a, b) is 1 when b is after a, 0 when
+        -- they're the same place, -1 when b is before
+        return U.lastAtOrBefore(#self.units, function(k)
+            local r = self:range(k)
+            if not r then return true end -- unresolved: let neighbours decide
+            local ok, c = pcall(function() return doc:compareXPointers(r.pos0, xp) end)
+            return ok and c ~= nil and c >= 0
+        end)
+    end
+
+    -- playFrom starts the narration at the sentence holding xp, playing or
+    -- not. Returns whether one was found.
+    function Player:playFrom(xp)
+        local i = self:unitAtXPointer(xp)
+        if not i then return false end
+        note("play from a chosen sentence", i, "of", #self.units)
+        if self.playing then
+            self:killContent()
+            self.playing = false
+        end
+        self:play(self.units[i].begin)
+        return true
     end
 
     function Player:skip(n)
@@ -1120,8 +1216,20 @@ function M.new(plugin)
             self.current = i
             if i > 0 then self:show(i) end
         end
+        local wake = U.nextWake(self.units, i, pos, self.stream_end, self.playing_speed)
+        -- a sentence running onto the next page: turn when the narration
+        -- gets there, not when the next sentence starts
+        if i > 0 and self.follow then
+            local at, page = self:spill(i)
+            if at and pos >= at then
+                self.ui:handleEvent(Event:new("GotoPage", page))
+                self:show(i)
+            elseif at then
+                wake = math.max(0.05, math.min(wake, (at - pos) / (self.playing_speed or 1)))
+            end
+        end
         self._tick = self._tick or function() self:tick() end
-        UIManager:scheduleIn(U.nextWake(self.units, i, pos, self.stream_end, self.playing_speed), self._tick)
+        UIManager:scheduleIn(wake, self._tick)
     end
 
     -- show highlights sentence i, turning the page to it first if needed.
@@ -1144,11 +1252,12 @@ function M.new(plugin)
         end
         if (self.follow or force) and ui.rolling then
             if ui.view.view_mode == "page" then
-                local page = self:pageOf(i)
+                -- a sentence across two pages is on screen if either part is
+                local p0, p1 = self:pagesOf(i)
                 local cur = doc:getCurrentPage()
                 local visible = doc.getVisiblePageCount and doc:getVisiblePageCount() or 1
-                if page and (page < cur or page > cur + visible - 1) then
-                    ui:handleEvent(Event:new("GotoPage", page))
+                if p0 and (p1 < cur or p0 > cur + visible - 1) then
+                    ui:handleEvent(Event:new("GotoPage", p0))
                 end
             elseif not boxesOf() then
                 -- scroll mode: move only when the sentence is off screen

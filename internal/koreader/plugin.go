@@ -255,6 +255,7 @@ function Booky:onReaderReady()
     self.player = self.player or self.readalong:attach(self.ui)
     if not self.player then return end
     self:showReadAlongControls()
+    self:addReadFromHere()
     if not self.settings:readSetting("readalong_hint_shown") then
         self.settings:saveSetting("readalong_hint_shown", true)
         self.settings:flush()
@@ -378,7 +379,33 @@ function Booky:watchFooterText(ft)
     end
 end
 
+-- addReadFromHere puts "Read along from here" in the dialog a long-press
+-- on the text opens (KOReader's highlight dialog), to start the narration
+-- at the sentence pressed.
+function Booky:addReadFromHere()
+    local hl = self.ui.highlight
+    if not hl or not hl.addToHighlightDialog or self._read_from_here then return end
+    self._read_from_here = true
+    hl:addToHighlightDialog("12_booky_readalong", function(this)
+        return {
+            text = "▶ " .. _("Read along from here"),
+            show_in_highlight_dialog_func = function() return self.player ~= nil end,
+            callback = function()
+                local xp = this.selected_text and this.selected_text.pos0
+                this:onClose()
+                if not self.player or not self.player:playFrom(xp) then
+                    UIManager:show(InfoMessage:new{ text = _("Booky: couldn't find that sentence in the narration."), timeout = 3 })
+                end
+            end,
+        }
+    end)
+end
+
 function Booky:onCloseDocument()
+    if self._read_from_here and self.ui.highlight and self.ui.highlight.removeFromHighlightDialog then
+        self.ui.highlight:removeFromHighlightDialog("12_booky_readalong")
+        self._read_from_here = nil
+    end
     if self.player then
         local footer = self.ui.view and self.ui.view.footer
         if footer and footer.removeAdditionalFooterContent and self._footer_content then
