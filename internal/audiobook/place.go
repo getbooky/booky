@@ -23,6 +23,9 @@ const maxParts = 1000
 // candidates out of a folder — every file's bytes are checked regardless.
 var audioExts = map[string]bool{".mp3": true, ".m4b": true, ".m4a": true, ".mp4": true}
 
+// IsAudioFile reports whether a file's name is one an audiobook part may have.
+func IsAudioFile(name string) bool { return audioExts[strings.ToLower(filepath.Ext(name))] }
+
 // Destination is where a book's audiobook belongs: beside its ebook, with
 // the same name, so Title.epub and Title.m4b sit together.
 func Destination(ebookPath string, format readalong.Format, original string) string {

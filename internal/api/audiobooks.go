@@ -282,22 +282,58 @@ func (s *Server) handleAudiobookImport(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusServiceUnavailable, errors.New("audiobooks need ffmpeg, which ships in the Docker image"))
 		return
 	}
+	// path: a file, or a folder of parts (or a series pack); paths: files
+	// or folders picked one by one, the book's parts in order
 	var req struct {
-		Path string `json:"path"`
+		Path  string   `json:"path"`
+		Paths []string `json:"paths"`
 	}
-	if err := decodeJSON(r, &req); err != nil || strings.TrimSpace(req.Path) == "" {
-		writeErr(w, http.StatusBadRequest, errors.New("path required"))
+	if err := decodeJSON(r, &req); err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	if strings.TrimSpace(req.Path) != "" {
+		req.Paths = append([]string{req.Path}, req.Paths...)
+	}
+	if len(req.Paths) == 0 || len(req.Paths) > 50 {
+		writeErr(w, http.StatusBadRequest, errors.New("pick 1 to 50 files or folders"))
 		return
 	}
 	if _, err := s.audioHome(id); err != nil {
 		writeErr(w, http.StatusBadRequest, err)
 		return
 	}
-	src, err := s.resolveImportSource(s.access(r), filepath.Clean(strings.TrimSpace(req.Path)))
-	if err != nil {
-		writeErr(w, http.StatusBadRequest, err)
+	srcs := make([]string, 0, len(req.Paths))
+	for _, p := range req.Paths {
+		src, err := s.resolveImportSource(s.access(r), filepath.Clean(strings.TrimSpace(p)))
+		if err != nil {
+			writeErr(w, http.StatusBadRequest, err)
+			return
+		}
+		srcs = append(srcs, src)
+	}
+	if len(srcs) > 1 {
+		// several picked: one book's parts, joined in the order given
+		if st := s.importState(id); st != nil && !st.done {
+			writeErr(w, http.StatusConflict, errImportBusy)
+			return
+		}
+		for i, src := range srcs {
+			if _, err := audiobook.Parts(src); err != nil {
+				writeErr(w, http.StatusBadRequest, fmt.Errorf("%s: %w", filepath.Base(req.Paths[i]), err))
+				return
+			}
+		}
+		//nolint:gosec // G118: the import must outlive the HTTP request by design
+		go func() {
+			if err := s.ImportAudioFrom(context.Background(), id, srcs); err != nil {
+				log.Printf("audiobook: import of %d parts for book %d: %v", len(srcs), id, err) //nolint:gosec // G706: numbers and our own error
+			}
+		}()
+		writeJSON(w, http.StatusAccepted, map[string]string{"status": "importing"})
 		return
 	}
+	src := srcs[0]
 	// a series folder is split into its books, each filed with its own
 	if split, err := audiobook.SplitByBook(src, s.audioCandidates(id)); err != nil {
 		writeErr(w, http.StatusBadRequest, err)
@@ -439,7 +475,7 @@ func (s *Server) audioCandidates(bookID int64) []audiobook.BookRef {
 	if err != nil {
 		return nil
 	}
-	out := []audiobook.BookRef{{ID: book.ID, Title: book.Title, Author: book.Author}}
+	out := []audiobook.BookRef{{ID: book.ID, Title: book.Title, Author: book.Author, Series: book.SeriesName}}
 	books, err := s.Catalog.ListBooks(book.AuthorID, 0, 0)
 	if err != nil {
 		return out
@@ -450,7 +486,7 @@ func (s *Server) audioCandidates(bookID int64) []audiobook.BookRef {
 			continue
 		}
 		seen[b.ID] = true
-		out = append(out, audiobook.BookRef{ID: b.ID, Title: b.Title, Author: b.Author})
+		out = append(out, audiobook.BookRef{ID: b.ID, Title: b.Title, Author: b.Author, Series: b.SeriesName})
 	}
 	return out
 }

@@ -20,6 +20,9 @@ var ErrNotInDownload = errors.New("the download doesn't contain this book")
 type BookRef struct {
 	ID            int64
 	Title, Author string
+	// Series is the series the book is in, if any: often named for its
+	// first book, and often at the front of the other books' file names.
+	Series string
 }
 
 // Split is what a download holds, book by book.
@@ -154,18 +157,45 @@ func matchesBook(b BookRef, name string) bool {
 	return false
 }
 
+// pickBook is the book a piece's name is for, or -1. A name can fit more
+// than one: "A Court of Thorns and Roses - A Court of Mist and Fury" holds
+// book one's title because it's the series' name too. A book whose title
+// is the series of another book that fits is set aside then — the series
+// name explains it. Of the rest, the longest title wins, so "A Court of
+// Thorns and Roses" doesn't take what "...Roses: Special Edition" fits.
+func pickBook(books []BookRef, name string) int {
+	var fits []int
+	for j, b := range books {
+		if matchesBook(b, name) {
+			fits = append(fits, j)
+		}
+	}
+	norm := func(s string) string { return strings.Join(release.Words(s), " ") }
+	best := -1
+	for _, j := range fits {
+		seriesOfAnother := false
+		for _, k := range fits {
+			if k != j && books[k].Series != "" && norm(books[k].Series) == norm(books[j].Title) {
+				seriesOfAnother = true
+			}
+		}
+		if seriesOfAnother {
+			continue
+		}
+		if best < 0 || len(books[j].Title) > len(books[best].Title) {
+			best = j
+		}
+	}
+	return best
+}
+
 func split(entries []piece, books []BookRef) (*Split, error) {
 	// what each piece matches; the longest title wins, so "A Court of
 	// Thorns and Roses" doesn't take what "...Roses: Special Edition" fits
 	match := make([]int64, len(entries))
 	matched := map[int64]bool{}
 	for i, e := range entries {
-		best := -1
-		for j, b := range books {
-			if matchesBook(b, e.name) && (best < 0 || len(b.Title) > len(books[best].Title)) {
-				best = j
-			}
-		}
+		best := pickBook(books, e.name)
 		if best >= 0 {
 			match[i] = books[best].ID
 			matched[books[best].ID] = true

@@ -115,6 +115,9 @@ var releaseWords = map[string]bool{
 
 // words lowercases and splits on anything that isn't a letter or digit,
 // joining contractions ("Ender's" is "enders") and spelling "&" as "and".
+// Words is how names are compared: lowercased words, punctuation gone.
+func Words(s string) []string { return words(s) }
+
 func words(s string) []string {
 	s = strings.NewReplacer("&", " and ", "'", "", "’", "", "‘", "").Replace(strings.ToLower(s))
 	return strings.FieldsFunc(s, func(r rune) bool { return !unicode.IsLetter(r) && !unicode.IsDigit(r) })

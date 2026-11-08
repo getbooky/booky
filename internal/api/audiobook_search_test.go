@@ -269,6 +269,61 @@ func TestSetDownloadsAreJoined(t *testing.T) {
 	}
 }
 
+// TestPickedFilesAreJoined: files picked one by one on the server are one
+// book's parts, joined in the order given; the picks are checked first.
+func TestPickedFilesAreJoined(t *testing.T) {
+	if os.Getenv("BOOKY_READALONG_IT") == "" {
+		t.Skip("set BOOKY_READALONG_IT=1 to run against ffmpeg/vosk/espeak")
+	}
+	f := newScopedFixture(t)
+	root := t.TempDir()
+	f.srv.mediaRoot = root
+	if _, err := f.srv.db.Exec(`UPDATE libraries SET root_path = ?`, filepath.Join(root, "books")); err != nil {
+		t.Fatal(err)
+	}
+	book := idStr(f.addBook(t, f.userCookie, map[string]any{"title": "Alice"}, nil)["id"])
+	id, _ := strconv.ParseInt(book, 10, 64)
+	epub := filepath.Join(root, "books", "Emmett Hale", "Alice.epub")
+	minimalEPUB(t, epub, []string{"Alice was beginning to get very tired.", "So she was considering in her own mind."})
+	if err := f.srv.Catalog.SetFile(f.lib, id, epub, "epub", 1); err != nil {
+		t.Fatal(err)
+	}
+	job := filepath.Join(root, "downloads", "pack")
+	if err := os.MkdirAll(job, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	var picks []string
+	for i, text := range []string{"Alice was beginning to get very tired.", "So she was considering in her own mind."} {
+		p := filepath.Join(job, "Alice_ Part "+strconv.Itoa(i+1)+" (Wonderland #1).mp3")
+		if err := os.WriteFile(p, spokenMP3(t, []string{text}), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		picks = append(picks, p)
+	}
+	url := "/api/v1/books/" + book + "/audiobook/import"
+	for name, body := range map[string]map[string]any{
+		"nothing picked":     {"paths": []string{}},
+		"outside the mount":  {"paths": []string{picks[0], "/etc/passwd"}},
+		"a file that's gone": {"paths": []string{picks[0], filepath.Join(job, "nope.mp3")}},
+	} {
+		if rec, _ := f.do(t, f.adminCooke, "POST", url, body); rec.Code != http.StatusBadRequest {
+			t.Errorf("%s: got %d, want 400", name, rec.Code)
+		}
+	}
+	if rec, out := f.do(t, f.adminCooke, "POST", url, map[string]any{"paths": picks}); rec.Code != http.StatusAccepted {
+		t.Fatalf("import: %d %v", rec.Code, out)
+	}
+	waitFor(t, 60*time.Second, func() bool {
+		_, err := os.Stat(filepath.Join(root, "books", "Emmett Hale", "Alice.m4b"))
+		return err == nil
+	})
+	for _, p := range picks {
+		if _, err := os.Stat(p); err != nil {
+			t.Errorf("a picked file was taken: %v", err)
+		}
+	}
+}
+
 // TestSeriesDownloadIsSplitIntoBooks: a series pack grabbed for one book
 // files each library book it holds with its own audiobook, leaves books the
 // library doesn't have, and never replaces an audiobook nobody asked to.

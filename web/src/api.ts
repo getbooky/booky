@@ -713,6 +713,14 @@ export const audiobooks = {
     request<{ status: string }>(`/api/v1/books/${bookId}/audiobook/import`, {
       method: "POST", body: JSON.stringify({ path }),
     }),
+  /** files (or folders) picked one by one: the book's parts, in this order */
+  importPaths: (bookId: number, paths: string[]) =>
+    request<{ status: string }>(`/api/v1/books/${bookId}/audiobook/import`, {
+      method: "POST", body: JSON.stringify({ paths }),
+    }),
+  /** a server folder's subfolders and audio files */
+  browseAudio: (path: string) =>
+    request<{ dirs: string[]; files: string[] }>(`/api/v1/system/browse?audio=1&path=${encodeURIComponent(path)}`),
   rebuild: (bookId: number) =>
     request<{ status: string }>(`/api/v1/books/${bookId}/audiobook/rebuild`, { method: "POST" }),
   remove: (bookId: number, deleteFile: boolean) =>
