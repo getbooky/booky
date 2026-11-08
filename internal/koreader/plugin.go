@@ -706,7 +706,7 @@ function Booky:addToMainMenu(menu_items)
     local items = {}
     -- in a book: the read-along's controls, built when opened (the book's
     -- read-along may attach after the menu is), greyed out in a book
-    -- without one. Both in the Booky menu and on their own.
+    -- without one. In the Booky menu, and on its own in the main (☰) tab.
     if self.ui and self.ui.document then
         local function readAlongItem(hint)
             return {
@@ -719,7 +719,7 @@ function Booky:addToMainMenu(menu_items)
                 end,
             }
         end
-        menu_items.booky_readalong = readAlongItem("tools")
+        menu_items.booky_readalong = readAlongItem("main")
         table.insert(items, readAlongItem(nil))
     end
     -- in a Booky book without its read-along: add it from here
