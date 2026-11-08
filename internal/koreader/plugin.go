@@ -302,16 +302,37 @@ end
 -- where it was last drawn is noted (see watchFooterText), and the item's
 -- span is measured in the bar's font. Unsure means no: the tap goes on to
 -- the status bar as usual.
+-- tapLog notes why a tap on the status bar was or wasn't the read-along's,
+-- in the read-along's log (/tmp/booky-readalong.log), for tracking down a
+-- tap that does nothing on some device.
+local function tapLog(...)
+    local f = io.open("/tmp/booky-readalong.log", "a")
+    if not f then return end
+    local parts = {}
+    for i = 1, select("#", ...) do parts[i] = tostring((select(i, ...))) end
+    f:write(os.date("%H:%M:%S"), " status bar tap: ", table.concat(parts, " "), "\n")
+    f:close()
+end
+
 function Booky:tapOnReadAlongLabel(footer, ges)
     -- a bar showing one item at a time cycles items on tap; it keeps that
-    if footer.settings and not footer.settings.all_at_once and not footer.has_no_mode then return false end
+    if footer.settings and not footer.settings.all_at_once and not footer.has_no_mode then
+        tapLog("ignored: the status bar shows one item at a time")
+        return false
+    end
     local ft = footer.footer_text
     self:watchFooterText(ft)
     local label = self:readAlongLabel()
-    if not ft or not label or not self._footer_x or not ges or not ges.pos then return false end
+    if not ft or not label or not self._footer_x or not ges or not ges.pos then
+        tapLog("ignored: text", ft ~= nil, "label", label, "drawn at", self._footer_x, "pos", ges and ges.pos ~= nil)
+        return false
+    end
     local text = ft.text or ""
     local at = text:find(label, 1, true)
-    if not at then return false end
+    if not at then
+        tapLog("ignored: the label isn't in the bar's text:", text)
+        return false
+    end
     local okr, RenderText = pcall(require, "ui/rendertext")
     if not okr then return false end
     local width = function(str)
@@ -321,7 +342,10 @@ function Booky:tapOnReadAlongLabel(footer, ges)
         return okw and size and size.x or nil
     end
     local before, own = width(text:sub(1, at - 1)), width(label)
-    if not before or not own then return false end
+    if not before or not own then
+        tapLog("ignored: couldn't measure the text")
+        return false
+    end
     -- the screen's corners are KOReader's own shortcuts (the bottom-left
     -- one toggles the frontlight): a tap there is never ours
     local sw, sh = Screen:getWidth(), Screen:getHeight()
@@ -329,12 +353,15 @@ function Booky:tapOnReadAlongLabel(footer, ges)
         local okc, c = pcall(function() return G_defaults:readSetting(name) end)
         if okc and c and ges.pos.x >= c.x * sw and ges.pos.x < (c.x + c.w) * sw
             and ges.pos.y >= c.y * sh and ges.pos.y < (c.y + c.h) * sh then
+            tapLog("ignored: in the", name, "corner")
             return false
         end
     end
     local slack = Screen:scaleBySize(8)
     local x0 = self._footer_x + before
-    return ges.pos.x >= x0 - slack and ges.pos.x <= x0 + own + slack
+    local hit = ges.pos.x >= x0 - slack and ges.pos.x <= x0 + own + slack
+    tapLog(hit and "play/pause" or "missed", "tap x", ges.pos.x, "label from", x0, "to", x0 + own)
+    return hit
 end
 
 -- watchFooterText notes where the status bar's text is drawn. The footer
