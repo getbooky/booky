@@ -230,22 +230,30 @@ func TestTokenize(t *testing.T) {
 	}
 }
 
-func TestVerbatimWords(t *testing.T) {
-	defer func(n int) { verbatimRun = n }(verbatimRun)
-	verbatimRun = 3
-	cases := []struct {
-		match []int
-		want  int
-	}{
-		{[]int{0, 1, 2, 3}, 4},             // one run
-		{[]int{0, 1, -1, 5, 6}, 0},         // too short
-		{[]int{0, 2, 4, 6}, 0},             // matched, but not heard in a row
-		{[]int{4, 5, 6, -1, 9, 10, 11}, 6}, // two runs
-		{nil, 0},
-	}
-	for _, c := range cases {
-		if got := verbatimWords(c.match); got != c.want {
-			t.Errorf("verbatimWords(%v) = %d, want %d", c.match, got, c.want)
+// TestSameBook: a narration heard through heavy noise is still this book;
+// a narration of a different book that shares the vocabulary — the same
+// author, the same characters — is not, however many words it shares.
+func TestSameBook(t *testing.T) {
+	for seed := int64(1); seed <= 3; seed++ {
+		r := rand.New(rand.NewSource(seed)) //nolint:gosec // G404: deterministic test noise
+		units := synthBook(r, 1200)
+		other := synthBook(r, 1200) // drawn from the same vocabulary
+		words, _ := narrate(units, nil)
+		for _, wrong := range []float64{0, 0.3, 0.55} {
+			heard := garble(r, words, wrong, 0.05, 0.05)
+			_, s := Align(units, heard)
+			s.Baseline = Baseline(units, heard)
+			if !s.SameBook() {
+				t.Errorf("seed %d, %.0f%% misheard: the right book refused (%+v)", seed, 100*wrong, s)
+			}
+			_, o := Align(other, heard)
+			o.Baseline = Baseline(other, heard)
+			if o.SameBook() {
+				t.Errorf("seed %d, %.0f%% misheard: a different book accepted (%+v)", seed, 100*wrong, o)
+			}
+			if wrong == 0.55 && s.Match >= 0.45 {
+				t.Errorf("seed %d: the noisy narration matched %.2f — not the case this test is for", seed, s.Match)
+			}
 		}
 	}
 }

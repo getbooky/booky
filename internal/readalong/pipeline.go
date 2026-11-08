@@ -19,15 +19,13 @@ const (
 	ChunkDir    = "audio"
 )
 
-// A read-along only counts when the audiobook really is this book: enough
-// of what was heard must match the text (minMatch), and enough of the book
-// must end up timed (minCoverage). An unrelated recording shares common
-// words with any text — about a quarter of them in testing — while a real
-// pairing matched two thirds even through a robotic test voice.
-const (
-	minMatch    = 0.45
-	minCoverage = 0.25
-)
+// A read-along only counts when the audiobook really is this book
+// (Stats.SameBook) and enough of the book ends up timed (minCoverage). Any
+// two texts share a quarter of their words, so a narration that matches
+// half the text is this book; but a cinematic edition, with music and
+// sound effects under a full cast, can leave the recognizer matching less
+// than that of the right book, and then the words' order has to show it.
+const minCoverage = 0.25
 
 // Job is one read-along build.
 type Job struct {
@@ -162,10 +160,11 @@ feed:
 
 	progress("Lining up the text", 0.99)
 	timings, stats := Align(book.Units, words)
+	stats.Baseline = Baseline(book.Units, words)
 	switch {
-	case stats.Match < minMatch:
-		return nil, fmt.Errorf("%w — only %.0f%% of the narration matched the text. Is it the same book and edition?",
-			ErrMismatch, 100*stats.Match)
+	case !stats.SameBook():
+		return nil, fmt.Errorf("%w — %.0f%% of the narration matched the text, about what a different book would (%.0f%%). Is it the same book and edition?",
+			ErrMismatch, 100*stats.Match, 100*stats.Baseline)
 	case stats.Coverage < minCoverage:
 		// the narration is this book, but only a part of it
 		return nil, fmt.Errorf("%w — the narration covers only %.0f%% of the book. Is the audiobook complete?",
