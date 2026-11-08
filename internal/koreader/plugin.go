@@ -703,8 +703,25 @@ function Booky:readAlongMenu()
 end
 
 function Booky:addToMainMenu(menu_items)
-    if self.player then menu_items.booky_readalong = self:readAlongMenu() end
     local items = {}
+    -- in a book: the read-along's controls, built when opened (the book's
+    -- read-along may attach after the menu is), greyed out in a book
+    -- without one. In the Booky menu, and on its own in the main (☰) tab.
+    if self.ui and self.ui.document then
+        local function readAlongItem(hint)
+            return {
+                text = _("Read-along"),
+                sorting_hint = hint,
+                enabled_func = function() return self.player ~= nil end,
+                help_text = _("Play, pause, speed and volume for this book's Booky read-along. Greyed out in a book without one."),
+                sub_item_table_func = function()
+                    return self.player and self:readAlongMenu().sub_item_table or {}
+                end,
+            }
+        end
+        menu_items.booky_readalong = readAlongItem("main")
+        table.insert(items, readAlongItem(nil))
+    end
     -- in a Booky book without its read-along: add it from here
     local open = self.ui and self.ui.document and self.ui.document.file
     if open and not self.player and self:inDownloads(open) then
