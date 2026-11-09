@@ -216,7 +216,7 @@ func uploadBook(t *testing.T, f *scopedFixture, c *http.Cookie, bookID string, n
 		t.Fatal(err)
 	}
 	_, _ = part.Write(data)
-	mw.Close()
+	_ = mw.Close()
 	req := httptest.NewRequest("POST", "/api/v1/books/"+bookID+"/import", &buf)
 	req.Header.Set("Content-Type", mw.FormDataContentType())
 	req.AddCookie(c)
@@ -348,11 +348,11 @@ func TestPasswordEndpoints(t *testing.T) {
 
 	// a user can't reset anyone, themselves included, by the admin route
 	if rec, _ := f.do(t, f.userCookie, "PUT", "/api/v1/users/1/password",
-		map[string]string{"password": "taken over by sam"}); rec.Code != http.StatusForbidden {
+		map[string]string{"password": "taken over by sam"}); rec.Code != http.StatusForbidden { //nolint:gosec // G101: test fixture
 		t.Errorf("user reset the admin's password: %d", rec.Code)
 	}
 	if rec, _ := f.do(t, f.adminCooke, "PUT", "/api/v1/users/"+idStr(float64(f.samID))+"/password",
-		map[string]string{"password": "reset by the admin"}); rec.Code != http.StatusOK {
+		map[string]string{"password": "reset by the admin"}); rec.Code != http.StatusOK { //nolint:gosec // G101: test fixture
 		t.Fatalf("admin reset: %d %s", rec.Code, rec.Body)
 	}
 	if rec, _ := f.do(t, f.userCookie, "GET", "/api/v1/books", nil); rec.Code != http.StatusUnauthorized {

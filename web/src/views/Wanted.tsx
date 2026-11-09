@@ -1,3 +1,4 @@
+import { LoadError } from "@/components/LoadError"
 import { useMemo, useState } from "react"
 import { MiniCover, hashColors } from "@/components/Cover"
 import { Tag, Folio, Chips } from "@/components/bits"
@@ -26,7 +27,7 @@ function fmtRelease(iso: string): string {
 // Searching happens only when a book is added, on release day, in the weekly
 // backlog pass — or right here.
 export function WantedView({ libraries }: { libraries: ApiLibrary[] }) {
-  const { data, loading, reload } = useApi(() => acquisition.wanted(), 5_000)
+  const { data, loading, error, reload } = useApi(() => acquisition.wanted(), 5_000)
   const missing = useMemo(() => data?.books ?? [], [data])
   const cutoffUnmet = useMemo(() => data?.cutoffUnmet ?? [], [data])
   const [tab, setTab] = useState<Tab>("missing")
@@ -44,7 +45,8 @@ export function WantedView({ libraries }: { libraries: ApiLibrary[] }) {
             value={tab} onChange={setTab} />
         }
       />
-      {!loading && books.length === 0 && (
+      {error && <LoadError what="the wanted list" error={error} onRetry={() => reload()} />}
+      {!loading && !error && books.length === 0 && (
         <p className="max-w-[52ch] text-[13.5px] leading-relaxed text-muted-foreground">
           {tab === "missing"
             ? "Nothing is missing — every monitored book is on the shelf."

@@ -858,7 +858,22 @@ class Loader {
             for (const el of doc.querySelectorAll('[style]'))
                 el.setAttribute('style',
                     await this.replaceCSS(el.getAttribute('style'), href, parents))
-            // TODO: replace inline scripts? probably not worth the trouble
+            // Booky: a book is someone else's HTML, shown in a frame that
+            // shares the app's origin (it has to: the reader reaches into
+            // the page to lay it out). Nothing in it gets to run. The
+            // server's Content-Security-Policy already forbids it; this
+            // takes the code out as well, so neither is the only guard.
+            for (const el of doc.querySelectorAll('script, base, meta[http-equiv], iframe, embed, object, form'))
+                el.remove()
+            for (const el of doc.querySelectorAll('*'))
+                for (const attr of [...el.attributes]) {
+                    const name = attr.localName.toLowerCase()
+                    const value = attr.value.replace(/[\u0000-\u0020]+/g, '').toLowerCase()
+                    if (name.startsWith('on')) el.removeAttributeNode(attr)
+                    else if ((name === 'href' || name === 'src' || name === 'action' || name === 'formaction')
+                        && (value.startsWith('javascript:') || value.startsWith('vbscript:') || value.startsWith('data:text/html')))
+                        el.removeAttributeNode(attr)
+                }
             const result = new XMLSerializer().serializeToString(doc)
             return this.createURL(href, result, item.mediaType, parent)
         }

@@ -5,6 +5,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { PathInput } from "@/components/PathInput"
+import { useIsAdmin } from "@/lib/access"
 import { Search, Upload } from "lucide-react"
 import { toast } from "sonner"
 import { cn } from "@/lib/utils"
@@ -22,6 +23,7 @@ export function ImportBookDialog({ open, onOpenChange, libraries, defaultLibrary
   defaultLibraryId?: number
   onImported: () => void
 }) {
+  const isAdmin = useIsAdmin()
   const [path, setPath] = useState("")
   const [file, setFile] = useState<File | null>(null)
   const [query, setQuery] = useState("")
@@ -79,17 +81,20 @@ export function ImportBookDialog({ open, onOpenChange, libraries, defaultLibrary
         <DialogHeader>
           <DialogTitle className="font-book text-lg font-bold">Import a book</DialogTitle>
           <p className="text-xs text-muted-foreground">
-            Point at a file (or folder) under /data and tell Booky which book it is — it doesn't have to
-            be in your library yet. The file is renamed by your naming scheme and delivered.
+            {isAdmin
+              ? "Point at a file (or folder) under /data and tell Booky which book it is — it doesn't have to be in your library yet. The file is renamed by your naming scheme and delivered."
+              : "Upload a book file you already have (EPUB, PDF, MOBI…) and tell Booky which book it is. It doesn't have to be in the library yet."}
           </p>
         </DialogHeader>
         <div className="grid gap-4 py-1">
           <div>
-            <div className="mono-label mb-1.5 text-muted-foreground">File or folder on the server</div>
-            <PathInput value={path} onChange={setPath} placeholder="/data/downloads/…" />
-            <div className="mt-2 flex items-center gap-2">
-              <label className="inline-flex cursor-pointer items-center gap-1.5 text-[12.5px] text-muted-foreground hover:text-foreground">
-                <Upload className="h-3.5 w-3.5" /> …or upload from this device
+            <div className="mono-label mb-1.5 text-muted-foreground">{isAdmin ? "File or folder on the server" : "Book file"}</div>
+            {isAdmin && <PathInput value={path} onChange={setPath} placeholder="/data/downloads/…" />}
+            <div className={isAdmin ? "mt-2 flex items-center gap-2" : "flex flex-wrap items-center gap-2"}>
+              <label className={isAdmin
+                ? "inline-flex cursor-pointer items-center gap-1.5 text-[12.5px] text-muted-foreground hover:text-foreground"
+                : "inline-flex h-9 cursor-pointer items-center gap-1.5 rounded-md border px-3 text-[13px] font-medium hover:bg-surface2"}>
+                <Upload className="h-3.5 w-3.5" /> {isAdmin ? "…or upload from this device" : "Choose a file"}
                 <input type="file" accept=".epub,.azw3,.azw,.mobi,.pdf,.cbz,.cbr,.fb2" className="hidden"
                   onChange={e => { setFile(e.target.files?.[0] ?? null); setPath(""); e.target.value = "" }} />
               </label>

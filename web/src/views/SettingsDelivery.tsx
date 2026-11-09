@@ -43,6 +43,22 @@ function UserRow({ user, tags, onDelete, onChanged }: {
 }) {
   const shared = (user.tagIds ?? []).filter(id => id !== user.personalTagId)
   const [editing, setEditing] = useState(false)
+  const [resetting, setResetting] = useState(false)
+  const [newPassword, setNewPassword] = useState("")
+  const [busy, setBusy] = useState(false)
+  const resetPassword = async () => {
+    setBusy(true)
+    try {
+      await delivery.resetPassword(user.id, newPassword)
+      toast.success(`New password set for ${user.username}. They've been signed out everywhere.`)
+      setResetting(false)
+      setNewPassword("")
+    } catch (e) {
+      toast.error(`Couldn't set the password: ${e instanceof Error ? e.message : e}`)
+    } finally {
+      setBusy(false)
+    }
+  }
   const [selected, setSelected] = useState<number[]>(shared)
   const isAdminUser = user.role === "admin"
   const byId = new Map(tags.map(t => [t.id, t]))
@@ -80,11 +96,25 @@ function UserRow({ user, tags, onDelete, onChanged }: {
             {editing ? "Cancel" : "Tags"}
           </Button>
         )}
+        <Button variant="outline" className="h-8" onClick={() => { setNewPassword(""); setResetting(r => !r) }}>
+          {resetting ? "Cancel" : "Password"}
+        </Button>
         <Button variant="outline" size="icon" className="h-8 w-8 text-faint" aria-label={`Delete ${user.username}`}
           onClick={onDelete}>
           <X className="h-3.5 w-3.5" />
         </Button>
       </div>
+      {resetting && (
+        <form className="mt-3 border-t border-linesoft pt-3" onSubmit={e => { e.preventDefault(); void resetPassword() }}>
+          <Label>New password for {user.username} (at least 8 characters)</Label>
+          <div className="flex flex-wrap items-center gap-2">
+            <Input type="password" autoComplete="new-password" value={newPassword} onChange={e => setNewPassword(e.target.value)}
+              className="h-9 w-[220px]" />
+            <Button type="submit" className="h-9" disabled={busy || newPassword.length < 8}>{busy ? "Saving…" : "Set password"}</Button>
+          </div>
+          <p className="mt-1.5 text-[12px] text-faint">For someone who forgot theirs. It signs them out on every device; tell them the new one, and they can change it under Settings → Account.</p>
+        </form>
+      )}
       {editing && (
         <div className="mt-3 border-t border-linesoft pt-3">
           <Label>Books shared with these tags reach {user.username}</Label>
@@ -122,6 +152,7 @@ export function UsersPanel() {
     }
   }
   const remove = async (id: number, name: string) => {
+    if (!window.confirm(`Delete the account "${name}"?\n\nTheir sign-in, paired e-readers, Kindle addresses and reading positions are removed. Books stay in the library.`)) return
     try {
       await delivery.deleteUser(id)
       toast(`User "${name}" deleted`)
@@ -153,11 +184,11 @@ export function UsersPanel() {
             <div className="flex flex-wrap items-end gap-3">
               <div>
                 <Label>Username</Label>
-                <Input value={username} onChange={e => setUsername(e.target.value)} className="h-9 w-[140px]" />
+                <Input value={username} onChange={e => setUsername(e.target.value)} autoComplete="off" autoCapitalize="none" spellCheck={false} className="h-9 w-[140px]" />
               </div>
               <div>
                 <Label>Password (min 8 chars)</Label>
-                <Input type="password" value={password} onChange={e => setPassword(e.target.value)} className="h-9 w-[180px]" />
+                <Input type="password" autoComplete="new-password" value={password} onChange={e => setPassword(e.target.value)} className="h-9 w-[180px]" />
               </div>
               <div>
                 <Label>Role</Label>

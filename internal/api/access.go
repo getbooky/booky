@@ -3,6 +3,7 @@ package api
 import (
 	"errors"
 	"net/http"
+	"path/filepath"
 
 	"github.com/getbooky/booky/internal/auth"
 	"github.com/getbooky/booky/internal/catalog"
@@ -289,6 +290,11 @@ func (a access) redactTags(books []catalog.Book) {
 	}
 	for i := range books {
 		b := &books[i]
+		// where files sit on the server is the admin's to know; everyone
+		// else gets the file's name, which still says "there is a file"
+		if b.FilePath != "" {
+			b.FilePath = filepath.Base(b.FilePath)
+		}
 		kept := []int64{}
 		for _, t := range b.Tags {
 			if a.user.HasTag(t) {
@@ -306,7 +312,7 @@ func (a access) redactBook(b *catalog.Book) {
 	}
 	one := []catalog.Book{*b}
 	a.redactTags(one)
-	b.Tags = one[0].Tags
+	b.Tags, b.FilePath = one[0].Tags, one[0].FilePath
 }
 
 // filterLibraries narrows the library list to what the caller may reach.

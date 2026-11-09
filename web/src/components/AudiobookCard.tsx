@@ -150,9 +150,12 @@ export function AudiobookCard({ book, onReadAlong, onChanged }: {
   )
   const addButtons = (
     <div className="mt-3 flex flex-wrap items-center gap-2">
-      <Button variant="outline" className="h-9" disabled={uploading !== null} onClick={() => fileInput.current?.click()}>
-        <Upload className="mr-1.5 h-4 w-4" /> {ab ? "Replace audiobook" : "Add audiobook"}
-      </Button>
+      {/* replacing an audiobook others may be listening to is the admin's */}
+      {(!ab || isAdmin) && (
+        <Button variant="outline" className="h-9" disabled={uploading !== null} onClick={() => fileInput.current?.click()}>
+          <Upload className="mr-1.5 h-4 w-4" /> {ab ? "Replace audiobook" : "Add audiobook"}
+        </Button>
+      )}
       {isAdmin && (
         <Button variant="ghost" className="h-9 text-muted-foreground" onClick={() => setPathOpen(o => !o)}>
           <FolderInput className="mr-1.5 h-4 w-4" /> From the server…

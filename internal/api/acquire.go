@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"net/http"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -232,6 +233,10 @@ func (s *Server) handleHistory(w http.ResponseWriter, r *http.Request) {
 		for _, it := range items {
 			if it.Kind == "tagged" || it.Kind == "sent" || strings.Contains(it.Detail, "send to kindle") {
 				continue
+			}
+			// "imported" lines carry the full path the file landed at
+			if it.Kind == "imported" && strings.HasPrefix(it.Detail, "/") {
+				it.Detail = filepath.Base(it.Detail)
 			}
 			kept = append(kept, it)
 		}

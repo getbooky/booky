@@ -161,6 +161,41 @@ install with several libraries upgrades.
 tailnet node (Booky listens on 8787 inside the container) and reach it by
 MagicDNS name from your phone; add it to your home screen as a PWA.
 
+### Sharing it with friends and family
+
+Booky is built to be handed to people who aren't you. A few things make that
+safe:
+
+- **Create the admin account before anyone else can reach it.** Until the
+  first account exists, the setup wizard — and with it everything — is open
+  to whoever can load the page.
+- **Put it behind HTTPS if it leaves your LAN**: a reverse proxy (Caddy,
+  Nginx Proxy Manager, Traefik, SWAG) with a certificate, forwarding to port
+  8787, or a tunnel such as Tailscale or Cloudflare Tunnel. Don't forward
+  the port to the internet as plain HTTP: passwords would travel in the
+  clear. Have the proxy pass `X-Forwarded-For` and `X-Forwarded-Proto`
+  (the ones above do by default).
+- **Behind a proxy, Booky needs the visitor's real address** for its sign-in
+  lockouts. It believes `X-Forwarded-For` from loopback and private
+  addresses (where a proxy on the same host or Docker network connects
+  from) and from nowhere else. If your proxy connects from a public
+  address, name it: `-e BOOKY_TRUSTED_PROXIES=203.0.113.7` (addresses or
+  CIDR ranges, comma-separated; `none` to believe nobody).
+- **Give each person their own account** (Settings → Users), as a `user`,
+  not an admin. They can change their password under Settings → Account; if
+  they forget it, an admin sets a new one from Settings → Users.
+- **Passwords**: at least 8 characters. Wrong guesses lock that username
+  from that address for 30 seconds, doubling up to 15 minutes; an address
+  that keeps failing against different usernames is locked as a whole.
+- **Removing someone**: deleting an account signs them out everywhere and
+  removes their paired e-readers, Kindle addresses and mail settings.
+
+What Booky does on its own: every page is served with a strict
+Content-Security-Policy (scripts inside an ebook can't run in the web
+reader), requests that change anything must come from Booky's own pages,
+cover and mail-server addresses supplied by users can't point at your home
+network, and download links from your indexers never reach the browser.
+
 ## Hooking things up
 
 | What | Where | Notes |

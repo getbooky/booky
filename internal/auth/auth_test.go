@@ -267,7 +267,7 @@ func TestLockoutEscalatesAndStopsSpraying(t *testing.T) {
 		s.failures[key] = st
 		s.mu.Unlock()
 	}
-	if !(waits[0] < waits[1] && waits[1] < waits[2]) {
+	if waits[0] >= waits[1] || waits[1] >= waits[2] {
 		t.Errorf("lockouts don't grow: %v", waits)
 	}
 

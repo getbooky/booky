@@ -58,7 +58,7 @@ func loadTrustedProxies() trustedProxies {
 			out = append(out, netip.PrefixFrom(a, a.BitLen()))
 			continue
 		}
-		log.Printf("BOOKY_TRUSTED_PROXIES: ignoring %q (not an address or CIDR range)", item)
+		log.Printf("BOOKY_TRUSTED_PROXIES: ignoring %q (not an address or CIDR range)", item) //nolint:gosec // G706: the operator's own environment variable, quoted
 	}
 	return out
 }
@@ -278,11 +278,13 @@ func openURL(bookID int64, kind string, r release.Release) (string, bool) {
 // each part of a set.
 func (s *Server) signReleases(bookID int64, kind string, rels []release.Release) {
 	for i := range rels {
-		rels[i].DownloadURL = sealURL(bookID, kind, rels[i])
-		rels[i].InfoURL = "" // indexer pages: nothing the UI shows
-		for j := range rels[i].Parts {
-			rels[i].Parts[j].DownloadURL = sealURL(bookID, kind, rels[i].Parts[j])
-			rels[i].Parts[j].InfoURL = ""
+		r := &rels[i]
+		r.DownloadURL = sealURL(bookID, kind, *r)
+		r.InfoURL = "" // indexer pages: nothing the UI shows
+		for j := range r.Parts {
+			p := &r.Parts[j]
+			p.DownloadURL = sealURL(bookID, kind, *p)
+			p.InfoURL = ""
 		}
 	}
 }

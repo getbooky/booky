@@ -1,3 +1,4 @@
+import { LoadError } from "@/components/LoadError"
 import { useMemo } from "react"
 import { MiniCover, hashColors } from "@/components/Cover"
 import { Tag, Folio } from "@/components/bits"
@@ -16,7 +17,7 @@ export function CalendarView({ libraries, onOpenBook }: {
   libraries: ApiLibrary[]
   onOpenBook?: (b: ApiBook) => void
 }) {
-  const { data, loading } = useApi(() => watchers.calendar(), 30_000)
+  const { data, loading, error, reload } = useApi(() => watchers.calendar(), 30_000)
   const books = useMemo(() => data?.books ?? [], [data])
   const libName = (id?: number) => libraries.find(l => l.id === id)?.name ?? ""
 
@@ -35,7 +36,8 @@ export function CalendarView({ libraries, onOpenBook }: {
   return (
     <section>
       <Folio title="Calendar" meta={loading ? "loading…" : "Upcoming releases · monitored authors & series"} />
-      {!loading && months.length === 0 && (
+      {error && <LoadError what="the calendar" error={error} onRetry={() => reload()} />}
+      {!loading && !error && months.length === 0 && (
         <p className="max-w-[56ch] text-[13.5px] leading-relaxed text-muted-foreground">
           No release dates on the horizon. Monitored books with future release dates appear here —
           their dates refresh weekly, and each gets searched automatically on release day.

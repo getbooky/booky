@@ -12,3 +12,16 @@ CBZ paths plus the paginator and progress tracking). Local changes:
 
 To update: copy the same file list from a newer upstream commit, re-apply the
 `pdf.js` stub, and bump the commit hash above.
+
+## Booky changes
+
+Two small patches on top of that commit, both marked `Booky:` in the code:
+
+- `epub.js`: scripts, event-handler attributes, `javascript:` URLs, frames,
+  forms and `<base>` are removed from each chapter before it is shown. The
+  reader's frames share the app's origin, so code in a book must never run.
+  (The server's Content-Security-Policy forbids it too.)
+- `view.js`: external links only open `http(s):` and `mailto:` addresses,
+  with `noopener,noreferrer`.
+
+Re-apply both when updating the vendored copy.

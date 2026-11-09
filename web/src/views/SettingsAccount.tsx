@@ -1,4 +1,6 @@
+import { useState } from "react"
 import { Button } from "@/components/ui/button"
+import { Input } from "@/components/ui/input"
 import { api, delivery } from "@/api"
 import { useApi } from "@/hooks/use-api"
 import { toast } from "sonner"
@@ -41,6 +43,8 @@ export function AccountPanel() {
   }
 
   return (
+    <>
+    <PasswordCard username={data?.username ?? ""} />
     <Card title="OPDS"
       desc="Read your books in any OPDS app (KOReader, Moon+ Reader, Thorium…). Add this address and sign in with your usual Booky username and password. The feed shows exactly the books shared with you — your own and your tags' — and nothing else.">
       <div className="grid max-w-xl gap-4">
@@ -59,6 +63,64 @@ export function AccountPanel() {
           <p className="mt-1.5 text-xs text-faint">Password: the one you sign in to Booky with. Five wrong tries lock the login for a short while.</p>
         </div>
       </div>
+    </Card>
+    </>
+  )
+}
+
+// PasswordCard lets the signed-in person change their own password. The
+// hidden username field is for password managers: it tells them which
+// saved login to update.
+function PasswordCard({ username }: { username: string }) {
+  const [current, setCurrent] = useState("")
+  const [next, setNext] = useState("")
+  const [again, setAgain] = useState("")
+  const [busy, setBusy] = useState(false)
+  const mismatch = again !== "" && next !== again
+  const tooShort = next !== "" && next.length < 8
+
+  const submit = async (e: React.FormEvent) => {
+    e.preventDefault()
+    setBusy(true)
+    try {
+      await delivery.changePassword(current, next)
+      toast.success("Password changed. Other devices signed in to your account have been signed out.")
+      setCurrent(""); setNext(""); setAgain("")
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : String(err))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <Card title="Password"
+      desc="Change the password you sign in with. It's also what reader apps use for your OPDS feed, so update it there too.">
+      <form onSubmit={submit} className="grid max-w-sm gap-4">
+        <input type="text" name="username" autoComplete="username" value={username} readOnly hidden />
+        <div>
+          <label htmlFor="pw-current" className="mono-label mb-1.5 block text-muted-foreground">Current password</label>
+          <Input id="pw-current" type="password" autoComplete="current-password" value={current}
+            onChange={e => setCurrent(e.target.value)} className="h-9" />
+        </div>
+        <div>
+          <label htmlFor="pw-new" className="mono-label mb-1.5 block text-muted-foreground">New password</label>
+          <Input id="pw-new" type="password" autoComplete="new-password" value={next}
+            onChange={e => setNext(e.target.value)} className="h-9" aria-invalid={tooShort} />
+          <p className={tooShort ? "mt-1.5 text-xs text-want" : "mt-1.5 text-xs text-faint"}>At least 8 characters.</p>
+        </div>
+        <div>
+          <label htmlFor="pw-again" className="mono-label mb-1.5 block text-muted-foreground">New password, again</label>
+          <Input id="pw-again" type="password" autoComplete="new-password" value={again}
+            onChange={e => setAgain(e.target.value)} className="h-9" aria-invalid={mismatch} />
+          {mismatch && <p className="mt-1.5 text-xs text-want">The two don't match.</p>}
+        </div>
+        <div>
+          <Button type="submit" className="h-9" disabled={busy || !current || next.length < 8 || next !== again}>
+            {busy ? "Saving…" : "Change password"}
+          </Button>
+        </div>
+      </form>
     </Card>
   )
 }

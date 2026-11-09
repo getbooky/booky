@@ -114,7 +114,7 @@ export function ReleasesDialog({ book, open, onOpenChange, onGrabbed, kind = "eb
         onOpenChange(false)
         onGrabbed?.()
       } else {
-        toast.warning("Nothing grabbable — every candidate failed or scored zero")
+        toast.warning("Nothing to grab right now. Booky keeps looking.")
       }
     } catch (e) {
       toast.error(`Auto-grab failed: ${e instanceof Error ? e.message : e}`)

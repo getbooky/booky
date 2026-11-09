@@ -1,3 +1,4 @@
+import { LoadError } from "@/components/LoadError"
 import { useMemo, useState } from "react"
 import { Tag, Folio } from "@/components/bits"
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs"
@@ -54,7 +55,8 @@ export function ActivityView() {
         </TabsList>
 
         <TabsContent value="queue" className="mt-4">
-          {queue.length === 0 && !queueQuery.loading && (
+          {queueQuery.error && <LoadError what="downloads" error={queueQuery.error} onRetry={() => queueQuery.reload()} />}
+          {queue.length === 0 && !queueQuery.loading && !queueQuery.error && (
             <p className="text-[13.5px] text-muted-foreground">
               The queue is empty — grabs show up here the moment they start, and drop off once they're imported. History keeps the record.
             </p>
@@ -116,6 +118,11 @@ export function ActivityView() {
                           : q.status === "import_failed" ? "Give up on this download — deletes the downloaded file"
                           : "Cancel this download — removes its files"}
                         onClick={async () => {
+                          // dismissing a dead row loses nothing; the others delete files
+                          if (q.status !== "failed" && !window.confirm(
+                            q.status === "import_failed"
+                              ? `Give up on "${q.releaseTitle}"?\n\nThe downloaded file is deleted.`
+                              : `Cancel "${q.releaseTitle}"?\n\nThe download stops and its files are removed.`)) return
                           try {
                             await acquisition.cancelQueue(q.id)
                             toast.success(q.status === "failed" ? "Dismissed" : "Cancelled")
@@ -139,7 +146,8 @@ export function ActivityView() {
         </TabsContent>
 
         <TabsContent value="history" className="mt-4">
-          {history.length === 0 && !historyQuery.loading && (
+          {historyQuery.error && <LoadError what="history" error={historyQuery.error} onRetry={() => historyQuery.reload()} />}
+          {history.length === 0 && !historyQuery.loading && !historyQuery.error && (
             <p className="text-[13.5px] text-muted-foreground">Nothing yet — adds, grabs, and imports all leave a trail here.</p>
           )}
           <div className="border-t">
