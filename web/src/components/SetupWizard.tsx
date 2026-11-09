@@ -383,8 +383,8 @@ export function SetupWizard({ open, onOpenChange, onDone }: { open: boolean; onO
           )}
           {step === 3 && (
             <div className="grid gap-4">
-              <p className="text-[13px] text-muted-foreground">Metadata comes from providers in priority order — first one with a value wins, the rest fill gaps. Goodreads and Open Library need no keys; add a Hardcover token for its clean series data.</p>
-              <Field label="Hardcover API token (optional)">
+              <p className="text-[13px] text-muted-foreground">Booky gets book details, series and covers from Hardcover. Paste your API token — it's free: sign in at hardcover.app, then Settings → API. Without it, searching for books to add and matching what you import won't work; you can add it later under Settings → Metadata.</p>
+              <Field label="Hardcover API token">
                 <Input type="password" value={hcToken} onChange={e => setHcToken(e.target.value)} placeholder="paste token from hardcover.app → settings → API" />
               </Field>
               <Button variant="outline" className="h-8 w-fit" disabled={!hcToken.trim()} onClick={testHardcover}>Test token</Button>

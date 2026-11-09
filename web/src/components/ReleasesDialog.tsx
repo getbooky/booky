@@ -127,14 +127,15 @@ export function ReleasesDialog({ book, open, onOpenChange, onGrabbed, kind = "eb
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="max-w-2xl rounded-xl">
         <DialogHeader>
-          <div className="flex items-center justify-between gap-3">
-            <DialogTitle className="font-book text-lg font-bold">{audio ? "Audiobook releases" : "Releases"} — {book?.title}</DialogTitle>
+          {/* stacked on a phone: side by side the title wraps into a narrow, centred column */}
+          <div className="flex flex-col items-start gap-2 pr-6 text-left sm:flex-row sm:items-center sm:justify-between sm:gap-3 sm:pr-8">
+            <DialogTitle className="font-book text-left text-lg font-bold">{audio ? "Audiobook releases" : "Releases"} — {book?.title}</DialogTitle>
             <Button className="h-8 shrink-0" disabled={autoGrabbing || loading} onClick={autoGrab}>
               <Zap className="mr-1.5 h-3.5 w-3.5" />
               {autoGrabbing ? "Grabbing…" : "Auto-grab best"}
             </Button>
           </div>
-          <p className="text-xs text-muted-foreground">
+          <p className="text-left text-xs text-muted-foreground">
             {audio
               ? "Best match first, by the audiobook profile: format order, then preferred terms. Searched in Prowlarr's audiobook category; grabs go to SABnzbd, and the finished download is filed beside the ebook and lined up for read-along."
               : "Best match first: format order, then preferred terms, then source priority. \"Auto-grab best\" takes the top-ranked candidate; usenet goes to SABnzbd, direct sources download immediately."}

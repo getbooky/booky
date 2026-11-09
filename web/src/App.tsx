@@ -148,7 +148,35 @@ function BookyApp({ user, usersExist, onLoggedOut }: { user: ApiUser | null; use
   const [addScopeOpen, setAddScopeOpen] = useState(false)
 
   useEffect(() => {
-    if (!window.history.state?.nav) {
+    // A link someone pasted or bookmarked — "#/book/12" — names a thing
+    // but carries no snapshot: look it up and go there. (Without this a
+    // shared link to a book opened Home.)
+    const m = /^#\/(book|read|listen|author|series)\/(\d+)/.exec(window.location.hash)
+    const fresh = !window.history.state?.nav
+    if (m && fresh) {
+      const id = Number(m[2])
+      const land = (next: Nav) => {
+        setNav(next)
+        window.history.replaceState({ nav: next }, "", routeFor(next))
+      }
+      const lookup = async () => {
+        if (m[1] === "author") {
+          const author = (await api.authors()).authors?.find(a => a.id === id)
+          if (author) land({ ...HOME, view: "author", author })
+        } else if (m[1] === "series") {
+          const series = (await api.series()).series?.find(sr => sr.id === id)
+          if (series) land({ ...HOME, view: "series", series })
+        } else {
+          const book = await api.book(id)
+          if (m[1] === "book") land({ ...HOME, view: "library", book })
+          else land({ ...HOME, view: "library", reader: book, readAlong: m[1] === "listen" })
+        }
+      }
+      // a link to something gone, or not shared with this account, stays
+      // where navFromHash put it
+      lookup().catch(() => {})
+    }
+    if (fresh && !m) {
       window.history.replaceState({ nav }, "", routeFor(nav))
     }
     const onPop = (e: PopStateEvent) => {
