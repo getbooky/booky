@@ -30,7 +30,9 @@ import { LoginView } from "@/views/Login"
 import { ReaderView } from "@/views/Reader"
 import { SetupWizard } from "@/components/SetupWizard"
 import { AccessProvider, accessFor } from "@/lib/access"
-import { delivery } from "@/api"
+import { delivery, SESSION_ENDED } from "@/api"
+import { Logo } from "@/components/Logo"
+import { Button } from "@/components/ui/button"
 
 type View = BrowseView | "settings"
 
@@ -94,7 +96,36 @@ const navFromHash = (): Nav => {
 // wall of failed requests.
 export default function App() {
   const me = useApi(() => delivery.me())
-  if (me.loading && !me.data) return null
+  // a request answered 401 mid-session: the session ended (it ran out, or
+  // the password was changed elsewhere) — ask again, which lands on sign-in
+  const reloadMe = me.reload
+  useEffect(() => {
+    const onEnded = () => reloadMe()
+    window.addEventListener(SESSION_ENDED, onEnded)
+    return () => window.removeEventListener(SESSION_ENDED, onEnded)
+  }, [reloadMe])
+  if (me.loading && !me.data) {
+    return (
+      <div className="flex min-h-screen items-center justify-center bg-background" aria-busy="true" aria-label="Loading Booky">
+        <div className="animate-pulse opacity-70"><Logo /></div>
+      </div>
+    )
+  }
+  // No answer about who's signed in: say so. Carrying on would show the
+  // app as if nobody needed to sign in — setup wizard, admin controls and
+  // all — with every request behind it failing.
+  if (!me.data) {
+    return (
+      <div className="flex min-h-screen items-center justify-center bg-background px-4">
+        <div className="w-full max-w-[360px] rounded-lg border bg-surface p-8 text-center">
+          <div className="mb-5 flex justify-center"><Logo /></div>
+          <p className="mb-1 text-[14px] font-medium">Can't reach Booky</p>
+          <p className="mb-5 text-[12.5px] text-muted-foreground">{me.error ?? "The server didn't answer."}</p>
+          <Button className="h-9" onClick={() => me.reload()}>Try again</Button>
+        </div>
+      </div>
+    )
+  }
   if (me.data?.authRequired && !me.data.user) {
     return (
       <>
@@ -128,6 +159,17 @@ function BookyApp({ user, usersExist, onLoggedOut }: { user: ApiUser | null; use
     return () => window.removeEventListener("popstate", onPop)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
+
+  // the tab (and the phone's app switcher, and history) says where you are
+  useEffect(() => {
+    const names: Record<string, string> = {
+      home: "Home", library: "Library", series: "Series", authors: "Authors",
+      calendar: "Calendar", wanted: "Wanted", activity: "Activity", settings: "Settings",
+    }
+    const where = nav.reader?.title ?? nav.book?.title ?? nav.author?.name ?? nav.series?.name
+      ?? nav.tag?.name ?? names[nav.view] ?? ""
+    document.title = where ? `${where} · Booky` : "Booky"
+  }, [nav])
 
   // Every navigation goes through here: a fresh snapshot (unspecified fields
   // reset to HOME) pushed as a history entry, so back always retraces steps.

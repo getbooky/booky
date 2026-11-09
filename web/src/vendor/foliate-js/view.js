@@ -358,7 +358,10 @@ export class View extends HTMLElement {
             const href = section?.resolveHref?.(href_) ?? href_
             if (book?.isExternal?.(href))
                 Promise.resolve(this.#emit('external-link', { a, href_ }, true))
-                    .then(x => x ? globalThis.open(href_, '_blank') : null)
+                    // Booky: only web links leave the book, and the page
+                    // they open gets no handle back to the app
+                    .then(x => x && /^(https?:|mailto:)/i.test(href_.trim())
+                        ? globalThis.open(href_, '_blank', 'noopener,noreferrer') : null)
                     .catch(e => console.error(e))
             else Promise.resolve(this.#emit('link', { a, href }, true))
                 .then(x => x ? this.goTo(href) : null)

@@ -105,7 +105,7 @@ func TestKindleSMTPWriteOnlyPerAccount(t *testing.T) {
 	}
 
 	// an edit without a password keeps the stored one
-	body := smtpBody("smtp2.example.com", 587, "sam@example.com")
+	body := smtpBody("smtp.example.com", 2525, "sam@example.com")
 	body["password"] = ""
 	rec, out = f.do(t, f.userCookie, "PUT", "/api/v1/kindle/smtp", body)
 	if rec.Code != http.StatusOK || out["config"].(map[string]any)["passwordSet"] != true {

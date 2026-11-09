@@ -497,5 +497,6 @@ func (s *Server) handleCalendar(w http.ResponseWriter, r *http.Request) {
 			upcoming[j], upcoming[j-1] = upcoming[j-1], upcoming[j]
 		}
 	}
+	s.access(r).redactTags(upcoming)
 	writeJSON(w, http.StatusOK, map[string]any{"books": upcoming})
 }

@@ -221,6 +221,11 @@ func (t Tools) Probe(ctx context.Context, path string, f Format) (*Probe, error)
 	if p.Duration <= 0 || math.IsNaN(p.Duration) || math.IsInf(p.Duration, 0) {
 		return nil, errors.New("audio has no readable duration")
 	}
+	// the longest audiobooks run a few days; a header claiming years would
+	// have everything downstream plan for it
+	if p.Duration > maxDuration {
+		return nil, fmt.Errorf("audio claims to be %.0f hours long", p.Duration/3600)
+	}
 	for _, c := range raw.Chapters {
 		s, err1 := strconv.ParseFloat(c.Start, 64)
 		e, err2 := strconv.ParseFloat(c.End, 64)
@@ -379,3 +384,6 @@ func (t Tools) Transcribe(ctx context.Context, chunk string, offset float64) ([]
 	}
 	return words, nil
 }
+
+// maxDuration is the longest audio accepted, in seconds: 500 hours.
+const maxDuration = 500 * 3600

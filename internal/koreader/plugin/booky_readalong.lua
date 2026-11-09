@@ -185,6 +185,26 @@ function U.firstUnitFrom(n, pageOf, page)
     return found
 end
 
+-- safeId is a whole, positive number: what the server's ids are. They end
+-- up in file paths and URLs here, so nothing else passes.
+function U.safeId(v)
+    return type(v) == "number" and v >= 1 and v == math.floor(v) and v < 2 ^ 53
+end
+
+-- safeFilename is a plain file name: no folders (so no way to climb out
+-- with ".."), nothing hidden. Dots inside are fine: "And Then....epub".
+-- Book files are written under the download folder by this name, and the
+-- name comes from the server.
+function U.safeFilename(name)
+    return type(name) == "string" and name ~= "" and #name <= 255
+        and not name:find("[/\\%z\1-\31]") and name:sub(1, 1) ~= "."
+end
+
+-- safeBook reports whether a book from the server's list can be handled.
+function U.safeBook(book)
+    return type(book) == "table" and U.safeId(book.id) and U.safeId(book.libraryId) and U.safeFilename(book.filename)
+end
+
 -- lastAtOrBefore returns the last index in 1..n for which atOrBefore(i)
 -- holds — a binary search, since the units run in reading order — or nil.
 function U.lastAtOrBefore(n, atOrBefore)
@@ -373,8 +393,8 @@ function M.new(plugin)
     -- the device's read-along files: <download dir>/.booky-readalong/<book>/
     function RA:dir(book_id)
         local root = plugin:downloadRoot()
-        if not root then return nil end
-        return root .. "/.booky-readalong/" .. tostring(book_id)
+        if not root or not U.safeId(book_id) then return nil end
+        return root .. "/.booky-readalong/" .. string.format("%d", book_id)
     end
 
     -- editionPath is where the read-along goes: the book's own file. The

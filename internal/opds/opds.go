@@ -143,6 +143,11 @@ var formatMIME = map[string]string{
 	"txt":  "text/plain",
 }
 
+// MimeFor is the content type a book file is served with, by format. An
+// unknown format is served as plain bytes — never left to be guessed from
+// the file's contents, which could be made to look like a web page.
+func MimeFor(format string) string { return mimeFor(strings.TrimPrefix(format, ".")) }
+
 func mimeFor(format string) string {
 	if m, ok := formatMIME[strings.ToLower(format)]; ok {
 		return m

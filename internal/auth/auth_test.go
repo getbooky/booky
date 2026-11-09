@@ -1,8 +1,11 @@
 package auth
 
 import (
+	"fmt"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/getbooky/booky/internal/db"
 )
@@ -241,5 +244,178 @@ func TestSessionTokensStoredHashed(t *testing.T) {
 	s.Logout(token)
 	if s.SessionUser(token) != nil {
 		t.Fatal("logout by raw token must kill the session")
+	}
+}
+
+// Each lockout is longer than the last, and one address failing against
+// many usernames is stopped as a whole.
+func TestLockoutEscalatesAndStopsSpraying(t *testing.T) {
+	s := testStore(t)
+	if _, err := s.CreateUser("alex", "correct horse battery", "admin", nil); err != nil {
+		t.Fatal(err)
+	}
+	key := userKey("web", "alex", "9.9.9.9")
+	var waits []time.Duration
+	for round := 0; round < 3; round++ {
+		for i := 0; i < maxFailures; i++ {
+			s.failed(key, ipKey("web", "9.9.9.9"))
+		}
+		s.mu.Lock()
+		st := s.failures[key]
+		waits = append(waits, time.Until(st.until).Round(time.Second))
+		st.until = time.Time{} // serve the lockout
+		s.failures[key] = st
+		s.mu.Unlock()
+	}
+	if waits[0] >= waits[1] || waits[1] >= waits[2] {
+		t.Errorf("lockouts don't grow: %v", waits)
+	}
+
+	// capital letters and stray spaces are the same account
+	if userKey("web", " Alex ", "1.1.1.1") != userKey("web", "alex", "1.1.1.1") {
+		t.Error("username variants count separately")
+	}
+
+	// one address, a different username every time
+	for i := 0; i < maxIPFailures; i++ {
+		_, _, _ = s.Login(fmt.Sprintf("guess%d", i), "password123", "7.7.7.7")
+	}
+	if _, _, err := s.Login("alex", "correct horse battery", "7.7.7.7"); err == nil {
+		t.Error("an address that failed against many usernames can still sign in")
+	}
+	if _, _, err := s.Login("alex", "correct horse battery", "6.6.6.6"); err != nil {
+		t.Errorf("another address is locked out too: %v", err)
+	}
+
+	// the table doesn't grow without bound
+	for i := 0; i < maxTracked+500; i++ {
+		s.failed(userKey("web", fmt.Sprint("u", i), "5.5.5.5"), ipKey("web", fmt.Sprint("ip", i)))
+	}
+	s.mu.Lock()
+	n := len(s.failures)
+	s.mu.Unlock()
+	if n > maxTracked+2 {
+		t.Errorf("failure table holds %d entries", n)
+	}
+}
+
+func TestUsernamesAndPasswords(t *testing.T) {
+	s := testStore(t)
+	if _, err := s.CreateUser("Alex", "correct horse battery", "admin", nil); err != nil {
+		t.Fatal(err)
+	}
+	for name, pw := range map[string]string{
+		"alex":       "correct horse battery", // same name, different capitals
+		"a:b":        "correct horse battery", // breaks Basic auth
+		"new\nline":  "correct horse battery",
+		"toolong-pw": strings.Repeat("x", 73),
+		"short-pw":   "1234567",
+	} {
+		if _, err := s.CreateUser(name, pw, "user", nil); err == nil {
+			t.Errorf("CreateUser(%q, %d chars) accepted", name, len(pw))
+		}
+	}
+	// signing in doesn't care about capitals
+	if _, u, err := s.Login("ALEX", "correct horse battery", "1.2.3.4"); err != nil || u.Username != "Alex" {
+		t.Errorf("Login(ALEX) = %v, %v", u, err)
+	}
+}
+
+func TestChangeAndResetPassword(t *testing.T) {
+	s := testStore(t)
+	id, err := s.CreateUser("alex", "correct horse battery", "admin", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	here, _, _ := s.Login("alex", "correct horse battery", "1.2.3.4")
+	elsewhere, _, _ := s.Login("alex", "correct horse battery", "4.3.2.1")
+
+	if err := s.ChangePassword(id, "wrong", "a brand new passphrase", here, "1.2.3.4"); err == nil {
+		t.Fatal("changed with the wrong current password")
+	}
+	if err := s.ChangePassword(id, "correct horse battery", "short", here, "1.2.3.4"); err == nil {
+		t.Fatal("changed to a short password")
+	}
+	if err := s.ChangePassword(id, "correct horse battery", "a brand new passphrase", here, "1.2.3.4"); err != nil {
+		t.Fatal(err)
+	}
+	if s.SessionUser(here) == nil {
+		t.Error("the session that changed the password was signed out")
+	}
+	if s.SessionUser(elsewhere) != nil {
+		t.Error("another session survived a password change")
+	}
+	if _, _, err := s.Login("alex", "correct horse battery", "1.2.3.4"); err == nil {
+		t.Error("the old password still works")
+	}
+	if _, err := s.OPDSLogin("alex", "a brand new passphrase", "1.2.3.4"); err != nil {
+		t.Errorf("OPDS with the new password: %v", err)
+	}
+
+	// an admin's reset signs the account out everywhere
+	if err := s.SetPassword(id, "reset by an admin 1"); err != nil {
+		t.Fatal(err)
+	}
+	if s.SessionUser(here) != nil {
+		t.Error("a session survived an admin's reset")
+	}
+	if _, err := s.OPDSLogin("alex", "a brand new passphrase", "1.2.3.4"); err == nil {
+		t.Error("OPDS still takes the password from before the reset")
+	}
+	if _, _, err := s.Login("alex", "reset by an admin 1", "1.2.3.4"); err != nil {
+		t.Errorf("sign in after reset: %v", err)
+	}
+
+	// wrong guesses of the current password are throttled like sign-ins
+	for i := 0; i < maxFailures; i++ {
+		_ = s.ChangePassword(id, "guess", "whatever it takes", "", "3.3.3.3")
+	}
+	if err := s.ChangePassword(id, "reset by an admin 1", "whatever it takes", "", "3.3.3.3"); err == nil {
+		t.Error("guessing the current password isn't throttled")
+	}
+}
+
+// Whatever an account owned goes with it: account ids are reused, so
+// anything left behind would belong to whoever is created next.
+func TestDeleteUserTakesItsThingsWithIt(t *testing.T) {
+	s := testStore(t)
+	if _, err := s.CreateUser("root", "correct horse battery", "admin", nil); err != nil {
+		t.Fatal(err)
+	}
+	id, err := s.CreateUser("sam", "another passphrase", "user", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, q := range []string{
+		`INSERT INTO devices (name, token, owner_user_id) VALUES ('kindle', 'tok', ?)`,
+		`INSERT INTO kindle_devices (owner_user_id, name, email) VALUES (?, 'k', 'sam@kindle.com')`,
+		`INSERT INTO kindle_smtp (owner_user_id, from_addr, host) VALUES (?, 'sam@example.com', 'smtp.example.com')`,
+		`INSERT INTO reading_progress (user_id, book_id) VALUES (?, 1)`,
+	} {
+		if _, err := s.db.Exec(q, id); err != nil {
+			t.Fatalf("%s: %v", q, err)
+		}
+	}
+	if _, err := s.OPDSLogin("sam", "another passphrase", "1.2.3.4"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.DeleteUser(id); err != nil {
+		t.Fatal(err)
+	}
+	for _, table := range []string{"devices", "kindle_devices", "kindle_smtp", "reading_progress", "sessions"} {
+		var n int
+		if err := s.db.QueryRow(`SELECT COUNT(*) FROM ` + table).Scan(&n); err != nil || n != 0 {
+			t.Errorf("%s: %d row(s) left (%v)", table, n, err)
+		}
+	}
+	// the next account gets the same id — and none of the old one's access
+	next, err := s.CreateUser("newcomer", "yet another passphrase", "user", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if next == id {
+		if _, err := s.OPDSLogin("sam", "another passphrase", "1.2.3.4"); err == nil {
+			t.Error("a deleted account's OPDS sign-in still works")
+		}
 	}
 }

@@ -23,6 +23,8 @@ import (
 	"net/smtp"
 	"strings"
 	"time"
+
+	"github.com/getbooky/booky/internal/safenet"
 )
 
 // Account is a resolved, sendable SMTP account (password decrypted).
@@ -33,6 +35,10 @@ type Account struct {
 	Security string // starttls | tls | none
 	Username string
 	Password string
+	// PublicOnly refuses to connect to a server that isn't on the public
+	// internet (loopback, private ranges): set for accounts whose owner
+	// isn't trusted to reach the host's own network.
+	PublicOnly bool
 }
 
 // Attachment is the file to send. Content is streamed, not buffered.
@@ -69,7 +75,10 @@ func (a Account) Send(ctx context.Context, to, subject, body string, att *Attach
 	}
 	addr := net.JoinHostPort(a.Host, fmt.Sprint(port))
 
-	d := net.Dialer{}
+	d := &net.Dialer{}
+	if a.PublicOnly {
+		d = safenet.Dialer(15 * time.Second)
+	}
 	conn, err := d.DialContext(ctx, "tcp", addr)
 	if err != nil {
 		return fmt.Errorf("connect %s: %w", addr, err)

@@ -13,6 +13,7 @@ import (
 	"github.com/getbooky/booky/internal/auth"
 	"github.com/getbooky/booky/internal/kindle"
 	"github.com/getbooky/booky/internal/mailer"
+	"github.com/getbooky/booky/internal/safenet"
 )
 
 // Send to Kindle. Devices follow KoReader's ownership rules — everyone
@@ -154,6 +155,9 @@ func (s *Server) handleKindleSMTPTest(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 	if err := acc.Send(ctx, strings.TrimSpace(req.To), "Booky test",
 		"Outgoing email works — books can reach this address.", nil); err != nil {
+		if errors.Is(err, safenet.ErrPrivate) {
+			err = errors.New("that mail server isn't on the public internet. Use your email provider's server (smtp.gmail.com, for one), or ask an admin to set it up")
+		}
 		writeErr(w, http.StatusBadGateway, err)
 		return
 	}
@@ -427,7 +431,7 @@ func (s *Server) sendToKindle(ctx context.Context, device *kindle.Device, bookID
 	if auto {
 		how = ", auto"
 	}
-	_ = s.Catalog.AddHistory(bookID, lib, "sent", fmt.Sprintf("%q → %s (%s)%s", book.Title, device.Name, device.Email, how))
+	_ = s.Catalog.AddHistory(bookID, lib, "sent", fmt.Sprintf("%q → %s%s", book.Title, device.Name, how))
 	return nil
 }
 

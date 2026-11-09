@@ -44,7 +44,9 @@ func Cover(fsPath string) ([]byte, string, error) {
 	if err != nil {
 		return nil, "", err
 	}
-	raw, err := io.ReadAll(rc)
+	// a package file is a few kilobytes; a crafted archive can claim one
+	// that inflates without end
+	raw, err := io.ReadAll(io.LimitReader(rc, maxOPFSize))
 	rc.Close()
 	if err != nil {
 		return nil, "", err

@@ -41,13 +41,15 @@ export function ManualImportDialog({ open, onOpenChange, bookId, bookTitle, defa
 }) {
   const { data } = useApi(() => api.libraries())
   const libraries = data?.libraries ?? []
+  const isAdmin = useIsAdmin()
   const [path, setPath] = useState("")
   const [file, setFile] = useState<File | null>(null)
   const [libraryId, setLibraryId] = useState(0)
   const [importing, setImporting] = useState(false)
   const targetLib = libraryId || defaultLibraryId || libraries[0]?.id || 0
   useEffect(() => {
-    if (open) { setPath(initialPath ?? ""); setFile(null) }
+    // naming a file on the server is the admin's way in; everyone else uploads
+    if (open) { setPath(isAdmin ? initialPath ?? "" : ""); setFile(null) }
   }, [open, initialPath])
 
   const run = async () => {
@@ -75,17 +77,20 @@ export function ManualImportDialog({ open, onOpenChange, bookId, bookTitle, defa
         <DialogHeader>
           <DialogTitle className="font-book text-lg font-bold">Manual import · {bookTitle}</DialogTitle>
           <p className="text-xs text-muted-foreground">
-            Point at a book file (or a folder containing one) under /data. It's renamed by your
-            naming scheme, metadata is written in, and it lands in the library — the source file is moved.
+            {isAdmin
+              ? "Point at a book file (or a folder containing one) under /data. It's renamed by your naming scheme, metadata is written in, and it lands in the library — the source file is moved."
+              : "Upload the book's file (EPUB, PDF, MOBI…). It's added to the library for this book."}
           </p>
         </DialogHeader>
         <div className="grid gap-4 py-1">
           <div>
-            <div className="mono-label mb-1.5 text-muted-foreground">File or folder on the server</div>
-            <PathInput value={path} onChange={setPath} placeholder="/data/downloads/…" />
-            <div className="mt-2 flex items-center gap-2">
-              <label className="inline-flex cursor-pointer items-center gap-1.5 text-[12.5px] text-muted-foreground hover:text-foreground">
-                <Upload className="h-3.5 w-3.5" /> …or upload from this device
+            <div className="mono-label mb-1.5 text-muted-foreground">{isAdmin ? "File or folder on the server" : "Book file"}</div>
+            {isAdmin && <PathInput value={path} onChange={setPath} placeholder="/data/downloads/…" />}
+            <div className={isAdmin ? "mt-2 flex items-center gap-2" : "flex flex-wrap items-center gap-2"}>
+              <label className={isAdmin
+                ? "inline-flex cursor-pointer items-center gap-1.5 text-[12.5px] text-muted-foreground hover:text-foreground"
+                : "inline-flex h-9 cursor-pointer items-center gap-1.5 rounded-md border px-3 text-[13px] font-medium hover:bg-surface2"}>
+                <Upload className="h-3.5 w-3.5" /> {isAdmin ? "…or upload from this device" : "Choose a file"}
                 <input type="file" accept=".epub,.azw3,.azw,.mobi,.pdf,.cbz,.cbr,.fb2" className="hidden"
                   onChange={e => { setFile(e.target.files?.[0] ?? null); setPath(""); e.target.value = "" }} />
               </label>
@@ -461,7 +466,7 @@ export function BookDetail({ book: initial, onBack, onChanged, onRead, onReadAlo
         toast.success("Grabbed the top-ranked release — watch Activity")
         onChanged()
       } else {
-        toast.warning("Nothing grabbable — every candidate failed or scored zero")
+        toast.warning("Nothing to grab right now. Booky keeps looking.")
       }
     } catch (e) {
       toast.error(`Auto-grab failed: ${e instanceof Error ? e.message : e}`)
@@ -479,7 +484,7 @@ export function BookDetail({ book: initial, onBack, onChanged, onRead, onReadAlo
         toast.success("Grabbed the best audiobook release — watch Activity")
         onChanged()
       } else {
-        toast.warning("No grabbable audiobook found")
+        toast.warning("No audiobook to grab right now. Booky keeps looking.")
       }
     } catch (e) {
       toast.error(`Auto-grab failed: ${e instanceof Error ? e.message : e}`)
@@ -644,7 +649,8 @@ export function BookDetail({ book: initial, onBack, onChanged, onRead, onReadAlo
           </DropdownMenu>
         )}
         </>)}
-        {format === "audiobook" && book.libraryId ? (<>
+        {/* grabbing over an audiobook the book already has replaces it: admin only */}
+        {format === "audiobook" && book.libraryId && (isAdmin || !book.audio) ? (<>
         <Tooltip>
           <TooltipTrigger asChild>
             <Button variant="outline" size="icon" className={ICON_BTN} aria-label="Auto-grab best audiobook"

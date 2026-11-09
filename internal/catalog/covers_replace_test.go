@@ -36,28 +36,28 @@ func readCover(t *testing.T, c *CoverCache, id int64) string {
 // while Replace takes the provider's current art. "Refresh metadata" leans on
 // Replace, which is why a cover changed at the source now arrives.
 func TestEnsureKeepsCachedCoverButReplaceUpdatesIt(t *testing.T) {
-	body := "first-image"
+	body := "GIF89a first-image"
 	srv := imageServer(t, &body)
 	c := NewCoverCache(filepath.Join(t.TempDir(), "covers"))
 
 	if err := c.Ensure(context.Background(), 7, srv.URL); err != nil {
 		t.Fatalf("Ensure: %v", err)
 	}
-	if got := readCover(t, c, 7); got != "first-image" {
+	if got := readCover(t, c, 7); got != "GIF89a first-image" {
 		t.Fatalf("cached %q, want the downloaded bytes", got)
 	}
 
-	body = "second-image"
+	body = "GIF89a second-image"
 	if err := c.Ensure(context.Background(), 7, srv.URL); err != nil {
 		t.Fatalf("Ensure: %v", err)
 	}
-	if got := readCover(t, c, 7); got != "first-image" {
+	if got := readCover(t, c, 7); got != "GIF89a first-image" {
 		t.Errorf("Ensure re-downloaded a cached cover: %q", got)
 	}
 	if err := c.Replace(context.Background(), 7, srv.URL); err != nil {
 		t.Fatalf("Replace: %v", err)
 	}
-	if got := readCover(t, c, 7); got != "second-image" {
+	if got := readCover(t, c, 7); got != "GIF89a second-image" {
 		t.Errorf("Replace kept the stale cover: %q", got)
 	}
 }
@@ -66,7 +66,7 @@ func TestEnsureKeepsCachedCoverButReplaceUpdatesIt(t *testing.T) {
 // delete first, so a typo'd URL in Edit metadata wiped the cover it was
 // meant to replace.
 func TestReplaceKeepsOldCoverWhenFetchFails(t *testing.T) {
-	body := "good-image"
+	body := "GIF89a good-image"
 	srv := imageServer(t, &body)
 	c := NewCoverCache(filepath.Join(t.TempDir(), "covers"))
 	if err := c.Ensure(context.Background(), 3, srv.URL); err != nil {
@@ -80,7 +80,7 @@ func TestReplaceKeepsOldCoverWhenFetchFails(t *testing.T) {
 	if c.Path(3) == "" {
 		t.Fatal("the old cover was deleted by a failed replace")
 	}
-	if got := readCover(t, c, 3); got != "good-image" {
+	if got := readCover(t, c, 3); got != "GIF89a good-image" {
 		t.Errorf("cover = %q, want the original to survive", got)
 	}
 
@@ -93,7 +93,7 @@ func TestReplaceKeepsOldCoverWhenFetchFails(t *testing.T) {
 }
 
 func TestReplaceIgnoresEmptyURL(t *testing.T) {
-	body := "keep-me"
+	body := "GIF89a keep-me"
 	srv := imageServer(t, &body)
 	c := NewCoverCache(filepath.Join(t.TempDir(), "covers"))
 	if err := c.Ensure(context.Background(), 1, srv.URL); err != nil {
@@ -102,7 +102,27 @@ func TestReplaceIgnoresEmptyURL(t *testing.T) {
 	if err := c.Replace(context.Background(), 1, ""); err != nil {
 		t.Fatalf("Replace with no url: %v", err)
 	}
-	if got := readCover(t, c, 1); got != "keep-me" {
+	if got := readCover(t, c, 1); got != "GIF89a keep-me" {
 		t.Errorf("a provider that returned no cover url must not clear the cover: %q", got)
+	}
+}
+
+// A cover URL that answers with anything but an image is not kept: a cover
+// can't be used to fetch a web page or an API's answer and read it back.
+func TestCoverMustBeAnImage(t *testing.T) {
+	for _, body := range []string{
+		`{"apikey":"secret","status":"ok"}`,
+		"<html><body>router admin</body></html>",
+		"plain text",
+	} {
+		b := body
+		srv := imageServer(t, &b)
+		c := NewCoverCache(filepath.Join(t.TempDir(), "covers"))
+		if err := c.Ensure(context.Background(), 1, srv.URL); err == nil {
+			t.Errorf("kept %q as a cover", body)
+		}
+		if c.Path(1) != "" {
+			t.Errorf("a non-image was cached for %q", body)
+		}
 	}
 }

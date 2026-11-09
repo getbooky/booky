@@ -61,6 +61,19 @@ check("nextWake stream end first", U.nextWake(units, 1, 1.5, 2), 0.5)
 check("nextWake clamp high", U.nextWake({ { begin = 0 } }, 1, 0, 1000), 5)
 check("nextWake clamp low", U.nextWake(units, 1, 2.49, 100), 0.05)
 
+-- what the server sends becomes paths on the device
+check("safe book", U.safeBook({ id = 7, libraryId = 1, filename = "Alice - Carroll.epub" }), true)
+check("id not a number", U.safeBook({ id = "7/../../x", libraryId = 1, filename = "a.epub" }), false)
+check("fractional id", U.safeBook({ id = 7.5, libraryId = 1, filename = "a.epub" }), false)
+check("filename climbs out", U.safeBook({ id = 7, libraryId = 1, filename = "../../koreader/plugins/x.lua" }), false)
+check("filename with a folder", U.safeBook({ id = 7, libraryId = 1, filename = "a/b.epub" }), false)
+check("filename with backslash", U.safeBook({ id = 7, libraryId = 1, filename = "a\\b.epub" }), false)
+check("hidden filename", U.safeBook({ id = 7, libraryId = 1, filename = ".profile" }), false)
+check("dots inside a name are fine", U.safeBook({ id = 7, libraryId = 1, filename = "And Then....epub" }), true)
+check("just dot-dot", U.safeBook({ id = 7, libraryId = 1, filename = ".." }), false)
+check("no filename", U.safeBook({ id = 7, libraryId = 1 }), false)
+check("not a table", U.safeBook("x"), false)
+
 -- lastAtOrBefore: the sentence holding a position
 local starts = { 10, 20, 30, 40 }
 check("lastAtOrBefore middle", U.lastAtOrBefore(4, function(i) return starts[i] <= 25 end), 2)

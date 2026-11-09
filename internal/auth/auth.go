@@ -19,9 +19,22 @@ import (
 
 const (
 	sessionTTL = 30 * 24 * time.Hour
-	// after this many consecutive failures a username/IP pair must wait
+	// after this many consecutive failures a username/IP pair must wait;
+	// each further lockout doubles, up to maxLockout, until a sign-in works
 	maxFailures = 5
 	lockout     = 30 * time.Second
+	maxLockout  = 15 * time.Minute
+	// one address failing against any mix of usernames (password spraying)
+	// is stopped as a whole
+	maxIPFailures = 20
+	ipLockout     = 5 * time.Minute
+	maxIPLockout  = time.Hour
+	// the failure table is pruned past this many entries, so a flood of
+	// made-up usernames can't grow it without bound
+	maxTracked = 10000
+	// bcrypt reads at most 72 bytes of a password
+	minPassword = 8
+	maxPassword = 72
 )
 
 type Store struct {
@@ -42,7 +55,106 @@ type Store struct {
 
 type failureState struct {
 	count int
+	level int // lockouts so far without a success: each one doubles the wait
 	until time.Time
+	last  time.Time
+}
+
+// userKey and ipKey name the two counters a sign-in attempt is held to.
+// scope keeps the web login and OPDS apart, so a misconfigured reader app
+// can't lock its owner out of the web UI.
+func userKey(scope, username, ip string) string {
+	return scope + "\nu\n" + strings.ToLower(strings.TrimSpace(username)) + "\n" + ip
+}
+
+func ipKey(scope, ip string) string { return scope + "\nip\n" + ip }
+
+// locked reports whether any of the counters is serving a lockout.
+func (s *Store) locked(keys ...string) bool {
+	now := time.Now()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, k := range keys {
+		if now.Before(s.failures[k].until) {
+			return true
+		}
+	}
+	return false
+}
+
+// failed counts a wrong sign-in against the username+address pair and the
+// address as a whole.
+func (s *Store) failed(user, ip string) {
+	now := time.Now()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	bump := func(key string, limit int, base, ceiling time.Duration) {
+		st := s.failures[key]
+		st.count++
+		st.last = now
+		if st.count >= limit {
+			wait := base << min(st.level, 10)
+			if wait > ceiling {
+				wait = ceiling
+			}
+			st.until = now.Add(wait)
+			st.count = 0
+			st.level++
+		}
+		s.failures[key] = st
+	}
+	bump(user, maxFailures, lockout, maxLockout)
+	bump(ip, maxIPFailures, ipLockout, maxIPLockout)
+	if len(s.failures) > maxTracked {
+		for k, st := range s.failures {
+			if now.After(st.until) && now.Sub(st.last) > maxIPLockout {
+				delete(s.failures, k)
+			}
+		}
+		// still full of live entries: drop arbitrary ones rather than grow
+		for k := range s.failures {
+			if len(s.failures) <= maxTracked {
+				break
+			}
+			delete(s.failures, k)
+		}
+	}
+}
+
+// succeeded clears the pair's counter. The address-wide one is left to run
+// out on its own: one good sign-in doesn't excuse a spray of bad ones.
+func (s *Store) succeeded(user string) {
+	s.mu.Lock()
+	delete(s.failures, user)
+	s.mu.Unlock()
+}
+
+// checkPassword is the policy for a new password.
+func checkPassword(password string) error {
+	if len(password) < minPassword {
+		return fmt.Errorf("password must be at least %d characters", minPassword)
+	}
+	if len(password) > maxPassword {
+		return fmt.Errorf("password must be at most %d characters", maxPassword)
+	}
+	return nil
+}
+
+// checkUsername keeps usernames to something that reads the same everywhere
+// it appears: the UI, OPDS Basic auth (no colon), tag names, logs.
+func checkUsername(username string) error {
+	if username == "" {
+		return fmt.Errorf("username required")
+	}
+	if len(username) > 64 {
+		return fmt.Errorf("username must be at most 64 characters")
+	}
+	for _, r := range username {
+		if r < 0x20 || r == 0x7f || r == ':' {
+			return fmt.Errorf("username can't contain colons or control characters")
+		}
+	}
+	return nil
 }
 
 type opdsHit struct {
@@ -101,8 +213,17 @@ func (s *Store) Enabled() bool {
 // what it adds for itself and nothing else until an admin shares more.
 func (s *Store) CreateUser(username, password, role string, tagIDs []int64) (int64, error) {
 	username = strings.TrimSpace(username)
-	if username == "" || len(password) < 8 {
-		return 0, fmt.Errorf("username required and password must be at least 8 characters")
+	if err := checkUsername(username); err != nil {
+		return 0, err
+	}
+	if err := checkPassword(password); err != nil {
+		return 0, err
+	}
+	// usernames are one name however they're capitalised: "Alex" and "alex"
+	// as two accounts is a mix-up waiting to happen
+	var taken int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM users WHERE username = ? COLLATE NOCASE`, username).Scan(&taken); err == nil && taken > 0 {
+		return 0, fmt.Errorf("that username is taken")
 	}
 	if role != "admin" && role != "user" {
 		return 0, fmt.Errorf("role must be admin or user")
@@ -268,8 +389,42 @@ func (s *Store) DeleteUser(id int64) error {
 			return fmt.Errorf("cannot delete the last admin")
 		}
 	}
-	_, err := s.db.Exec(`DELETE FROM users WHERE id = ?`, id)
-	return err
+	// Everything the account owned goes with it. Sessions, tags and added
+	// authors follow by foreign key; the rest is keyed by a bare id, and
+	// account ids are reused — left behind, a removed person's e-reader
+	// token, Kindle addresses and mail password would come back to life
+	// under whoever is created next.
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback() //nolint:errcheck // no-op once committed
+	for _, q := range []string{
+		`DELETE FROM devices WHERE owner_user_id = ?`,
+		`DELETE FROM kindle_devices WHERE owner_user_id = ?`,
+		`DELETE FROM kindle_smtp WHERE owner_user_id = ?`,
+		`DELETE FROM reading_progress WHERE user_id = ?`,
+		`DELETE FROM listen_progress WHERE user_id = ?`,
+		`DELETE FROM settings WHERE key = 'user_scopes_' || ?`,
+		`DELETE FROM users WHERE id = ?`,
+	} {
+		if _, err := tx.Exec(q, id); err != nil {
+			return err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	// a cached OPDS sign-in mustn't outlive the account (or greet a new
+	// one that gets its id)
+	s.opdsMu.Lock()
+	for k, h := range s.opdsOK {
+		if h.userID == id {
+			delete(s.opdsOK, k)
+		}
+	}
+	s.opdsMu.Unlock()
+	return nil
 }
 
 // OPDSLogin checks Basic credentials from a reader app against the account's
@@ -282,12 +437,8 @@ func (s *Store) OPDSLogin(username, password, ip string) (*User, error) {
 	// the lockout comes first, before even the cache: otherwise, while the
 	// owner's reader keeps a cached sign-in warm, guesses from a locked-out
 	// IP would still be checked against it — at hash speed, unthrottled
-	key := "opds\n" + username + "\n" + ip
-	s.mu.Lock()
-	st := s.failures[key]
-	locked := time.Now().Before(st.until)
-	s.mu.Unlock()
-	if locked {
+	key, addr := userKey("opds", username, ip), ipKey("opds", ip)
+	if s.locked(key, addr) {
 		return nil, fmt.Errorf("too many attempts — try again shortly")
 	}
 
@@ -299,26 +450,18 @@ func (s *Store) OPDSLogin(username, password, ip string) (*User, error) {
 	if ok && time.Now().Before(hit.until) {
 		var current string
 		err := s.db.QueryRow(`SELECT password_hash FROM users WHERE id = ?`, hit.userID).Scan(&current)
-		if u := s.UserByID(hit.userID); err == nil && current == hit.hash && u != nil && u.Username == username {
+		if u := s.UserByID(hit.userID); err == nil && current == hit.hash && u != nil && strings.EqualFold(u.Username, username) {
 			return u, nil
 		}
 	}
 	fail := func() (*User, error) {
-		s.mu.Lock()
-		st := s.failures[key]
-		st.count++
-		if st.count >= maxFailures {
-			st.until = time.Now().Add(lockout)
-			st.count = 0
-		}
-		s.failures[key] = st
-		s.mu.Unlock()
+		s.failed(key, addr)
 		return nil, fmt.Errorf("wrong username or password")
 	}
 
 	var id int64
 	var hash string
-	if err := s.db.QueryRow(`SELECT id, password_hash FROM users WHERE username = ?`, username).
+	if err := s.db.QueryRow(`SELECT id, password_hash FROM users WHERE username = ? COLLATE NOCASE`, username).
 		Scan(&id, &hash); err != nil {
 		// burn comparable time so a missing account isn't distinguishable
 		// from a wrong password
@@ -328,15 +471,19 @@ func (s *Store) OPDSLogin(username, password, ip string) (*User, error) {
 	if bcrypt.CompareHashAndPassword([]byte(hash), []byte(password)) != nil {
 		return fail()
 	}
-	s.mu.Lock()
-	delete(s.failures, key)
-	s.mu.Unlock()
+	s.succeeded(key)
 	u := s.UserByID(id)
 	if u == nil {
 		return fail()
 	}
 	s.opdsMu.Lock()
-	s.opdsOK[cacheKey] = opdsHit{userID: id, hash: hash, until: time.Now().Add(opdsCacheTTL)}
+	now := time.Now()
+	for k, h := range s.opdsOK { // expired sign-ins go as new ones arrive
+		if now.After(h.until) {
+			delete(s.opdsOK, k)
+		}
+	}
+	s.opdsOK[cacheKey] = opdsHit{userID: id, hash: hash, until: now.Add(opdsCacheTTL)}
 	s.opdsMu.Unlock()
 	return u, nil
 }
@@ -344,31 +491,19 @@ func (s *Store) OPDSLogin(username, password, ip string) (*User, error) {
 // Login verifies credentials (rate-limited per username+IP) and mints a
 // session token.
 func (s *Store) Login(username, password, ip string) (token string, user *User, err error) {
-	key := username + "\n" + ip
-	s.mu.Lock()
-	st := s.failures[key]
-	if time.Now().Before(st.until) {
-		s.mu.Unlock()
+	key, addr := userKey("web", username, ip), ipKey("web", ip)
+	if s.locked(key, addr) {
 		return "", nil, fmt.Errorf("too many attempts — try again shortly")
 	}
-	s.mu.Unlock()
 
 	fail := func() (string, *User, error) {
-		s.mu.Lock()
-		st := s.failures[key]
-		st.count++
-		if st.count >= maxFailures {
-			st.until = time.Now().Add(lockout)
-			st.count = 0
-		}
-		s.failures[key] = st
-		s.mu.Unlock()
+		s.failed(key, addr)
 		return "", nil, fmt.Errorf("wrong username or password")
 	}
 
 	var u User
 	var hash string
-	err = s.db.QueryRow(`SELECT id, username, role, created_at, password_hash FROM users WHERE username = ?`,
+	err = s.db.QueryRow(`SELECT id, username, role, created_at, password_hash FROM users WHERE username = ? COLLATE NOCASE`,
 		strings.TrimSpace(username)).Scan(&u.ID, &u.Username, &u.Role, &u.CreatedAt, &hash)
 	if err != nil {
 		// burn comparable time so a missing user isn't distinguishable
@@ -379,9 +514,7 @@ func (s *Store) Login(username, password, ip string) (token string, user *User, 
 		return fail()
 	}
 
-	s.mu.Lock()
-	delete(s.failures, key)
-	s.mu.Unlock()
+	s.succeeded(key)
 
 	if err := s.fillTags(&u); err != nil {
 		return "", nil, err
@@ -396,6 +529,78 @@ func (s *Store) Login(username, password, ip string) (token string, user *User, 
 		return "", nil, err
 	}
 	return token, &u, nil
+}
+
+// ChangePassword lets an account set a new password by proving the current
+// one. Every other session of the account is signed out — if the old
+// password leaked, whoever used it is out too — and the session doing the
+// change (keepToken) stays. Wrong guesses of the current password count
+// against the same lockout as sign-ins.
+func (s *Store) ChangePassword(userID int64, current, next, keepToken, ip string) error {
+	var username, hash string
+	if err := s.db.QueryRow(`SELECT username, password_hash FROM users WHERE id = ?`, userID).Scan(&username, &hash); err != nil {
+		return fmt.Errorf("account not found")
+	}
+	key, addr := userKey("web", username, ip), ipKey("web", ip)
+	if s.locked(key, addr) {
+		return fmt.Errorf("too many attempts — try again shortly")
+	}
+	if bcrypt.CompareHashAndPassword([]byte(hash), []byte(current)) != nil {
+		s.failed(key, addr)
+		return fmt.Errorf("the current password is wrong")
+	}
+	if err := checkPassword(next); err != nil {
+		return err
+	}
+	if next == current {
+		return fmt.Errorf("the new password is the same as the current one")
+	}
+	return s.setPassword(userID, next, keepToken)
+}
+
+// SetPassword is an admin's reset: no current password needed, and every
+// session of the account is signed out.
+func (s *Store) SetPassword(userID int64, next string) error {
+	if err := checkPassword(next); err != nil {
+		return err
+	}
+	return s.setPassword(userID, next, "")
+}
+
+func (s *Store) setPassword(userID int64, next, keepToken string) error {
+	hash, err := bcrypt.GenerateFromPassword([]byte(next), bcrypt.DefaultCost)
+	if err != nil {
+		return err
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback() //nolint:errcheck // no-op once committed
+	res, err := tx.Exec(`UPDATE users SET password_hash = ? WHERE id = ?`, string(hash), userID)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return fmt.Errorf("account not found")
+	}
+	keep := ""
+	if keepToken != "" {
+		keep = HashToken(keepToken)
+	}
+	if _, err := tx.Exec(`DELETE FROM sessions WHERE user_id = ? AND token != ?`, userID, keep); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// PruneSessions removes expired sessions; run at startup and now and then.
+func (s *Store) PruneSessions() (int64, error) {
+	res, err := s.db.Exec(`DELETE FROM sessions WHERE expires_at < ?`, time.Now().UTC().Format(time.RFC3339))
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
 }
 
 func (s *Store) Logout(token string) {

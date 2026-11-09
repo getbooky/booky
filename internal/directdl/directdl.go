@@ -28,6 +28,8 @@ import (
 	"time"
 
 	"github.com/getbooky/booky/internal/release"
+
+	"github.com/getbooky/booky/internal/safenet"
 )
 
 // Mirrors supplies the current Anna's Archive domains (first working wins).
@@ -80,7 +82,8 @@ func (c *Client) get(ctx context.Context, url string) (*http.Response, error) {
 		return nil, err
 	}
 	req.Header.Set("User-Agent", c.ua)
-	return c.http.Do(req)
+	res, err := c.http.Do(req)
+	return res, safenet.Scrub(err)
 }
 
 func (c *Client) fetchText(ctx context.Context, url string) (string, error) {

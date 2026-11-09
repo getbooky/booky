@@ -77,7 +77,7 @@ func TestSMTPRoundTripAndPasswordKeep(t *testing.T) {
 	}
 
 	// editing without a password keeps the stored one
-	cfg.Host = "smtp2.example.com"
+	cfg.Port = 2525
 	if err := s.SetSMTP(7, cfg, ""); err != nil {
 		t.Fatal(err)
 	}
@@ -85,8 +85,33 @@ func TestSMTPRoundTripAndPasswordKeep(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if acc.Host != "smtp2.example.com" || acc.Password != "app-pass" {
+	if acc.Port != 2525 || acc.Password != "app-pass" {
 		t.Fatalf("resolve after keep-edit = %+v", acc)
+	}
+	// ...but not for a different server, or one with encryption dropped:
+	// the stored password was given for the stored server, and would
+	// otherwise be sent wherever the form now points
+	moved := cfg
+	moved.Host = "smtp.elsewhere.example"
+	if err := s.SetSMTP(7, moved, ""); err == nil {
+		t.Fatal("the stored password was kept for a different server")
+	}
+	plain := cfg
+	plain.Security = "none"
+	if err := s.SetSMTP(7, plain, ""); err == nil {
+		t.Fatal("the stored password was kept with encryption turned off")
+	}
+	if err := s.SetSMTP(7, moved, "new-pass"); err != nil {
+		t.Fatalf("changing server with the password given: %v", err)
+	}
+	cfg = moved
+	// nobody is trusted by default: mail only goes to the public internet
+	if acc, _ := s.ResolveAccount(7); !acc.PublicOnly {
+		t.Error("an account with no trust set may reach private addresses")
+	}
+	s.Trusted = func(id int64) bool { return id == 7 }
+	if acc, _ := s.ResolveAccount(7); acc.PublicOnly {
+		t.Error("a trusted owner is held to public addresses")
 	}
 
 	// a new password replaces

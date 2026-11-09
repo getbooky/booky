@@ -99,17 +99,44 @@ export interface ReviewFile {
   confidence: number
 }
 
+/** Fired when a request comes back 401 while the app thinks it's signed in:
+ * the session ran out, or was ended elsewhere. The app listens and shows
+ * the sign-in screen instead of a toast per failed request. */
+export const SESSION_ENDED = "booky:session-ended"
+
+/** What to tell a person when the server gave no message of its own. */
+function plainError(status: number): string {
+  if (status === 401) return "Sign in again to continue."
+  if (status === 403) return "You don't have access to that."
+  if (status === 404) return "That wasn't found."
+  if (status === 413) return "That file is too large."
+  if (status === 429) return "Too many requests — wait a moment and try again."
+  if (status === 502 || status === 503 || status === 504) return "Booky isn't responding right now. Try again in a moment."
+  return `Something went wrong (${status}). Try again.`
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(path, {
-    headers: init?.body ? { "Content-Type": "application/json" } : undefined,
-    ...init,
-  })
+  let res: Response
+  try {
+    res = await fetch(path, {
+      headers: init?.body ? { "Content-Type": "application/json" } : undefined,
+      ...init,
+    })
+  } catch {
+    // fetch only rejects when nothing came back at all
+    throw new Error("Can't reach Booky. Check your connection and try again.")
+  }
   if (!res.ok) {
-    let message = `${res.status}`
+    let message = plainError(res.status)
     try {
       const body = await res.json()
-      if (body.error) message = body.error
+      // server messages are written lower-case, as Go errors are; shown
+      // to a person they start a sentence
+      if (body.error) message = body.error.charAt(0).toUpperCase() + body.error.slice(1)
     } catch { /* non-json error body */ }
+    if (res.status === 401 && !path.startsWith("/api/v1/auth/")) {
+      window.dispatchEvent(new Event(SESSION_ENDED))
+    }
     throw new Error(message)
   }
   return res.json() as Promise<T>
@@ -541,6 +568,12 @@ export const delivery = {
       method: "PUT", body: JSON.stringify({ tagIds }),
     }),
   deleteUser: (id: number) => request(`/api/v1/users/${id}`, { method: "DELETE" }),
+  /** Change the signed-in account's own password; its other sessions are signed out. */
+  changePassword: (current: string, next: string) =>
+    request("/api/v1/auth/password", { method: "PUT", body: JSON.stringify({ current, new: next }) }),
+  /** Admin: set a new password for an account, signing it out everywhere. */
+  resetPassword: (id: number, password: string) =>
+    request(`/api/v1/users/${id}/password`, { method: "PUT", body: JSON.stringify({ password }) }),
 
   /** Where the signed-in account's OPDS feed lives; reader apps sign in
    * with the account's usual login. */

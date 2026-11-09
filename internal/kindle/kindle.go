@@ -19,6 +19,12 @@ import (
 type Store struct {
 	db     *sql.DB
 	keeper *secrets.Keeper
+	// Trusted reports whether an owner may point their outgoing email at
+	// any server, private addresses included — admins, who run the place.
+	// Everyone else's mail only connects to the public internet, so a mail
+	// server setting can't be used to poke at the host's own network. Nil
+	// trusts nobody.
+	Trusted func(ownerID int64) bool
 }
 
 func New(database *sql.DB, keeper *secrets.Keeper) *Store {
@@ -273,6 +279,15 @@ func (s *Store) SetSMTP(ownerID int64, cfg SMTPConfig, password string) error {
 			return err
 		}
 		ct = sealed
+	} else {
+		// the stored password was given for the stored server: it isn't
+		// sent to a different one. Changing the server (or dropping
+		// encryption) means typing the password again.
+		var host, security string
+		err := s.db.QueryRow(`SELECT host, security FROM kindle_smtp WHERE owner_user_id = ? AND password_ct IS NOT NULL`, ownerID).Scan(&host, &security)
+		if err == nil && (!strings.EqualFold(host, cfg.Host) || (cfg.Security == "none" && security != "none")) {
+			return fmt.Errorf("enter the password again to change the mail server or its security")
+		}
 	}
 	_, err := s.db.Exec(`INSERT INTO kindle_smtp (owner_user_id, from_addr, host, port, security, username, password_ct, updated_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))
@@ -313,6 +328,7 @@ func (s *Store) ResolveAccount(ownerID int64) (mailer.Account, error) {
 		}
 		acc.Password = pw
 	}
+	acc.PublicOnly = s.Trusted == nil || !s.Trusted(ownerID)
 	return acc, nil
 }
 

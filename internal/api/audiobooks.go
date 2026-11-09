@@ -14,6 +14,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/getbooky/booky/internal/audiobook"
 	"github.com/getbooky/booky/internal/importer"
@@ -169,6 +170,21 @@ func (s *Server) handleAudiobookUpload(w http.ResponseWriter, r *http.Request) {
 	}
 	if st := s.importState(id); st != nil && !st.done {
 		writeErr(w, http.StatusConflict, errors.New("an audiobook is already being added to this book"))
+		return
+	}
+	// Audiobooks are gigabytes, and an upload is on disk before anything
+	// can be said about it: one at a time per book, and a few at a time in
+	// all, so a handful of requests can't fill the disk in parallel.
+	if _, busy := s.audioUploads.LoadOrStore(id, true); busy {
+		writeErr(w, http.StatusConflict, errors.New("an audiobook is already being uploaded for this book"))
+		return
+	}
+	defer s.audioUploads.Delete(id)
+	select {
+	case audioUploadSlots <- struct{}{}:
+		defer func() { <-audioUploadSlots }()
+	default:
+		writeErr(w, http.StatusTooManyRequests, errors.New("other audiobooks are being uploaded right now — try again in a few minutes"))
 		return
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, maxAudiobookUpload)
@@ -577,6 +593,16 @@ func (s *Server) installAudio(ctx context.Context, bookID int64, parts []readalo
 	if err != nil {
 		return err.Error(), err
 	}
+	// joining parts is an ffmpeg run over hours of audio: a couple at a
+	// time, the rest wait their turn, and none runs for ever
+	select {
+	case audioJoinSlots <- struct{}{}:
+	case <-ctx.Done():
+		return "The audiobook import was cancelled.", ctx.Err()
+	}
+	defer func() { <-audioJoinSlots }()
+	ctx, cancel := context.WithTimeout(ctx, 3*time.Hour)
+	defer cancel()
 	inst, err := audiobook.Install(ctx, s.ReadAlong.Tools, parts, home, move)
 	if err != nil {
 		log.Printf("audiobook: import for book %d: %v", bookID, err) //nolint:gosec // G706: a number and our own error

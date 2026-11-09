@@ -262,10 +262,16 @@ func (s *Server) handleAddBook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	meta := s.Chain.Enrich(r.Context(), req.Meta.BookMeta)
-	bookID, err := s.Catalog.UpsertBook(meta)
-	if err != nil {
-		writeErr(w, http.StatusInternalServerError, err)
-		return
+	// The metadata in the request is whatever the browser sent. For a new
+	// book that's the search result being added. For a book the catalog
+	// already has, it would rewrite a record other people share — editing
+	// metadata is the admin's job — so a plain user's add leaves it alone.
+	bookID, exists := s.Catalog.ExistingBook(meta)
+	if !exists || a.admin() {
+		if bookID, err = s.Catalog.UpsertBook(meta); err != nil {
+			writeErr(w, http.StatusInternalServerError, err)
+			return
+		}
 	}
 	if err := s.Catalog.AddToLibrary(bookID, req.LibraryID, req.Monitored); err != nil {
 		writeErr(w, http.StatusInternalServerError, err)
@@ -310,6 +316,7 @@ func (s *Server) handleAddBook(w http.ResponseWriter, r *http.Request) {
 			}
 		}(bookID, req.LibraryID, meta.Title)
 	}
+	a.redactBook(book)
 	writeJSON(w, http.StatusCreated, book)
 }
 

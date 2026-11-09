@@ -48,6 +48,7 @@ func (s *Server) handleEditBook(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusNotFound, errors.New("book not found"))
 		return
 	}
+	s.access(r).redactBook(book)
 	writeJSON(w, http.StatusOK, book)
 }
 
@@ -330,6 +331,7 @@ func (s *Server) handleReviewMatch(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, err)
 		return
 	}
+	s.access(r).redactBook(book)
 	writeJSON(w, http.StatusOK, book)
 }
 

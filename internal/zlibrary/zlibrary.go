@@ -19,6 +19,8 @@ import (
 	"time"
 
 	"github.com/getbooky/booky/internal/release"
+
+	"github.com/getbooky/booky/internal/safenet"
 )
 
 type Client struct {
@@ -119,6 +121,7 @@ func (c *Client) login(ctx context.Context) error {
 		}
 		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 		res, err := c.http.Do(req)
+		err = safenet.Scrub(err)
 		if err != nil {
 			lastErr = err
 			continue
@@ -190,6 +193,7 @@ func (c *Client) Test(ctx context.Context) (left, limit int, err error) {
 		return 0, 0, err
 	}
 	res, err := c.http.Do(req)
+	err = safenet.Scrub(err)
 	if err != nil {
 		return 0, 0, err
 	}
@@ -236,6 +240,7 @@ func (c *Client) Search(ctx context.Context, query string) ([]release.Release, e
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	res, err := c.http.Do(req)
+	err = safenet.Scrub(err)
 	if err != nil {
 		return nil, err
 	}
@@ -293,6 +298,7 @@ func (c *Client) Download(ctx context.Context, token, dir, wantFormat string) (s
 		return "", err
 	}
 	res, err := c.http.Do(req)
+	err = safenet.Scrub(err)
 	if err != nil {
 		return "", err
 	}
@@ -326,6 +332,7 @@ func (c *Client) fetchFile(ctx context.Context, fileURL, dir, wantFormat string)
 		return "", err
 	}
 	res, err := c.http.Do(req)
+	err = safenet.Scrub(err)
 	if err != nil {
 		return "", err
 	}

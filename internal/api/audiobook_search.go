@@ -63,6 +63,7 @@ func (s *Server) handleAudioReleases(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadGateway, err)
 		return
 	}
+	s.signReleases(bookID, "audiobook", rels)
 	writeJSON(w, http.StatusOK, map[string]any{"releases": rels, "sources": sources})
 }
 
@@ -82,6 +83,9 @@ func (s *Server) handleAudioGrab(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !s.mayReplaceAudio(w, r, bookID) {
+		return
+	}
+	if !s.sealedRelease(w, bookID, "audiobook", &req.Release) {
 		return
 	}
 	queueID, err := s.Acquire.GrabAudio(r.Context(), bookID, libraryID, req.Release)

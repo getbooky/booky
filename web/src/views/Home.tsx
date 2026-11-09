@@ -1,3 +1,4 @@
+import { LoadError } from "@/components/LoadError"
 import { useMemo, useRef } from "react"
 import { ChevronLeft, ChevronRight } from "lucide-react"
 import { api, coverUrl, watchers } from "@/api"
@@ -141,7 +142,8 @@ export function HomeView({ libraries, userName, onOpenBook, onOpenTag, onBrowse 
           onOpenBook={onOpenBook} onSeeAll={() => onOpenTag(p.tag)} />
       ))}
 
-      {!booksQuery.loading && all.length === 0 && (
+      {booksQuery.error && <LoadError what="your books" error={booksQuery.error} onRetry={() => booksQuery.reload()} />}
+      {!booksQuery.loading && !booksQuery.error && all.length === 0 && (
         <p className={cn("max-w-[56ch] text-[13.5px] leading-relaxed text-muted-foreground")}>
           Nothing on the shelf yet. Add a book from the search bar above, or point a watched list at a library in Settings.
         </p>

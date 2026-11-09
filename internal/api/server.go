@@ -20,6 +20,7 @@ import (
 	"github.com/getbooky/booky/internal/koreader"
 	"github.com/getbooky/booky/internal/metadata"
 	"github.com/getbooky/booky/internal/opds"
+	"github.com/getbooky/booky/internal/safenet"
 	"github.com/getbooky/booky/internal/settings"
 	"github.com/getbooky/booky/internal/watcher"
 )
@@ -52,6 +53,8 @@ type Server struct {
 	// sources — is fenced to this mount, keeping /config, /etc and the binary
 	// itself out of reach. Tests repoint it at a temp dir.
 	mediaRoot string
+	// proxies whose X-Forwarded-For is believed (see security.go)
+	proxies trustedProxies
 	// the paced Kindle auto-send worker, started on first use
 	kindleOnce sync.Once
 	kindleJobs chan kindleJob
@@ -60,7 +63,15 @@ type Server struct {
 	Audiobooks   *audiobook.Store
 	ReadAlong    *audiobook.Worker
 	audioImports sync.Map
+	audioUploads sync.Map // book id → an upload is arriving
 }
+
+// audioUploadSlots bounds audiobook uploads in flight across the server;
+// audioJoinSlots bounds the ffmpeg joins that follow them.
+var (
+	audioUploadSlots = make(chan struct{}, 3)
+	audioJoinSlots   = make(chan struct{}, 2)
+)
 
 type Deps struct {
 	DB           *sql.DB
@@ -97,6 +108,7 @@ func New(d Deps) (*Server, error) {
 		Auth: d.Auth, KoReader: d.KoReader, Kindle: d.Kindle, Backups: d.Backups, OPDS: d.OPDS,
 		Audiobooks: d.Audiobooks, ReadAlong: d.ReadAlong,
 		mediaRoot: "/data",
+		proxies:   loadTrustedProxies(),
 	}, nil
 }
 
@@ -165,6 +177,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/v1/auth/login", s.handleLogin)
 	mux.HandleFunc("POST /api/v1/auth/logout", s.handleLogout)
 	mux.HandleFunc("GET /api/v1/auth/me", s.handleMe)
+	mux.HandleFunc("PUT /api/v1/auth/password", s.handleChangePassword)
+	mux.HandleFunc("PUT /api/v1/users/{id}/password", s.handleResetPassword)
 	mux.HandleFunc("GET /api/v1/users", s.handleUsers)
 	mux.HandleFunc("POST /api/v1/users", s.handleCreateUser)
 	mux.HandleFunc("PUT /api/v1/users/{id}/tags", s.handleSetUserTags)
@@ -227,11 +241,16 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("PUT /api/v1/books/{id}/listen", s.handlePutListen)
 	s.OPDS.Register(mux)
 	mux.Handle("/", s.spaHandler())
-	return s.requireAuth(mux)
+	return s.secure(s.requireAuth(mux))
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
+	// API answers are per-account and change under the reader's feet:
+	// nothing in between (or the back button) should replay one
+	if w.Header().Get("Cache-Control") == "" {
+		w.Header().Set("Cache-Control", "no-store")
+	}
 	w.WriteHeader(status)
 	if err := json.NewEncoder(w).Encode(v); err != nil {
 		log.Printf("api: encode response: %v", err)
@@ -239,7 +258,8 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 }
 
 func writeErr(w http.ResponseWriter, status int, err error) {
-	writeJSON(w, status, map[string]string{"error": err.Error()})
+	// errors from HTTP clients quote the request URL, API keys and all
+	writeJSON(w, status, map[string]string{"error": safenet.Scrub(err).Error()})
 }
 
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {

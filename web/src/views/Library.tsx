@@ -1,3 +1,4 @@
+import { LoadError } from "@/components/LoadError"
 import { useMemo, useState } from "react"
 import { api, acquisition, canRead, coverUrl, kindle } from "@/api"
 import type { ApiBook, ApiKindleDevice, ApiLibrary, ApiTag } from "@/api"
@@ -20,7 +21,7 @@ import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { FilterRows, fuzzyMatch } from "@/components/FilterRows"
 import type { ScopeFilter } from "@/components/FilterRows"
-import { ArrowDown, ArrowDownWideNarrow, ArrowUp, ArrowUpNarrowWide, BookDashed, BookOpen, BookOpenText, Filter, FolderInput, Image, Layers, Mail, MoreVertical, Pencil, RefreshCw, Search, Trash2, Zap } from "lucide-react"
+import { ArrowDown, ArrowDownWideNarrow, ArrowUp, ArrowUpNarrowWide, BookDashed, BookOpen, BookOpenText, Check, Filter, FolderInput, Image, Layers, Mail, MoreVertical, Pencil, RefreshCw, Search, Trash2, Zap } from "lucide-react"
 import { ReleasesDialog } from "@/components/ReleasesDialog"
 import { ImportBookDialog } from "@/components/ImportBookDialog"
 import { toast } from "sonner"
@@ -120,7 +121,7 @@ function BookCell({ book, kindleDevices, seriesTag, bust, selected, selectionAct
     try {
       const r = await acquisition.autoGrab(book.id, book.libraryId)
       if (r.grabbed) toast.success("Grabbed the top-ranked release — watch Activity")
-      else toast.warning("Nothing grabbable right now")
+      else toast.warning("Nothing to grab right now. Booky keeps looking.")
       onChanged()
     } catch (e) { toast.error(`Auto-grab failed: ${e instanceof Error ? e.message : e}`) }
   }
@@ -152,9 +153,10 @@ function BookCell({ book, kindleDevices, seriesTag, bust, selected, selectionAct
             "absolute left-1.5 top-1.5 z-10 flex h-6 w-6 items-center justify-center rounded-md border transition-opacity",
             selected
               ? "border-brass bg-brass text-brass-ink opacity-100"
-              // touch has no hover to reveal it — stay visible there, or
-              // multi-select is unreachable from a phone
-              : "border-white/50 bg-black/45 text-transparent opacity-0 backdrop-blur-xs hover:border-white focus-visible:opacity-100 group-hover/cell:opacity-100 [@media(hover:none)]:opacity-100",
+              // touch has no hover to reveal it, and left always-on it sits
+              // on top of the cover's title: there, selecting starts from
+              // the ⋮ menu ("Select") and the boxes show once it has
+              : "border-white/50 bg-black/45 text-transparent opacity-0 backdrop-blur-xs hover:border-white focus-visible:opacity-100 group-hover/cell:opacity-100",
             selectionActive && "opacity-100"
           )}>
           <svg viewBox="0 0 24 24" width="13" height="13" style={{ stroke: "currentColor", fill: "none", strokeWidth: 3 }}><path d="M5 13l4 4 10-11" /></svg>
@@ -162,11 +164,14 @@ function BookCell({ book, kindleDevices, seriesTag, bust, selected, selectionAct
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
             <button aria-label={`${book.title} options`} onClick={e => e.stopPropagation()}
-              className="absolute bottom-2.5 left-1.5 z-10 flex h-7 w-7 items-center justify-center rounded-lg bg-black/60 text-white/90 opacity-0 backdrop-blur-xs transition-opacity hover:bg-black/80 focus-visible:opacity-100 group-hover/cell:opacity-100 data-[state=open]:opacity-100 [@media(hover:none)]:opacity-100">
+              className="absolute bottom-2.5 left-1.5 z-10 flex h-7 w-7 items-center justify-center rounded-lg bg-black/60 text-white/90 opacity-0 backdrop-blur-xs transition-opacity hover:bg-black/80 focus-visible:opacity-100 group-hover/cell:opacity-100 data-[state=open]:opacity-100 [@media(hover:none)]:bg-black/45 [@media(hover:none)]:opacity-100">
               <MoreVertical className="h-4 w-4" />
             </button>
           </DropdownMenuTrigger>
           <DropdownMenuContent align="start" className="min-w-[190px] rounded-xl" onClick={e => e.stopPropagation()}>
+            <DropdownMenuItem onClick={() => onToggleSelect(book)}>
+              <Check className="mr-2 h-3.5 w-3.5 text-muted-foreground" /> {selected ? "Deselect" : "Select"}
+            </DropdownMenuItem>
             {canRead(book) && (
               <DropdownMenuItem onClick={() => onRead(book)}>
                 <BookOpenText className="mr-2 h-3.5 w-3.5 text-muted-foreground" /> Read
@@ -575,7 +580,7 @@ export function LibraryView({ library, tag, scope, libraries, initialFilters, sc
                   <Filter className="h-3.5 w-3.5" />
                 </button>
               </PopoverTrigger>
-              <PopoverContent align="end" className="w-[400px] rounded-xl p-3">
+              <PopoverContent align="end" className="w-[min(400px,calc(100vw-1.5rem))] rounded-xl p-3">
                 <div className="mono-label mb-2.5 text-faint">Filter by</div>
                 <FilterRows rows={filters} onChange={setFilters} books={allBooks} />
                 {active.length > 0 && (
@@ -661,11 +666,7 @@ export function LibraryView({ library, tag, scope, libraries, initialFilters, sc
         </div>
       )}
 
-      {booksQuery.error && (
-        <div className="rounded-r-lg border-l-[3px] border-want bg-want/10 px-4 py-3 text-[13px]">
-          Couldn't load the library: {booksQuery.error}
-        </div>
-      )}
+      {booksQuery.error && <LoadError what="the library" error={booksQuery.error} onRetry={() => booksQuery.reload()} />}
       {!booksQuery.loading && !booksQuery.error && allBooks.length === 0 && (
         <div className="max-w-[52ch] text-[13.5px] leading-relaxed text-muted-foreground">
           <p className="font-book mb-2 text-xl font-bold text-foreground">The shelf is empty.</p>

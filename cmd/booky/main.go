@@ -25,6 +25,7 @@ import (
 	"github.com/getbooky/booky/internal/metadata"
 	"github.com/getbooky/booky/internal/opds"
 	"github.com/getbooky/booky/internal/readalong"
+	"github.com/getbooky/booky/internal/safenet"
 	"github.com/getbooky/booky/internal/secrets"
 	"github.com/getbooky/booky/internal/settings"
 	"github.com/getbooky/booky/internal/watcher"
@@ -68,6 +69,11 @@ func main() {
 	covers := catalog.NewCoverCache(filepath.Join(configDir, "covers"))
 	// author portraits live beside book covers, keyed by author id
 	authorPhotos := catalog.NewCoverCache(filepath.Join(configDir, "covers", "authors"))
+	// cover and portrait URLs come from metadata providers and from search
+	// results passed back by the browser: they're fetched by a client that
+	// can only reach the public internet, never this server's own network
+	covers.Client = safenet.Client(20 * time.Second)
+	authorPhotos.Client = safenet.Client(20 * time.Second)
 	// the default quality profile exists from first boot, not first library —
 	// the Settings panel and wizard both edit it
 	if _, err := cat.EnsureDefaultProfile(); err != nil {
@@ -108,6 +114,9 @@ func main() {
 	}
 
 	accounts := auth.New(database)
+	if _, err := accounts.PruneSessions(); err != nil {
+		log.Printf("auth: prune sessions: %v", err)
+	}
 	// audiobooks and read-along: ffmpeg and the speech recogniser ship in the
 	// Docker image; without them audiobooks still import and play
 	audiobooks := audiobook.NewStore(database)
@@ -122,11 +131,13 @@ func main() {
 	} else if n > 0 {
 		log.Printf("read-along: removed %d leftover build(s)", n)
 	}
+	kindleStore := kindle.New(database, keeper)
+	kindleStore.Trusted = func(ownerID int64) bool { return accounts.UserByID(ownerID).IsAdmin() }
 	server, err := api.New(api.Deps{
 		DB: database, Version: version, Dist: web.Dist,
 		Catalog: cat, Chain: chain, Importer: imp, Covers: covers, AuthorPhotos: authorPhotos, Settings: cfg, Logs: logs,
 		Acquire: engine, Watcher: watch,
-		Auth: accounts, KoReader: koDevices, Kindle: kindle.New(database, keeper), Backups: backups,
+		Auth: accounts, KoReader: koDevices, Kindle: kindleStore, Backups: backups,
 		// one auth store for web and OPDS, so a lockout or a changed
 		// password applies to both at once
 		OPDS:       opds.New(database, cat, covers, accounts),
@@ -168,6 +179,7 @@ func main() {
 		Addr:              ":" + port,
 		Handler:           server.Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
+		IdleTimeout:       2 * time.Minute,
 	}
 	go func() {
 		<-ctx.Done()
