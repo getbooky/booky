@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/getbooky/booky/internal/prowlarr"
@@ -34,6 +35,7 @@ func (s *Server) handleReleases(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadGateway, err)
 		return
 	}
+	s.signReleases(bookID, "ebook", rels)
 	writeJSON(w, http.StatusOK, map[string]any{"releases": rels, "sources": sources})
 }
 
@@ -88,6 +90,9 @@ func (s *Server) handleGrab(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !s.requireLibrary(w, r, req.LibraryID) || !s.requireBook(w, r, bookID) {
+		return
+	}
+	if !s.sealedRelease(w, bookID, "ebook", &req.Release) {
 		return
 	}
 	queueID, err := s.Acquire.Grab(r.Context(), bookID, req.LibraryID, req.Release)
@@ -212,10 +217,25 @@ func (s *Server) handleWanted(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleHistory(w http.ResponseWriter, r *http.Request) {
-	items, err := s.Catalog.ListHistory(100, s.visibility(s.access(r)))
+	a := s.access(r)
+	items, err := s.Catalog.ListHistory(100, s.visibility(a))
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err)
 		return
+	}
+	// A shared book's history also records who else it reaches: tags added
+	// and removed (personal tags are named for their account) and sends to
+	// other people's Kindles. That is the admin's to see, not everyone
+	// who shares the book.
+	if a.scoped() {
+		kept := items[:0:0]
+		for _, it := range items {
+			if it.Kind == "tagged" || it.Kind == "sent" || strings.Contains(it.Detail, "send to kindle") {
+				continue
+			}
+			kept = append(kept, it)
+		}
+		items = kept
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"history": items})
 }
@@ -241,6 +261,12 @@ func (s *Server) handleTestProwlarr(w http.ResponseWriter, r *http.Request) {
 		req.URL = s.Settings.Get("prowlarr_url")
 	}
 	if req.APIKey == "" || req.APIKey == "********" {
+		// the saved key only ever goes to the saved address: a test against
+		// a new one needs its key typed in
+		if !sameURL(req.URL, s.Settings.Get("prowlarr_url")) {
+			writeErr(w, http.StatusBadRequest, errors.New("enter the API key to test a new address"))
+			return
+		}
 		req.APIKey = s.Settings.Get("prowlarr_api_key")
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
@@ -268,6 +294,10 @@ func (s *Server) handleTestSab(w http.ResponseWriter, r *http.Request) {
 		req.URL = s.Settings.Get("sab_url")
 	}
 	if req.APIKey == "" || req.APIKey == "********" {
+		if !sameURL(req.URL, s.Settings.Get("sab_url")) {
+			writeErr(w, http.StatusBadRequest, errors.New("enter the API key to test a new address"))
+			return
+		}
 		req.APIKey = s.Settings.Get("sab_api_key")
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)

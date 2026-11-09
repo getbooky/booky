@@ -271,6 +271,17 @@ func (s *Store) UpsertBook(meta metadata.BookMeta) (int64, error) {
 	return s.upsertBookWithAuthor(meta, authorID)
 }
 
+// ExistingBook finds the book meta describes, if the catalog already has
+// it, without creating or changing anything.
+func (s *Store) ExistingBook(meta metadata.BookMeta) (int64, bool) {
+	var authorID int64
+	if len(meta.Authors) > 0 {
+		_ = s.db.QueryRow(`SELECT id FROM authors WHERE name = ? COLLATE NOCASE`, meta.Authors[0]).Scan(&authorID)
+	}
+	id, ok, err := s.findBook(meta, authorID)
+	return id, ok && err == nil
+}
+
 // UpsertBookForAuthor upserts a book pinned to an existing author id, never
 // minting an author. If that author was deleted concurrently (a bibliography
 // sync still running after the user removed the author), it returns

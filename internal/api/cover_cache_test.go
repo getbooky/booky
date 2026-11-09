@@ -121,7 +121,7 @@ func TestRefreshKeepsLockedCustomCover(t *testing.T) {
 // it up. It used to keep whatever was cached forever, because a cached cover
 // short-circuits the fetch.
 func TestRefreshAdoptsProviderCoverChange(t *testing.T) {
-	art := "first-art"
+	art := "GIF89a first-art"
 	images := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte(art)) //nolint:errcheck // test server
 	}))
@@ -141,17 +141,17 @@ func TestRefreshAdoptsProviderCoverChange(t *testing.T) {
 	}
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest("GET", "/api/v1/covers/1", nil))
-	if got := rec.Body.String(); got != "first-art" {
+	if got := rec.Body.String(); got != "GIF89a first-art" {
 		t.Fatalf("cover = %q, want the provider's art", got)
 	}
 
-	art = "new-art" // the cover changed at the source
+	art = "GIF89a new-art" // the cover changed at the source
 	if rec, _ := doJSON(t, h, "POST", "/api/v1/books/1/refresh", nil); rec.Code != http.StatusOK {
 		t.Fatalf("second refresh: %d", rec.Code)
 	}
 	rec = httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest("GET", "/api/v1/covers/1", nil))
-	if got := rec.Body.String(); got != "new-art" {
+	if got := rec.Body.String(); got != "GIF89a new-art" {
 		t.Errorf("cover = %q, want the provider's updated art after a refresh", got)
 	}
 }
@@ -229,7 +229,7 @@ func TestRegenCoverKeepsExistingWhenFetchFails(t *testing.T) {
 // cached image.
 func TestRegenCoverReplacesWithProviderArt(t *testing.T) {
 	images := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte("provider-art")) //nolint:errcheck // test server
+		w.Write([]byte("GIF89a provider-art")) //nolint:errcheck // test server
 	}))
 	defer images.Close()
 
@@ -251,7 +251,7 @@ func TestRegenCoverReplacesWithProviderArt(t *testing.T) {
 	}
 	got := httptest.NewRecorder()
 	h.ServeHTTP(got, httptest.NewRequest("GET", "/api/v1/covers/1", nil))
-	if got.Body.String() != "provider-art" {
+	if got.Body.String() != "GIF89a provider-art" {
 		t.Errorf("cover = %q, want the provider's art", got.Body.String())
 	}
 }

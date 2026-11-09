@@ -299,6 +299,16 @@ func (a access) redactTags(books []catalog.Book) {
 	}
 }
 
+// redactBook is redactTags for a single book on its way out.
+func (a access) redactBook(b *catalog.Book) {
+	if b == nil || a.admin() {
+		return
+	}
+	one := []catalog.Book{*b}
+	a.redactTags(one)
+	b.Tags = one[0].Tags
+}
+
 // filterLibraries narrows the library list to what the caller may reach.
 func (a access) filterLibraries(libs []catalog.Library) []catalog.Library {
 	if !a.scoped() {

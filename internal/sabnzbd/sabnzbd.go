@@ -10,6 +10,8 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"github.com/getbooky/booky/internal/safenet"
 )
 
 type Client struct {
@@ -44,7 +46,7 @@ func (c *Client) call(ctx context.Context, params url.Values, out any) error {
 	}
 	res, err := c.http.Do(req)
 	if err != nil {
-		return fmt.Errorf("sabnzbd: %w", err)
+		return fmt.Errorf("sabnzbd: %w", safenet.Scrub(err))
 	}
 	defer res.Body.Close()
 	if res.StatusCode != http.StatusOK {

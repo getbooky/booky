@@ -38,6 +38,12 @@ func (s *Server) handleBookFile(w http.ResponseWriter, r *http.Request) {
 	// inline, keeping the real filename so the reader can sniff the format
 	// from the extension (and a plain save keeps a sensible name)
 	w.Header().Set("Content-Disposition", `inline; filename="`+opds.SanitizeFilename(filepath.Base(path))+`"`)
+	// A book file is whatever a download or an upload contained. It is
+	// served as the format it claims to be, never guessed from its bytes,
+	// and sandboxed: opened directly in a browser tab it's a document with
+	// no scripts and no access to the session.
+	w.Header().Set("Content-Type", opds.MimeFor(filepath.Ext(path)))
+	w.Header().Set("Content-Security-Policy", "sandbox; default-src 'none'")
 	http.ServeFile(w, r, path)
 }
 

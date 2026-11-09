@@ -327,12 +327,32 @@ func (s *Server) handleBookManualImport(w http.ResponseWriter, r *http.Request) 
 
 	var libraryID, queueID int64
 	var src string
+	uploaded := false
 	if strings.HasPrefix(r.Header.Get("Content-Type"), "multipart/form-data") {
+		// who may upload is settled before a byte is taken: an upload for a
+		// book the caller can't see (or one that doesn't exist) would
+		// otherwise sit on disk, half a gigabyte at a time
+		if !s.requireBook(w, r, id) {
+			return
+		}
+		if _, err := s.Catalog.GetBook(id); err != nil {
+			writeErr(w, http.StatusNotFound, errors.New("book not found"))
+			return
+		}
+		// a book that has its file is everyone's who shares it: swapping
+		// that file is the admin's call, as it is for audiobooks
+		if !s.access(r).admin() {
+			if _, _, err := s.shelfFile(id); err == nil {
+				writeErr(w, http.StatusForbidden, errors.New("this book already has its file — only an admin can replace it"))
+				return
+			}
+		}
 		libraryID, queueID, src, err = s.receiveBookUpload(w, r, id)
 		if err != nil {
 			writeErr(w, http.StatusBadRequest, err)
 			return
 		}
+		uploaded = true
 	} else {
 		// The JSON form names a path on the SERVER rather than uploading one.
 		// A scoped user has no need for it — their route in is the browser
@@ -393,22 +413,40 @@ func (s *Server) handleBookManualImport(w http.ResponseWriter, r *http.Request) 
 	if libraryID == 0 {
 		libraryID = s.Catalog.TheLibrary()
 	}
+	// an upload that doesn't make it onto the shelf is removed; a file an
+	// admin pointed at on the server is theirs and stays
+	discard := func() {
+		if uploaded {
+			_ = os.Remove(src) //nolint:gosec // G703: the upload's own server-named temp file
+		}
+	}
 	if !s.requireLibrary(w, r, libraryID) || !s.requireBook(w, r, id) {
+		discard()
 		return
 	}
 	dst, err := s.Importer.Deliver(id, libraryID, src, s.Acquire.NamingSettings(id))
 	if err != nil {
+		discard()
 		writeErr(w, http.StatusBadRequest, err)
 		return
 	}
 	s.shelveFor(s.access(r), id)
 	if queueID > 0 {
-		s.Acquire.MarkDone(queueID)
+		// only a row for this very book: the id comes from the client
+		var n int
+		if err := s.db.QueryRow(`SELECT COUNT(*) FROM queue WHERE id = ? AND book_id = ?`, queueID, id).Scan(&n); err == nil && n > 0 {
+			s.Acquire.MarkDone(queueID)
+		}
 	}
 	book, err := s.Catalog.GetBook(id)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err)
 		return
+	}
+	a := s.access(r)
+	a.redactBook(book)
+	if !a.admin() {
+		dst = "" // where files sit on the server is the admin's to know
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"path": dst, "book": book})
 }
@@ -479,11 +517,17 @@ func (s *Server) receiveBookUpload(w http.ResponseWriter, r *http.Request, bookI
 			if err := os.MkdirAll(dir, 0o755); err != nil {
 				return 0, 0, "", err
 			}
-			dst := filepath.Join(dir, fmt.Sprintf("%d-upload%s", bookID, ext))
-			f, err := os.Create(dst) //nolint:gosec // G304: dst is the configured downloads dir + server-derived name
+			if src != "" {
+				_ = os.Remove(src) //nolint:gosec // G703: an earlier part's server-named temp file
+				return 0, 0, "", errors.New("one file per upload")
+			}
+			// a name of its own, so two uploads for one book don't write
+			// over each other
+			f, err := os.CreateTemp(dir, fmt.Sprintf("%d-upload-*%s", bookID, ext))
 			if err != nil {
 				return 0, 0, "", err
 			}
+			dst := f.Name()
 			if _, err := io.Copy(f, part); err != nil {
 				f.Close()
 				_ = os.Remove(dst) //nolint:gosec // G703: dst is the configured downloads dir + a server-derived name; no client bytes reach the path

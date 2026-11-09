@@ -120,6 +120,9 @@ func (h *Handler) writeBooks(w http.ResponseWriter, r *http.Request, id, title, 
 	if page < 1 {
 		page = 1
 	}
+	if last := len(books)/pageSize + 1; page > last {
+		page = last // also keeps the arithmetic below from overflowing
+	}
 	pageURL := func(n int) string {
 		q := r.URL.Query()
 		q.Set("page", strconv.Itoa(n))

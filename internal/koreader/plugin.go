@@ -842,7 +842,14 @@ function Booky:fetchCatalog()
     if not body then return nil, err end
     local ok, data = pcall(json.decode, body)
     if not ok or type(data) ~= "table" then return nil, _("bad response") end
-    return data.books or {}
+    -- ids and file names from the server become paths on this device: only
+    -- well-formed ones are kept, whatever the server (or whoever is
+    -- answering in its place) sends
+    local books = {}
+    for _i, book in ipairs(type(data.books) == "table" and data.books or {}) do
+        if ReadAlong.util.safeBook(book) then table.insert(books, book) end
+    end
+    return books
 end
 
 function Booky:bookKey(book)

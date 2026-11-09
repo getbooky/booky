@@ -1,6 +1,7 @@
 package catalog
 
 import (
+	"bufio"
 	"context"
 	"fmt"
 	"io"
@@ -104,13 +105,20 @@ func (c *CoverCache) Replace(ctx context.Context, bookID int64, srcURL string) e
 		return fmt.Errorf("cover fetch status %d", res.StatusCode)
 	}
 
+	// covers are small; 10MB cap guards against a hostile or broken source
+	body := bufio.NewReader(io.LimitReader(res.Body, 10<<20))
+	// and they are images: whatever else a URL serves — a web page, an API's
+	// answer — is not kept, so a cover URL can't be used to read things
+	head, _ := body.Peek(512)
+	if !strings.HasPrefix(http.DetectContentType(head), "image/") {
+		return fmt.Errorf("cover url didn't return an image")
+	}
 	tmp := c.path(bookID) + ".tmp"
 	f, err := os.Create(tmp)
 	if err != nil {
 		return err
 	}
-	// covers are small; 10MB cap guards against a hostile or broken source
-	if _, err := io.Copy(f, io.LimitReader(res.Body, 10<<20)); err != nil {
+	if _, err := io.Copy(f, body); err != nil {
 		f.Close()
 		os.Remove(tmp)
 		return err

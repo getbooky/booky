@@ -34,6 +34,7 @@ type spineDoc struct {
 
 const (
 	maxDocSize  = 32 << 20 // one content document
+	maxTextSize = 96 << 20 // all content documents together
 	maxBookSize = 1 << 30  // everything copied into the edition
 )
 
@@ -66,6 +67,7 @@ func PrepareBook(epubPath string) (*Book, error) {
 		byID[it.ID] = i
 	}
 	next := 1
+	textTotal := 0
 	for _, ref := range pkg.Spine {
 		i, ok := byID[ref.IDRef]
 		if !ok {
@@ -85,6 +87,11 @@ func PrepareBook(epubPath string) (*Book, error) {
 		raw, err := readEntry(&zr.Reader, name, maxDocSize)
 		if err != nil {
 			return nil, err
+		}
+		// the text of a whole book is a few megabytes; all of it is held
+		// in memory here, so a file built of many huge chapters is refused
+		if textTotal += len(raw); textTotal > maxTextSize {
+			return nil, fmt.Errorf("the ebook's text is over %d MB — too large to line up", maxTextSize>>20)
 		}
 		wrapped, units, n, err := WrapSentences(raw, it.Href, next)
 		if err != nil {

@@ -74,6 +74,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	ip, _, _ := net.SplitHostPort(r.RemoteAddr)
 	token, user, err := s.Auth.Login(req.Username, req.Password, ip)
 	if err != nil {
+		log.Printf("auth: failed sign-in for %q from %s", truncate(req.Username, 64), ip) //nolint:gosec // G706: %q escapes it
 		writeErr(w, http.StatusUnauthorized, err)
 		return
 	}
@@ -87,6 +88,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		HttpOnly: true, SameSite: http.SameSiteStrictMode, Secure: isHTTPS(r),
 		MaxAge: int((30 * 24 * time.Hour).Seconds()),
 	})
+	log.Printf("auth: %s signed in from %s", user.Username, ip) //nolint:gosec // G706: a validated username and a parsed address
 	writeJSON(w, http.StatusOK, user)
 }
 
@@ -107,6 +109,67 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 // common self-hosted plain-HTTP-on-LAN deployment.
 func isHTTPS(r *http.Request) bool {
 	return r.TLS != nil || strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https")
+}
+
+// handleChangePassword: PUT /auth/password — an account changes its own
+// password by giving the current one. Its other sessions are signed out.
+func (s *Server) handleChangePassword(w http.ResponseWriter, r *http.Request) {
+	u := s.sessionUser(r)
+	if u == nil {
+		writeErr(w, http.StatusUnauthorized, errors.New("sign in first"))
+		return
+	}
+	var req struct {
+		Current string `json:"current"`
+		New     string `json:"new"`
+	}
+	if err := decodeJSON(r, &req); err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	token := ""
+	if c, err := r.Cookie(sessionCookie); err == nil {
+		token = c.Value
+	}
+	ip, _, _ := net.SplitHostPort(r.RemoteAddr)
+	if err := s.Auth.ChangePassword(u.ID, req.Current, req.New, token, ip); err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	log.Printf("auth: %s changed their password", u.Username) //nolint:gosec // G706: usernames are validated at creation (no control characters)
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+// handleResetPassword: PUT /users/{id}/password — an admin sets a new
+// password for an account that lost theirs. The account is signed out
+// everywhere.
+func (s *Server) handleResetPassword(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAdmin(w, r) {
+		return
+	}
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, errors.New("bad id"))
+		return
+	}
+	var req struct {
+		Password string `json:"password"`
+	}
+	if err := decodeJSON(r, &req); err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	target := s.Auth.UserByID(id)
+	if target == nil {
+		writeErr(w, http.StatusNotFound, errors.New("user not found"))
+		return
+	}
+	if err := s.Auth.SetPassword(id, req.Password); err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	log.Printf("auth: password reset for %s", target.Username) //nolint:gosec // G706: usernames are validated at creation (no control characters)
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
 // handleMe reports auth state: whether login is required at all, and who (if

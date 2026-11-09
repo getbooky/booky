@@ -12,6 +12,8 @@ import (
 	"time"
 
 	"github.com/getbooky/booky/internal/release"
+
+	"github.com/getbooky/booky/internal/safenet"
 )
 
 type Client struct {
@@ -43,7 +45,7 @@ func (c *Client) get(ctx context.Context, path string, query url.Values, out any
 	req.Header.Set("X-Api-Key", c.apiKey)
 	res, err := c.http.Do(req)
 	if err != nil {
-		return fmt.Errorf("prowlarr: %w", err)
+		return fmt.Errorf("prowlarr: %w", safenet.Scrub(err))
 	}
 	defer res.Body.Close()
 	switch res.StatusCode {

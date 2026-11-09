@@ -3,6 +3,7 @@ package api
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"github.com/getbooky/booky/internal/audiobook"
 	"github.com/getbooky/booky/internal/readalong"
@@ -96,7 +97,7 @@ func testServer(t *testing.T) *Server {
 		Watcher:    watcher.New(conn, cat, chain, cfg, engine, covers, hc),
 		Auth:       accounts,
 		KoReader:   koreader.New(conn, testKeeper(t)),
-		Kindle:     kindle.New(conn, testKeeper(t)),
+		Kindle:     testKindle(conn, testKeeper(t)),
 		Backups:    backup.New(conn, configDir),
 		OPDS:       opds.New(conn, cat, covers, accounts),
 		Audiobooks: audiobooks,
@@ -235,4 +236,13 @@ func TestSPAFallback(t *testing.T) {
 	if rec.Code != http.StatusOK || !bytes.Contains(rec.Body.Bytes(), []byte("booky")) {
 		t.Fatalf("spa fallback: %d %s", rec.Code, rec.Body)
 	}
+}
+
+// testKindle trusts every owner, so tests can send through a mail server on
+// this machine; the default (mail only to the public internet) has its own
+// tests.
+func testKindle(conn *sql.DB, keeper *secrets.Keeper) *kindle.Store {
+	k := kindle.New(conn, keeper)
+	k.Trusted = func(int64) bool { return true }
+	return k
 }

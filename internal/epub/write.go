@@ -73,6 +73,19 @@ func Write(fsPath string, m Metadata, fields Fields) error {
 	}
 	defer os.Remove(tmp.Name())
 
+	// Rewriting copies every entry. Each is capped, and so are their number
+	// and their sum: an archive built to be huge when unpacked (thousands
+	// of entries that each inflate to the cap) is refused, not copied.
+	if len(zr.File) > maxEntries {
+		return fmt.Errorf("epub has %d files — more than a book has", len(zr.File))
+	}
+	var total uint64
+	for _, f := range zr.File {
+		total += f.UncompressedSize64
+	}
+	if total > maxTotalSize {
+		return fmt.Errorf("epub unpacks to %d MB — more than a book does", total>>20)
+	}
 	zw := zip.NewWriter(tmp)
 	for _, f := range zr.File {
 		if path.Clean(f.Name) == path.Clean(opfName) {
@@ -240,3 +253,11 @@ func rewriteOPF(opf string, m Metadata, fields Fields) (string, error) {
 	}
 	return opf[:loc[0]] + add.String() + opf[loc[0]:], nil
 }
+
+// An EPUB is a zip, and a zip can be built to unpack into far more than
+// it weighs. Real books — picture-heavy ones included — sit well inside
+// these.
+const (
+	maxEntries   = 20000
+	maxTotalSize = 2 << 30
+)

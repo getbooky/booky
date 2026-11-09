@@ -44,8 +44,10 @@ func RenderName(scheme string, b *catalog.Book) string {
 	if strings.TrimSpace(scheme) == "" {
 		scheme = "{Author}/{Title}"
 	}
+	// a year is four digits or nothing: the date is free text from
+	// providers and requests, and "../x" is four characters too
 	year := ""
-	if len(b.ReleaseDate) >= 4 {
+	if len(b.ReleaseDate) >= 4 && strings.Trim(b.ReleaseDate[:4], "0123456789") == "" {
 		year = b.ReleaseDate[:4]
 	}
 	// token values are sanitized BEFORE substitution so a "/" inside a title
@@ -61,9 +63,20 @@ func RenderName(scheme string, b *catalog.Book) string {
 	for token, v := range values {
 		out = strings.ReplaceAll(out, "{"+token+"}", v)
 	}
-	parts := strings.Split(out, "/")
-	for i := range parts {
-		parts[i] = strings.TrimSpace(parts[i])
+	// the scheme's own folders are checked too: whatever it says, the
+	// result stays inside the library
+	var parts []string
+	for _, p := range strings.Split(out, "/") {
+		if p = strings.TrimSpace(p); p == "" {
+			continue
+		}
+		if strings.Trim(p, ".") == "" {
+			p = "_"
+		}
+		parts = append(parts, p)
+	}
+	if len(parts) == 0 {
+		return "_"
 	}
 	return filepath.Join(parts...)
 }
