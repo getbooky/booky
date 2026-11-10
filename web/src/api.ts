@@ -552,6 +552,36 @@ export interface ApiBackup {
   createdAt: string
 }
 
+export interface ApiInvite {
+  id: number
+  /** Who the link is for, in the admin's words. */
+  note: string
+  tagIds: number[]
+  createdBy: string
+  createdAt: string
+  expiresAt: string
+  usedAt?: string
+  usedBy?: string
+}
+
+/** Invite links: an admin makes one, and whoever opens it picks their own
+ * username and password. The token is only ever returned by create. */
+export const invites = {
+  list: () => request<{ invites: ApiInvite[] }>("/api/v1/invites"),
+  create: (note: string, tagIds: number[]) =>
+    request<{ invite: ApiInvite; token: string }>("/api/v1/invites", {
+      method: "POST", body: JSON.stringify({ note, tagIds }),
+    }),
+  revoke: (id: number) => request(`/api/v1/invites/${id}`, { method: "DELETE" }),
+  /** Rejects unless the link still works. */
+  check: (token: string) => request(`/api/v1/invite/${encodeURIComponent(token)}`),
+  /** Creates the account and signs it in. */
+  accept: (token: string, username: string, password: string) =>
+    request<ApiUser>(`/api/v1/invite/${encodeURIComponent(token)}`, {
+      method: "POST", body: JSON.stringify({ username, password }),
+    }),
+}
+
 export const delivery = {
   me: () => request<{ authRequired: boolean; user?: ApiUser }>("/api/v1/auth/me"),
   login: (username: string, password: string) =>

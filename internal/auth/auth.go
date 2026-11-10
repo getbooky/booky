@@ -520,15 +520,24 @@ func (s *Store) Login(username, password, ip string) (token string, user *User, 
 		return "", nil, err
 	}
 
-	token = randomToken()
+	token, err = s.newSession(u.ID)
+	if err != nil {
+		return "", nil, err
+	}
+	return token, &u, nil
+}
+
+// newSession signs an account in and returns the cookie's token.
+func (s *Store) newSession(userID int64) (string, error) {
+	token := randomToken()
 	expires := time.Now().UTC().Add(sessionTTL).Format(time.RFC3339)
 	// only the hash touches the database — the cookie carries the raw token,
 	// so a stolen booky.db can't ride anyone's session
 	if _, err := s.db.Exec(`INSERT INTO sessions (token, user_id, expires_at) VALUES (?, ?, ?)`,
-		HashToken(token), u.ID, expires); err != nil {
-		return "", nil, err
+		HashToken(token), userID, expires); err != nil {
+		return "", err
 	}
-	return token, &u, nil
+	return token, nil
 }
 
 // ChangePassword lets an account set a new password by proving the current

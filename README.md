@@ -182,7 +182,10 @@ safe:
   address, name it: `-e BOOKY_TRUSTED_PROXIES=203.0.113.7` (addresses or
   CIDR ranges, comma-separated; `none` to believe nobody).
 - **Give each person their own account** (Settings → Users), as a `user`,
-  not an admin. They can change their password under Settings → Account; if
+  not an admin. Rather than making up a password for them, send an invite
+  link (Settings → Users → Invite links): they choose their own username
+  and password. A link makes one account, works once and expires after 7
+  days — whoever holds it can use it, so send it privately. They can change their password under Settings → Account; if
   they forget it, an admin sets a new one from Settings → Users.
 - **Passwords**: at least 8 characters. Wrong guesses lock that username
   from that address for 30 seconds, doubling up to 15 minutes; an address
