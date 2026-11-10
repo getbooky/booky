@@ -3,13 +3,13 @@ import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Switch } from "@/components/ui/switch"
 import { Tag } from "@/components/bits"
-import { api, delivery } from "@/api"
-import type { ApiDevice, ApiTag, ApiUser } from "@/api"
+import { api, delivery, invites } from "@/api"
+import type { ApiDevice, ApiInvite, ApiTag, ApiUser } from "@/api"
 import { useAccess } from "@/lib/access"
 import { formatFull, formatWhen } from "@/lib/time"
 import { useApi } from "@/hooks/use-api"
 import { toast } from "sonner"
-import { Download, Pencil, Plus, X } from "lucide-react"
+import { Copy, Download, Pencil, Plus, X } from "lucide-react"
 import { SettingField } from "@/views/Settings"
 import { TagPicker, TagPill, useTags } from "@/components/TagPills"
 
@@ -163,6 +163,7 @@ export function UsersPanel() {
   }
 
   return (
+    <>
     <Card title="Users"
       action={
         <Button variant="outline" size="icon" className="h-7 w-7 rounded-full" aria-label="Add user" onClick={() => setAdding(a => !a)}>
@@ -212,6 +213,152 @@ export function UsersPanel() {
             )}
             <div className="mt-3 flex gap-2">
               <Button className="h-9" disabled={!username.trim() || password.length < 8} onClick={create}>Create</Button>
+              <Button variant="outline" className="h-9" onClick={() => setAdding(false)}>Cancel</Button>
+            </div>
+          </div>
+        )}
+      </div>
+    </Card>
+    {users.length > 0 && <InvitesCard tags={tags} />}
+    </>
+  )
+}
+
+/* ---------- Invite links ---------- */
+
+/** "in 6 days", "in 3 hours", "in under an hour". */
+function untilText(iso: string): string {
+  const ms = new Date(iso).getTime() - Date.now()
+  const hours = Math.floor(ms / 3_600_000)
+  if (!(ms > 0) || hours < 1) return "in under an hour"
+  if (hours < 48) return `in ${hours} hour${hours === 1 ? "" : "s"}`
+  return `in ${Math.floor(hours / 24)} days`
+}
+
+// InvitesCard makes and lists invite links. A link is shown once, when it's
+// made — the server keeps only its hash — so the new-link box stays up until
+// the admin closes it.
+function InvitesCard({ tags }: { tags: ApiTag[] }) {
+  const { data, loading, reload } = useApi(() => invites.list())
+  const list = data?.invites ?? []
+  const [adding, setAdding] = useState(false)
+  const [note, setNote] = useState("")
+  const [selected, setSelected] = useState<number[]>([])
+  const [busy, setBusy] = useState(false)
+  const [fresh, setFresh] = useState<{ link: string; note: string } | null>(null)
+  const byId = new Map(tags.map(t => [t.id, t]))
+
+  const create = async () => {
+    setBusy(true)
+    try {
+      const r = await invites.create(note.trim(), selected)
+      setFresh({ link: `${window.location.origin}${window.location.pathname}#/invite/${r.token}`, note: r.invite.note })
+      setAdding(false); setNote(""); setSelected([])
+      reload()
+    } catch (e) {
+      toast.error(`Couldn't create the link: ${e instanceof Error ? e.message : e}`)
+    } finally {
+      setBusy(false)
+    }
+  }
+  const copy = async (text: string) => {
+    try {
+      await navigator.clipboard.writeText(text)
+      toast.success("Link copied")
+    } catch {
+      toast.error("Couldn't copy — select the link and copy it by hand")
+    }
+  }
+  const revoke = async (inv: ApiInvite) => {
+    const what = inv.note ? `the invite for "${inv.note}"` : "this invite"
+    if (!inv.usedAt && !window.confirm(`Revoke ${what}?\n\nThe link stops working straight away.`)) return
+    try {
+      if (inv.usedAt) await invites.forget(inv.id)
+      else await invites.revoke(inv.id)
+    } catch (e) {
+      // most likely: the link was used since this list was loaded
+      toast.error(e instanceof Error ? e.message : String(e))
+    }
+    reload()
+  }
+
+  return (
+    <Card title="Invite links"
+      action={
+        <Button variant="outline" size="icon" className="h-7 w-7 rounded-full" aria-label="New invite link" onClick={() => setAdding(a => !a)}>
+          <Plus className="h-4 w-4" />
+        </Button>
+      }
+      desc="Send someone a link and they choose their own username and password. Each link makes one ordinary user account, works once, and expires after 7 days. Anyone who has the link can use it, so send it privately.">
+      {fresh && (
+        <div className="mb-3 rounded-lg border border-primary/40 bg-primary/5 px-4 py-3">
+          <div className="mb-2 flex items-start gap-2">
+            <p className="flex-1 text-[13px] font-medium">
+              {fresh.note ? `Invite link for ${fresh.note}` : "New invite link"} — copy it now, it won't be shown again.
+            </p>
+            <button type="button" className="text-faint hover:text-foreground" aria-label="Close" onClick={() => setFresh(null)}>
+              <X className="h-4 w-4" />
+            </button>
+          </div>
+          <div className="flex gap-2">
+            <Input readOnly value={fresh.link} aria-label="Invite link" onFocus={e => e.currentTarget.select()}
+              className="h-9 min-w-0 flex-1 font-mono text-[12px]" />
+            <Button className="h-9 shrink-0" onClick={() => copy(fresh.link)}>
+              <Copy className="mr-1.5 h-3.5 w-3.5" />Copy
+            </Button>
+          </div>
+        </div>
+      )}
+      {loading && <p className="mono-label text-faint">loading…</p>}
+      {!loading && list.length === 0 && !adding && !fresh && (
+        <p className="text-[13px] text-muted-foreground">No invite links. Press + to make one.</p>
+      )}
+      <div className="flex flex-col gap-2">
+        {list.map(inv => (
+          <div key={inv.id} className="flex items-start gap-3 rounded-lg border border-linesoft px-4 py-3">
+            <div className="min-w-0 flex-1">
+              <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+                <span className="break-words text-[13.5px] font-medium">{inv.note || "Invite"}</span>
+                {inv.usedAt
+                  ? <Tag kind="good">joined as {inv.usedBy || "someone"}</Tag>
+                  : <Tag kind="dim">unused</Tag>}
+              </div>
+              <div className="mt-1 text-[12px] text-faint" title={formatFull(inv.usedAt || inv.expiresAt)}>
+                {inv.usedAt ? `used ${formatWhen(inv.usedAt)}` : `expires ${untilText(inv.expiresAt)}`}
+                {inv.createdBy && ` · made by ${inv.createdBy}`}
+              </div>
+              <div className="mt-2 flex flex-wrap gap-1.5">
+                {inv.tagIds.length === 0 && <span className="text-[12px] text-faint">No shared tags — starts with only what they add.</span>}
+                {inv.tagIds.map(id => {
+                  const t = byId.get(id)
+                  return t
+                    ? <TagPill key={id} tag={t} on size="sm" />
+                    : <span key={id} className="text-[12px] text-faint">(deleted tag)</span>
+                })}
+              </div>
+            </div>
+            <Button variant="ghost" size="icon" className="h-7 w-7 shrink-0 text-faint hover:text-want"
+              aria-label={inv.usedAt ? "Remove from list" : "Revoke invite"} title={inv.usedAt ? "Remove from list" : "Revoke"}
+              onClick={() => revoke(inv)}>
+              <X className="h-4 w-4" />
+            </Button>
+          </div>
+        ))}
+        {adding && (
+          <div className="rounded-lg border border-dashed border-linesoft px-4 py-3">
+            <Label>Who it's for (optional)</Label>
+            <Input value={note} onChange={e => setNote(e.target.value)} maxLength={100} placeholder="e.g. Aunt Kim"
+              autoComplete="off" className="h-9 w-full max-w-[280px]" />
+            <div className="mt-3">
+              <Label>Shared tags</Label>
+              <TagPicker tags={tags} value={selected} onChange={setSelected} hidePersonal
+                empty="No shared tags yet — they'll start with only what they add themselves. Create tags under Settings → Tags." />
+              <p className="mt-1.5 text-[12px] text-faint">
+                Leave these off and they start with an empty library of their own. You can change their tags later under Users.
+              </p>
+            </div>
+            <div className="mt-3 flex gap-2">
+              <Button className="h-9" disabled={busy} onClick={create}>{busy ? "Creating…" : "Create link"}</Button>
               <Button variant="outline" className="h-9" onClick={() => setAdding(false)}>Cancel</Button>
             </div>
           </div>

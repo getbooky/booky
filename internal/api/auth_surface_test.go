@@ -13,8 +13,8 @@ import (
 // The whole API surface must refuse unauthenticated callers once any account
 // exists — the only exceptions are the three deliberately open paths (login,
 // the auth probe, the health check) and the surfaces that carry their own
-// credentials (KoReader device tokens, OPDS basic auth), which must still
-// refuse a caller presenting none.
+// credentials (KoReader device tokens, OPDS basic auth, invite links), which
+// must still refuse a caller presenting none.
 //
 // The route list is parsed from server.go itself, so a route added without a
 // thought for auth turns this test red instead of shipping open.
@@ -51,6 +51,17 @@ func TestEveryRouteRefusesUnauthenticated(t *testing.T) {
 		method, pattern := m[1], m[2]
 		path := fill.ReplaceAllString(pattern, "1")
 		if openPaths[path] {
+			continue
+		}
+		// an invite link is its own credential: the person holding one has no
+		// account yet. A token that isn't a live link gets nothing.
+		if strings.HasPrefix(path, "/api/v1/invite/") {
+			req := httptest.NewRequest(method, path, bytes.NewReader([]byte(`{"token":"made-up"}`)))
+			w := httptest.NewRecorder()
+			h.ServeHTTP(w, req)
+			if w.Code != http.StatusNotFound {
+				t.Errorf("%s %s answered %d to a made-up invite token, want 404", method, pattern, w.Code)
+			}
 			continue
 		}
 		req := httptest.NewRequest(method, path, bytes.NewReader([]byte("{}")))

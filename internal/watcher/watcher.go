@@ -180,12 +180,22 @@ func (w *Watcher) pollDueLists(ctx context.Context) {
 			continue
 		}
 		if _, err := w.PollList(ctx, l.ID); err != nil {
-			log.Printf("watcher: poll %q: %v", l.Name, err)
+			log.Printf("watcher: poll %s: %v", l.logName(), err)
 		}
 		if ctx.Err() != nil {
 			return
 		}
 	}
+}
+
+// logName is how a list reads in the log: its name and where it comes from,
+// since two people's shelves are often named alike.
+func (l WatchedList) logName() string {
+	source := "hardcover list " + l.SourceRef
+	if l.Kind == "goodreads_rss" {
+		source = "goodreads " + l.SourceRef
+	}
+	return fmt.Sprintf("%q (%s)", l.Name, source)
 }
 
 func (w *Watcher) listDue(l WatchedList, interval time.Duration) bool {

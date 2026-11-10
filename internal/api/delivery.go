@@ -32,6 +32,9 @@ func (s *Server) requireAuth(next http.Handler) http.Handler {
 		"/api/v1/auth/login":    true,
 		"/api/v1/auth/me":       true,
 		"/api/v1/system/status": true,
+		// an invite link is its own credential: its holder has no account yet
+		"/api/v1/invite/check":  true,
+		"/api/v1/invite/accept": true,
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		p := r.URL.Path
@@ -83,13 +86,18 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	// unraid-style HTTP-on-LAN deployment outright. Secure is set whenever
 	// the request actually arrived over TLS (directly or via proxy), and
 	// HttpOnly + SameSite=Strict hold in both cases.
-	http.SetCookie(w, &http.Cookie{ //nolint:gosec // G124: Secure is request-dependent, see above
+	setSession(w, r, token)
+	log.Printf("auth: %s signed in from %s", user.Username, ip) //nolint:gosec // G706: a validated username and a parsed address
+	writeJSON(w, http.StatusOK, user)
+}
+
+// setSession hands the browser its session cookie.
+func setSession(w http.ResponseWriter, r *http.Request, token string) {
+	http.SetCookie(w, &http.Cookie{ //nolint:gosec // G124: Secure is request-dependent, see handleLogin
 		Name: sessionCookie, Value: token, Path: "/",
 		HttpOnly: true, SameSite: http.SameSiteStrictMode, Secure: isHTTPS(r),
 		MaxAge: int((30 * 24 * time.Hour).Seconds()),
 	})
-	log.Printf("auth: %s signed in from %s", user.Username, ip) //nolint:gosec // G706: a validated username and a parsed address
-	writeJSON(w, http.StatusOK, user)
 }
 
 func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {

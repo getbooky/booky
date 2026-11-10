@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -453,5 +454,96 @@ func TestKindleUpdateDevice(t *testing.T) {
 	})
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("cross-owner edit = %d", rec.Code)
+	}
+}
+
+// An admin can lend their outgoing email to everyone. People without their
+// own then send through it — to Kindle inboxes only — and see nothing of it
+// but the from address.
+func TestKindleSharedOutgoingEmail(t *testing.T) {
+	f := newScopedFixture(t)
+	host, port, mails := fakeSMTPServer(t)
+	bookID := f.shelfBook(t, "Burrow", "epub", []int64{f.mine})
+	samDevice := f.kindleDevice(t, f.userCookie, "Sam's PW", "sam_x1@kindle.com", nil)
+	send := func(device int64) *httptest.ResponseRecorder {
+		rec, _ := f.do(t, f.userCookie, "POST", fmt.Sprintf("/api/v1/books/%d/send", bookID), map[string]any{"deviceId": device})
+		return rec
+	}
+
+	// nothing shared, nothing of sam's own: no send
+	if rec := send(samDevice); rec.Code == http.StatusOK {
+		t.Fatalf("send with no outgoing email: %d", rec.Code)
+	}
+
+	// a plain user can't share theirs
+	body := smtpBody(host, port, "sam@example.com")
+	body["shared"] = true
+	if rec, _ := f.do(t, f.userCookie, "PUT", "/api/v1/kindle/smtp", body); rec.Code != http.StatusForbidden {
+		t.Fatalf("plain user sharing: %d %s", rec.Code, rec.Body)
+	}
+
+	// the admin shares
+	body = smtpBody(host, port, "root.shelf@example.com")
+	body["shared"] = true
+	rec, out := f.do(t, f.adminCooke, "PUT", "/api/v1/kindle/smtp", body)
+	if rec.Code != http.StatusOK || out["config"].(map[string]any)["shared"] != true || out["sharedFrom"] != "" {
+		t.Fatalf("admin share: %d %s", rec.Code, rec.Body)
+	}
+
+	// sam sees the from address and nothing else of the account
+	rec, out = f.do(t, f.userCookie, "GET", "/api/v1/kindle/smtp", nil)
+	if rec.Code != http.StatusOK || out["configured"] != false || out["config"] != nil || out["sharedFrom"] != "root.shelf@example.com" {
+		t.Fatalf("sam's view: %s", rec.Body)
+	}
+	for _, leak := range []string{host, "app-pass-secret"} {
+		if strings.Contains(rec.Body.String(), leak) {
+			t.Fatalf("sam's view leaks %q: %s", leak, rec.Body)
+		}
+	}
+	rec, out = f.do(t, f.userCookie, "GET", "/api/v1/kindle/devices", nil)
+	if d := list(out, "devices")[0].(map[string]any); rec.Code != http.StatusOK || d["emailConfigured"] != true {
+		t.Fatalf("device should be sendable: %s", rec.Body)
+	}
+
+	// sam's book goes out from the admin's address
+	if rec := send(samDevice); rec.Code != http.StatusOK {
+		t.Fatalf("shared send: %d %s", rec.Code, rec.Body)
+	}
+	expectMail(t, mails, "From: root.shelf@example.com", "To: sam_x1@kindle.com", "Subject: Burrow")
+
+	// the borrowed account writes to Kindle inboxes and nowhere else
+	elsewhere := f.kindleDevice(t, f.userCookie, "Not a Kindle", "someone@example.org", nil)
+	if rec := send(elsewhere); rec.Code == http.StatusOK || !strings.Contains(rec.Body.String(), "kindle.com") {
+		t.Fatalf("shared send to a non-Kindle address: %d %s", rec.Code, rec.Body)
+	}
+	if rec, _ := f.do(t, f.userCookie, "POST", fmt.Sprintf("/api/v1/kindle/devices/%d/test", elsewhere), nil); rec.Code == http.StatusOK {
+		t.Fatalf("shared test mail to a non-Kindle address: %d", rec.Code)
+	}
+	// and sam can't use the free-form test mail through it
+	if rec, _ := f.do(t, f.userCookie, "POST", "/api/v1/kindle/smtp/test", map[string]any{"to": "someone@example.org"}); rec.Code == http.StatusOK {
+		t.Fatalf("free-form test through the shared account: %d", rec.Code)
+	}
+
+	// sam's own account, once set, is the one used — anywhere
+	if rec, _ := f.do(t, f.userCookie, "PUT", "/api/v1/kindle/smtp", smtpBody(host, port, "sam@example.com")); rec.Code != http.StatusOK {
+		t.Fatalf("sam's own smtp: %d %s", rec.Code, rec.Body)
+	}
+	if rec := send(elsewhere); rec.Code != http.StatusOK {
+		t.Fatalf("own-account send: %d %s", rec.Code, rec.Body)
+	}
+	expectMail(t, mails, "From: sam@example.com", "To: someone@example.org")
+	if rec, _ := f.do(t, f.userCookie, "DELETE", "/api/v1/kindle/smtp", nil); rec.Code != http.StatusOK {
+		t.Fatal(rec.Body)
+	}
+
+	// the admin stops sharing: sam is back to nothing
+	if rec, _ := f.do(t, f.adminCooke, "PUT", "/api/v1/kindle/smtp", smtpBody(host, port, "root.shelf@example.com")); rec.Code != http.StatusOK {
+		t.Fatal(rec.Body)
+	}
+	if rec := send(samDevice); rec.Code == http.StatusOK {
+		t.Fatal("send after sharing was turned off")
+	}
+	if _, out := f.do(t, f.userCookie, "GET", "/api/v1/kindle/smtp", nil); out["sharedFrom"] != "" {
+		t.Fatalf("sharedFrom after unshare: %v", out["sharedFrom"])
 	}
 }

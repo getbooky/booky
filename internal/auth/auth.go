@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"golang.org/x/crypto/bcrypt"
 )
@@ -149,12 +150,22 @@ func checkUsername(username string) error {
 	if len(username) > 64 {
 		return fmt.Errorf("username must be at most 64 characters")
 	}
-	for _, r := range username {
-		if r < 0x20 || r == 0x7f || r == ':' {
-			return fmt.Errorf("username can't contain colons or control characters")
-		}
+	if strings.ContainsRune(username, ':') || !printable(username) {
+		return fmt.Errorf("username can't contain colons, control characters or invisible characters")
 	}
 	return nil
+}
+
+// printable reports whether every character shows on screen: no control
+// characters, and none of the invisible or direction-flipping ones that let
+// one name pass for another.
+func printable(text string) bool {
+	for _, r := range text {
+		if !unicode.IsPrint(r) {
+			return false
+		}
+	}
+	return true
 }
 
 type opdsHit struct {
@@ -237,9 +248,29 @@ func (s *Store) CreateUser(username, password, role string, tagIDs []int64) (int
 		return 0, err
 	}
 	defer tx.Rollback() //nolint:errcheck // no-op once committed
-	res, err := tx.Exec(`INSERT INTO users (username, password_hash, role) VALUES (?, ?, ?)`,
-		username, string(hash), role)
+	id, err := insertUser(tx, username, string(hash), role, tagIDs)
 	if err != nil {
+		return 0, err
+	}
+	return id, tx.Commit()
+}
+
+// insertUser writes an already-vetted account, its personal tag and its
+// shared tags inside the caller's transaction.
+func insertUser(tx *sql.Tx, username, hash, role string, tagIDs []int64) (int64, error) {
+	var taken int
+	if err := tx.QueryRow(`SELECT COUNT(*) FROM users WHERE username = ? COLLATE NOCASE`, username).Scan(&taken); err != nil {
+		return 0, err
+	}
+	if taken > 0 {
+		return 0, fmt.Errorf("that username is taken")
+	}
+	res, err := tx.Exec(`INSERT INTO users (username, password_hash, role) VALUES (?, ?, ?)`,
+		username, hash, role)
+	if err != nil {
+		if strings.Contains(err.Error(), "UNIQUE") {
+			return 0, fmt.Errorf("that username is taken")
+		}
 		return 0, fmt.Errorf("create user: %w", err)
 	}
 	id, err := res.LastInsertId()
@@ -260,7 +291,7 @@ func (s *Store) CreateUser(username, password, role string, tagIDs []int64) (int
 	if err := setSharedTags(tx, id, tagIDs); err != nil {
 		return 0, err
 	}
-	return id, tx.Commit()
+	return id, nil
 }
 
 // SetUserTags replaces an account's shared tags. The personal tag is never
@@ -399,6 +430,11 @@ func (s *Store) DeleteUser(id int64) error {
 		return err
 	}
 	defer tx.Rollback() //nolint:errcheck // no-op once committed
+	// unused invite links this account handed out stop working with it
+	if _, err := tx.Exec(`DELETE FROM invites WHERE used_at IS NULL AND created_by != ''
+		AND created_by = (SELECT username FROM users WHERE id = ?)`, id); err != nil {
+		return err
+	}
 	for _, q := range []string{
 		`DELETE FROM devices WHERE owner_user_id = ?`,
 		`DELETE FROM kindle_devices WHERE owner_user_id = ?`,
@@ -520,15 +556,24 @@ func (s *Store) Login(username, password, ip string) (token string, user *User, 
 		return "", nil, err
 	}
 
-	token = randomToken()
+	token, err = s.newSession(u.ID)
+	if err != nil {
+		return "", nil, err
+	}
+	return token, &u, nil
+}
+
+// newSession signs an account in and returns the cookie's token.
+func (s *Store) newSession(userID int64) (string, error) {
+	token := randomToken()
 	expires := time.Now().UTC().Add(sessionTTL).Format(time.RFC3339)
 	// only the hash touches the database — the cookie carries the raw token,
 	// so a stolen booky.db can't ride anyone's session
 	if _, err := s.db.Exec(`INSERT INTO sessions (token, user_id, expires_at) VALUES (?, ?, ?)`,
-		HashToken(token), u.ID, expires); err != nil {
-		return "", nil, err
+		HashToken(token), userID, expires); err != nil {
+		return "", err
 	}
-	return token, &u, nil
+	return token, nil
 }
 
 // ChangePassword lets an account set a new password by proving the current

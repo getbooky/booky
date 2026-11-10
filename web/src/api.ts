@@ -552,6 +552,41 @@ export interface ApiBackup {
   createdAt: string
 }
 
+export interface ApiInvite {
+  id: number
+  /** Who the link is for, in the admin's words. */
+  note: string
+  tagIds: number[]
+  createdBy: string
+  createdAt: string
+  expiresAt: string
+  usedAt?: string
+  usedBy?: string
+}
+
+/** Invite links: an admin makes one, and whoever opens it picks their own
+ * username and password. The token is only ever returned by create. */
+export const invites = {
+  list: () => request<{ invites: ApiInvite[] }>("/api/v1/invites"),
+  create: (note: string, tagIds: number[]) =>
+    request<{ invite: ApiInvite; token: string }>("/api/v1/invites", {
+      method: "POST", body: JSON.stringify({ note, tagIds }),
+    }),
+  /** Cancels an unused link; refused (with who joined) if it was used. */
+  revoke: (id: number) => request(`/api/v1/invites/${id}`, { method: "DELETE" }),
+  /** Drops a used link from the list. */
+  forget: (id: number) => request(`/api/v1/invites/${id}?used=1`, { method: "DELETE" }),
+  /** Rejects unless the link still works. The token goes in the body so it
+   * never appears in an address a proxy might log. */
+  check: (token: string) =>
+    request("/api/v1/invite/check", { method: "POST", body: JSON.stringify({ token }) }),
+  /** Creates the account and signs it in. */
+  accept: (token: string, username: string, password: string) =>
+    request<ApiUser>("/api/v1/invite/accept", {
+      method: "POST", body: JSON.stringify({ token, username, password }),
+    }),
+}
+
 export const delivery = {
   me: () => request<{ authRequired: boolean; user?: ApiUser }>("/api/v1/auth/me"),
   login: (username: string, password: string) =>
@@ -625,12 +660,17 @@ export interface ApiSmtpConfig {
   security: "starttls" | "tls" | "none"
   username: string
   passwordSet: boolean
+  /** Admin only: everyone without outgoing email of their own sends
+   * through this account. */
+  shared: boolean
 }
 
 export const kindle = {
-  smtp: () => request<{ configured: boolean; config: ApiSmtpConfig | null }>("/api/v1/kindle/smtp"),
+  /** sharedFrom: the address shared sends come from, when an admin shares
+   * their outgoing email with everyone ("" otherwise, or when it's yours). */
+  smtp: () => request<{ configured: boolean; config: ApiSmtpConfig | null; sharedFrom: string }>("/api/v1/kindle/smtp"),
   // password is write-only: empty keeps the stored one
-  putSmtp: (cfg: Omit<ApiSmtpConfig, "passwordSet"> & { password: string }) =>
+  putSmtp: (cfg: Omit<ApiSmtpConfig, "passwordSet" | "shared"> & { password: string; shared?: boolean }) =>
     request<{ configured: boolean; config: ApiSmtpConfig }>("/api/v1/kindle/smtp", {
       method: "PUT", body: JSON.stringify(cfg),
     }),

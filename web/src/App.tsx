@@ -27,6 +27,7 @@ import { AddBookDialog } from "@/components/AddBookDialog"
 import { useTags } from "@/components/TagPills"
 import { BookDetail } from "@/components/BookDetail"
 import { LoginView } from "@/views/Login"
+import { InviteView, inviteTokenFromHash } from "@/views/Invite"
 import { ReaderView } from "@/views/Reader"
 import { SetupWizard } from "@/components/SetupWizard"
 import { AccessProvider, accessFor } from "@/lib/access"
@@ -99,6 +100,19 @@ export default function App() {
   // a request answered 401 mid-session: the session ended (it ran out, or
   // the password was changed elsewhere) — ask again, which lands on sign-in
   const reloadMe = me.reload
+  // an invite link ("#/invite/<token>") takes over the screen until it's
+  // used or left, signed in or not
+  const [invite, setInvite] = useState(() => inviteTokenFromHash(window.location.hash))
+  useEffect(() => {
+    const onHash = () => setInvite(inviteTokenFromHash(window.location.hash))
+    window.addEventListener("hashchange", onHash)
+    return () => window.removeEventListener("hashchange", onHash)
+  }, [])
+  const leaveInvite = () => {
+    // drop the token from the address so it isn't left in the history
+    window.history.replaceState(null, "", window.location.pathname + window.location.search)
+    setInvite(null)
+  }
   useEffect(() => {
     const onEnded = () => reloadMe()
     window.addEventListener(SESSION_ENDED, onEnded)
@@ -124,6 +138,17 @@ export default function App() {
           <Button className="h-9" onClick={() => me.reload()}>Try again</Button>
         </div>
       </div>
+    )
+  }
+  if (invite) {
+    return (
+      <>
+        <Toaster position="bottom-left" expand />
+        <InviteView token={invite} signedInAs={me.data.user?.username ?? null}
+          onJoined={() => { leaveInvite(); me.reload() }}
+          onLeave={leaveInvite}
+          onSignedOut={me.reload} />
+      </>
     )
   }
   if (me.data?.authRequired && !me.data.user) {

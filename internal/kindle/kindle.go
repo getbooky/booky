@@ -9,6 +9,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"strings"
 
 	"github.com/getbooky/booky/internal/db"
@@ -234,6 +235,9 @@ type SMTPConfig struct {
 	Security    string `json:"security"` // starttls | tls | none
 	Username    string `json:"username"`
 	PasswordSet bool   `json:"passwordSet"`
+	// Shared: everyone without outgoing email of their own sends through
+	// this one. Only an admin's can be.
+	Shared bool `json:"shared"`
 }
 
 var validSecurity = map[string]bool{"starttls": true, "tls": true, "none": true}
@@ -242,9 +246,9 @@ var validSecurity = map[string]bool{"starttls": true, "tls": true, "none": true}
 func (s *Store) GetSMTP(ownerID int64) (*SMTPConfig, error) {
 	var c SMTPConfig
 	var ct []byte
-	err := s.db.QueryRow(`SELECT from_addr, host, port, security, username, password_ct
+	err := s.db.QueryRow(`SELECT from_addr, host, port, security, username, password_ct, shared
 		FROM kindle_smtp WHERE owner_user_id = ?`, ownerID).
-		Scan(&c.FromAddr, &c.Host, &c.Port, &c.Security, &c.Username, &ct)
+		Scan(&c.FromAddr, &c.Host, &c.Port, &c.Security, &c.Username, &ct, &c.Shared)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -307,8 +311,95 @@ func (s *Store) ClearSMTP(ownerID int64) error {
 	return err
 }
 
-// ResolveAccount decrypts the owner's outgoing email into a sendable mailer
-// account. Returns an error naming the gap when the owner has none.
+// SetShared turns sharing of the owner's outgoing email on or off. Turning it
+// on takes it off anyone else's: there is one shared account at most. The
+// caller has already checked the owner is an admin.
+func (s *Store) SetShared(ownerID int64, on bool) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback() //nolint:errcheck // no-op once committed
+	if on {
+		if _, err := tx.Exec(`UPDATE kindle_smtp SET shared = 0 WHERE owner_user_id != ?`, ownerID); err != nil {
+			return err
+		}
+	}
+	if _, err := tx.Exec(`UPDATE kindle_smtp SET shared = ? WHERE owner_user_id = ?`, on, ownerID); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// SharedOwner returns the account whose outgoing email everyone may send
+// through, or 0. A shared row only counts while its owner is still trusted
+// (an admin): a demoted or vanished owner's mailbox isn't lent out.
+func (s *Store) SharedOwner() int64 {
+	var id int64
+	if err := s.db.QueryRow(`SELECT owner_user_id FROM kindle_smtp WHERE shared = 1 ORDER BY owner_user_id LIMIT 1`).Scan(&id); err != nil {
+		return 0
+	}
+	if s.Trusted == nil || !s.Trusted(id) {
+		return 0
+	}
+	return id
+}
+
+// SharedFrom is the address shared sends come from ("" when nothing is
+// shared) — what people must approve on Amazon.
+func (s *Store) SharedFrom() string {
+	id := s.SharedOwner()
+	if id == 0 {
+		return ""
+	}
+	cfg, err := s.GetSMTP(id)
+	if err != nil || cfg == nil {
+		return ""
+	}
+	return cfg.FromAddr
+}
+
+// CanSend reports whether mail for this owner has an account to go out
+// through: their own, or the shared one.
+func (s *Store) CanSend(ownerID int64) bool {
+	if cfg, _ := s.GetSMTP(ownerID); cfg != nil {
+		return true
+	}
+	return s.SharedOwner() != 0
+}
+
+// kindleInbox is one plain address at one of Amazon's Send-to-Kindle
+// domains — nothing a mail server could read as a second recipient.
+var kindleInbox = regexp.MustCompile(`^[A-Za-z0-9._%+-]{1,64}@(kindle\.com|free\.kindle\.com|kindle\.cn)$`)
+
+// KindleAddress reports whether an address is one of Amazon's Send-to-Kindle
+// inboxes.
+func KindleAddress(email string) bool {
+	return kindleInbox.MatchString(strings.ToLower(strings.TrimSpace(email)))
+}
+
+// AccountFor picks the account a send to `to` on the owner's behalf goes out
+// through: the owner's own outgoing email, else the shared one. Someone
+// else's mailbox only ever writes to Kindle inboxes — a borrowed account is
+// for delivering books, not for emailing whoever the borrower likes.
+func (s *Store) AccountFor(ownerID int64, to string) (mailer.Account, error) {
+	if cfg, err := s.GetSMTP(ownerID); err != nil {
+		return mailer.Account{}, err
+	} else if cfg != nil {
+		return s.ResolveAccount(ownerID)
+	}
+	shared := s.SharedOwner()
+	if shared == 0 {
+		return mailer.Account{}, fmt.Errorf("the device owner hasn't set up their outgoing email (Settings → Send to Kindle)")
+	}
+	if !KindleAddress(to) {
+		return mailer.Account{}, fmt.Errorf("the shared outgoing email only sends to @kindle.com addresses — set up your own outgoing email to send anywhere else (Settings → Send to Kindle)")
+	}
+	return s.ResolveAccount(shared)
+}
+
+// ResolveAccount decrypts the owner's own outgoing email into a sendable
+// mailer account. Returns an error naming the gap when the owner has none.
 func (s *Store) ResolveAccount(ownerID int64) (mailer.Account, error) {
 	var acc mailer.Account
 	var ct []byte
