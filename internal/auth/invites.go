@@ -2,16 +2,20 @@ package auth
 
 import (
 	"database/sql"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
 	"time"
+
+	"golang.org/x/crypto/bcrypt"
 )
 
 // Invite links. An admin creates a link and sends it to someone; opening it
 // lets that person choose their own username and password. A link makes one
 // plain account, once, and stops working after InviteTTL.
+//
+// The token is 32 random bytes, so there is nothing to guess and no lockout:
+// a counter here would only let a stranger lock a real invitee out.
 
 // InviteTTL is how long an unused invite link works.
 const InviteTTL = 7 * 24 * time.Hour
@@ -19,9 +23,13 @@ const InviteTTL = 7 * 24 * time.Hour
 // maxPendingInvites bounds how many unused links can be outstanding.
 const maxPendingInvites = 50
 
-// ErrInviteInvalid covers every way a link can be no good — unknown, used,
-// expired, revoked. The caller is told nothing more specific.
-var ErrInviteInvalid = errors.New("this invite link is no longer valid — ask for a new one")
+var (
+	// ErrInviteInvalid covers every way a link can be no good — unknown,
+	// used, expired, revoked. The caller is told nothing more specific.
+	ErrInviteInvalid = errors.New("this invite link is no longer valid — ask for a new one")
+	// ErrInviteUsed is a revoke that came too late.
+	ErrInviteUsed = errors.New("invite already used")
+)
 
 type Invite struct {
 	ID        int64   `json:"id"`
@@ -38,6 +46,8 @@ type Invite struct {
 // shared tags given (none is fine: the account then sees only what it adds).
 // The raw token is returned once and never stored.
 func (s *Store) CreateInvite(createdBy, note string, tagIDs []int64) (token string, inv *Invite, err error) {
+	// before the first account exists everyone is an admin, and the first
+	// account must be one: a link would make it a plain user
 	if !s.Enabled() {
 		return "", nil, fmt.Errorf("create your own account first")
 	}
@@ -45,32 +55,27 @@ func (s *Store) CreateInvite(createdBy, note string, tagIDs []int64) (token stri
 	if len(note) > 100 {
 		return "", nil, fmt.Errorf("note must be at most 100 characters")
 	}
-	tagIDs = dedupe(tagIDs)
-	for _, id := range tagIDs {
-		var owner sql.NullInt64
-		if err := s.db.QueryRow(`SELECT owner_user_id FROM tags WHERE id = ?`, id).Scan(&owner); err != nil {
-			return "", nil, fmt.Errorf("tag %d not found", id)
-		}
-		if owner.Valid {
-			return "", nil, fmt.Errorf("tag %d is an account's personal tag", id)
-		}
+	if !printable(note) {
+		return "", nil, fmt.Errorf("note can't contain control characters")
 	}
 	s.pruneInvites()
+
+	tx, err := s.db.Begin()
+	if err != nil {
+		return "", nil, err
+	}
+	defer tx.Rollback() //nolint:errcheck // no-op once committed
 	var pending int
-	if err := s.db.QueryRow(`SELECT COUNT(*) FROM invites WHERE used_at IS NULL`).Scan(&pending); err != nil {
+	if err := tx.QueryRow(`SELECT COUNT(*) FROM invites WHERE used_at IS NULL`).Scan(&pending); err != nil {
 		return "", nil, err
 	}
 	if pending >= maxPendingInvites {
 		return "", nil, fmt.Errorf("there are already %d unused invite links — revoke some first", pending)
 	}
-	raw, err := json.Marshal(tagIDs)
-	if err != nil {
-		return "", nil, err
-	}
 	token = randomToken()
 	now := time.Now().UTC()
-	res, err := s.db.Exec(`INSERT INTO invites (token_hash, note, tag_ids, created_by, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?)`,
-		HashToken(token), note, string(raw), createdBy, now.Format(time.RFC3339), now.Add(InviteTTL).Format(time.RFC3339))
+	res, err := tx.Exec(`INSERT INTO invites (token_hash, note, created_by, created_at, expires_at) VALUES (?, ?, ?, ?, ?)`,
+		HashToken(token), note, createdBy, now.Format(time.RFC3339), now.Add(InviteTTL).Format(time.RFC3339))
 	if err != nil {
 		return "", nil, err
 	}
@@ -78,7 +83,27 @@ func (s *Store) CreateInvite(createdBy, note string, tagIDs []int64) (token stri
 	if err != nil {
 		return "", nil, err
 	}
-	inv, err = s.invite(`id = ?`, id)
+	seen := map[int64]bool{}
+	for _, tagID := range tagIDs {
+		if seen[tagID] {
+			continue
+		}
+		seen[tagID] = true
+		var owner sql.NullInt64
+		if err := tx.QueryRow(`SELECT owner_user_id FROM tags WHERE id = ?`, tagID).Scan(&owner); err != nil {
+			return "", nil, fmt.Errorf("tag %d not found", tagID)
+		}
+		if owner.Valid {
+			return "", nil, fmt.Errorf("tag %d is an account's personal tag", tagID)
+		}
+		if _, err := tx.Exec(`INSERT INTO invite_tags (invite_id, tag_id) VALUES (?, ?)`, id, tagID); err != nil {
+			return "", nil, err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return "", nil, err
+	}
+	inv, err = s.invite(s.db, `id = ?`, id)
 	return token, inv, err
 }
 
@@ -91,21 +116,49 @@ func (s *Store) ListInvites() ([]Invite, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
 	out := []Invite{}
 	for rows.Next() {
 		inv, err := scanInvite(rows.Scan)
 		if err != nil {
+			rows.Close()
 			return nil, err
 		}
 		out = append(out, *inv)
 	}
-	return out, rows.Err()
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	for i := range out {
+		if out[i].TagIDs, err = inviteTags(s.db, out[i].ID); err != nil {
+			return nil, err
+		}
+	}
+	return out, nil
 }
 
-// RevokeInvite deletes a link, used or not.
-func (s *Store) RevokeInvite(id int64) error {
-	res, err := s.db.Exec(`DELETE FROM invites WHERE id = ?`, id)
+// RevokeInvite cancels an unused link. One that has been used — or is being
+// used this instant — is left alone and reported with ErrInviteUsed and the
+// account it made: the admin asked to keep someone out, and must not be told
+// that worked when the account already exists.
+func (s *Store) RevokeInvite(id int64) (usedBy string, err error) {
+	res, err := s.db.Exec(`DELETE FROM invites WHERE id = ? AND used_at IS NULL`, id)
+	if err != nil {
+		return "", err
+	}
+	if n, _ := res.RowsAffected(); n > 0 {
+		return "", nil
+	}
+	if err := s.db.QueryRow(`SELECT used_by FROM invites WHERE id = ?`, id).Scan(&usedBy); err != nil {
+		return "", fmt.Errorf("invite not found")
+	}
+	return usedBy, ErrInviteUsed
+}
+
+// ForgetInvite drops a used link from the list. It changes nothing about the
+// account the link made.
+func (s *Store) ForgetInvite(id int64) error {
+	res, err := s.db.Exec(`DELETE FROM invites WHERE id = ? AND used_at IS NOT NULL`, id)
 	if err != nil {
 		return err
 	}
@@ -115,81 +168,100 @@ func (s *Store) RevokeInvite(id int64) error {
 	return nil
 }
 
-// CheckInvite reports whether a token is a link that still works. Wrong
-// tokens count against the caller's address like wrong passwords do.
-func (s *Store) CheckInvite(token, ip string) error {
-	_, err := s.guardedInvite(token, ip)
+// CheckInvite reports whether a token is a link that still works.
+func (s *Store) CheckInvite(token string) error {
+	_, err := s.liveInvite(s.db, token)
 	return err
 }
 
-func (s *Store) guardedInvite(token, ip string) (*Invite, error) {
-	key, addr := userKey("invite", "", ip), ipKey("invite", ip)
-	if s.locked(key, addr) {
-		return nil, fmt.Errorf("too many attempts — try again shortly")
-	}
-	inv, err := s.liveInvite(token)
-	if err != nil {
-		s.failed(key, addr)
-	}
-	return inv, err
-}
-
 // AcceptInvite spends a link on a new plain account and signs it in. The
-// link is claimed before the account is made, so two people racing on one
-// link get one account; a failed sign-up (name taken, weak password) hands
-// the link back.
-func (s *Store) AcceptInvite(token, username, password, ip string) (session string, user *User, err error) {
-	inv, err := s.guardedInvite(token, ip)
+// claim and the account are one transaction: two people racing on one link
+// get one account, and a refused sign-up (name taken, weak password) or a
+// crash halfway leaves the link unspent.
+func (s *Store) AcceptInvite(token, username, password string) (session string, user *User, err error) {
+	if err := s.CheckInvite(token); err != nil {
+		return "", nil, err
+	}
+	username = strings.TrimSpace(username)
+	if err := checkInviteUsername(username); err != nil {
+		return "", nil, err
+	}
+	if err := checkPassword(password); err != nil {
+		return "", nil, err
+	}
+	// hashing is the slow part: it happens only for a link that looked
+	// valid a moment ago, and outside the transaction
+	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+	if err != nil {
+		return "", nil, err
+	}
+
+	tx, err := s.db.Begin()
+	if err != nil {
+		return "", nil, err
+	}
+	defer tx.Rollback() //nolint:errcheck // no-op once committed
+	inv, err := s.liveInvite(tx, token)
 	if err != nil {
 		return "", nil, err
 	}
 	now := time.Now().UTC().Format(time.RFC3339)
-	res, err := s.db.Exec(`UPDATE invites SET used_at = ? WHERE id = ? AND used_at IS NULL AND expires_at > ?`,
-		now, inv.ID, now)
+	res, err := tx.Exec(`UPDATE invites SET used_at = ?, used_by = ? WHERE id = ? AND used_at IS NULL AND expires_at > ?`,
+		now, username, inv.ID, now)
 	if err != nil {
 		return "", nil, err
 	}
 	if n, _ := res.RowsAffected(); n == 0 {
 		return "", nil, ErrInviteInvalid
 	}
-	release := func() {
-		_, _ = s.db.Exec(`UPDATE invites SET used_at = NULL WHERE id = ?`, inv.ID)
-	}
-	id, err := s.CreateUser(username, password, "user", s.sharedTags(inv.TagIDs))
+	tags, err := inviteTags(tx, inv.ID)
 	if err != nil {
-		release()
 		return "", nil, err
 	}
-	user = s.UserByID(id)
-	if user == nil {
-		return "", nil, fmt.Errorf("account created, but it couldn't be loaded — sign in")
-	}
-	_, _ = s.db.Exec(`UPDATE invites SET used_by = ? WHERE id = ?`, user.Username, inv.ID)
-	session, err = s.newSession(id)
+	id, err := insertUser(tx, username, string(hash), "user", tags)
 	if err != nil {
-		return "", nil, fmt.Errorf("account created — sign in to continue")
+		return "", nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return "", nil, err
+	}
+	if user = s.UserByID(id); user == nil {
+		return "", nil, fmt.Errorf("your account was created — sign in to continue")
+	}
+	if session, err = s.newSession(id); err != nil {
+		return "", nil, fmt.Errorf("your account was created — sign in to continue")
 	}
 	return session, user, nil
 }
 
-// sharedTags keeps the ids that are still shared tags: one deleted since the
-// link was made shouldn't sink the sign-up.
-func (s *Store) sharedTags(ids []int64) []int64 {
-	out := []int64{}
-	for _, id := range ids {
-		var n int
-		if err := s.db.QueryRow(`SELECT COUNT(*) FROM tags WHERE id = ? AND owner_user_id IS NULL`, id).Scan(&n); err == nil && n > 0 {
-			out = append(out, id)
+// checkInviteUsername is the policy for a name someone outside picks for
+// themselves. It is narrower than what an admin may type: no spaces, no
+// look-alike or invisible characters to pass one account off as another.
+func checkInviteUsername(username string) error {
+	if len(username) < 2 || len(username) > 32 {
+		return fmt.Errorf("username must be 2 to 32 characters")
+	}
+	for _, r := range username {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '.', r == '_', r == '-':
+		default:
+			return fmt.Errorf("username can only use letters, numbers, dots, dashes and underscores")
 		}
 	}
-	return out
+	return nil
 }
 
-func (s *Store) liveInvite(token string) (*Invite, error) {
+// querier is the part of *sql.DB and *sql.Tx the lookups need.
+type querier interface {
+	QueryRow(query string, args ...any) *sql.Row
+	Query(query string, args ...any) (*sql.Rows, error)
+}
+
+func (s *Store) liveInvite(q querier, token string) (*Invite, error) {
 	if token == "" || len(token) > 200 {
 		return nil, ErrInviteInvalid
 	}
-	inv, err := s.invite(`token_hash = ? AND used_at IS NULL AND expires_at > ?`,
+	inv, err := s.invite(q, `token_hash = ? AND used_at IS NULL AND expires_at > ?`,
 		HashToken(token), time.Now().UTC().Format(time.RFC3339))
 	if err != nil {
 		return nil, ErrInviteInvalid
@@ -204,31 +276,40 @@ func (s *Store) pruneInvites() {
 		now.Format(time.RFC3339), now.Add(-90*24*time.Hour).Format(time.RFC3339))
 }
 
-const inviteColumns = `id, note, tag_ids, created_by, created_at, expires_at, COALESCE(used_at, ''), used_by`
+const inviteColumns = `id, note, created_by, created_at, expires_at, COALESCE(used_at, ''), used_by`
 
-func (s *Store) invite(where string, args ...any) (*Invite, error) {
-	return scanInvite(s.db.QueryRow(`SELECT `+inviteColumns+` FROM invites WHERE `+where, args...).Scan)
+func (s *Store) invite(q querier, where string, args ...any) (*Invite, error) {
+	inv, err := scanInvite(q.QueryRow(`SELECT `+inviteColumns+` FROM invites WHERE `+where, args...).Scan)
+	if err != nil {
+		return nil, err
+	}
+	if inv.TagIDs, err = inviteTags(q, inv.ID); err != nil {
+		return nil, err
+	}
+	return inv, nil
 }
 
 func scanInvite(scan func(...any) error) (*Invite, error) {
-	var inv Invite
-	var raw string
-	if err := scan(&inv.ID, &inv.Note, &raw, &inv.CreatedBy, &inv.CreatedAt, &inv.ExpiresAt, &inv.UsedAt, &inv.UsedBy); err != nil {
+	inv := Invite{TagIDs: []int64{}}
+	if err := scan(&inv.ID, &inv.Note, &inv.CreatedBy, &inv.CreatedAt, &inv.ExpiresAt, &inv.UsedAt, &inv.UsedBy); err != nil {
 		return nil, err
 	}
-	inv.TagIDs = []int64{}
-	_ = json.Unmarshal([]byte(raw), &inv.TagIDs)
 	return &inv, nil
 }
 
-func dedupe(ids []int64) []int64 {
-	seen := map[int64]bool{}
-	out := []int64{}
-	for _, id := range ids {
-		if !seen[id] {
-			seen[id] = true
-			out = append(out, id)
-		}
+func inviteTags(q querier, inviteID int64) ([]int64, error) {
+	rows, err := q.Query(`SELECT tag_id FROM invite_tags WHERE invite_id = ? ORDER BY tag_id`, inviteID)
+	if err != nil {
+		return nil, err
 	}
-	return out
+	defer rows.Close()
+	out := []int64{}
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		out = append(out, id)
+	}
+	return out, rows.Err()
 }

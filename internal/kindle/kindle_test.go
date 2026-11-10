@@ -139,3 +139,18 @@ func TestSMTPRoundTripAndPasswordKeep(t *testing.T) {
 		t.Fatal("clear should remove the config")
 	}
 }
+
+func TestKindleAddress(t *testing.T) {
+	for _, ok := range []string{"sam_x1@kindle.com", " Sam.B+1@Kindle.com ", "a@free.kindle.com", "a@kindle.cn"} {
+		if !KindleAddress(ok) {
+			t.Errorf("%q should be a Kindle inbox", ok)
+		}
+	}
+	for _, bad := range []string{"", "a@example.org", "a@kindle.com.evil.org", "a@notkindle.com", "kindle.com",
+		"victim@example.org,a@kindle.com", "victim@example.org a@kindle.com", "a@b@kindle.com",
+		"<a@kindle.com>", "a@kindle.com\r\nBcc: x@example.org", "a@sub.kindle.com"} {
+		if KindleAddress(bad) {
+			t.Errorf("%q must not pass as a Kindle inbox", bad)
+		}
+	}
+}

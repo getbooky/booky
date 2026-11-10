@@ -78,9 +78,11 @@ export function InviteView({ token, signedInAs, onJoined, onLeave, onSignedOut }
     )
   }
 
+  const name = username.trim()
+  const badName = name !== "" && !/^[A-Za-z0-9._-]{2,32}$/.test(name)
   const tooShort = password.length > 0 && password.length < 8
   const mismatch = again.length > 0 && again !== password
-  const ready = username.trim() !== "" && password.length >= 8 && again === password
+  const ready = name !== "" && !badName && password.length >= 8 && again === password
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -88,7 +90,7 @@ export function InviteView({ token, signedInAs, onJoined, onLeave, onSignedOut }
     setBusy(true)
     setError(null)
     try {
-      await invites.accept(token, username.trim(), password)
+      await invites.accept(token, name, password)
       onJoined()
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
@@ -104,7 +106,11 @@ export function InviteView({ token, signedInAs, onJoined, onLeave, onSignedOut }
         <div className="mb-4">
           <label htmlFor="invite-username" className="mono-label mb-1.5 block text-muted-foreground">Username</label>
           <Input id="invite-username" name="username" autoFocus value={username} onChange={e => setUsername(e.target.value)}
-            autoComplete="username" autoCapitalize="none" autoCorrect="off" spellCheck={false} maxLength={64} className="h-10" />
+            autoComplete="username" autoCapitalize="none" autoCorrect="off" spellCheck={false} maxLength={32}
+            aria-describedby="invite-username-hint" className="h-10" />
+          <p id="invite-username-hint" className={`mt-1.5 text-[12px] ${badName ? "text-want" : "text-faint"}`}>
+            2 to 32 letters, numbers, dots, dashes or underscores.
+          </p>
         </div>
         <div className="mb-4">
           <label htmlFor="invite-password" className="mono-label mb-1.5 block text-muted-foreground">Password</label>

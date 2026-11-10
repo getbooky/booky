@@ -1,6 +1,7 @@
 import { useState } from "react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
+import { Switch } from "@/components/ui/switch"
 import { Tag } from "@/components/bits"
 import { kindle } from "@/api"
 import type { ApiKindleDevice, ApiSmtpConfig, ApiTag } from "@/api"
@@ -101,7 +102,7 @@ function KindleDeviceRow({ device, tags, allowed, keepPersonal, onChanged }: {
             <Tag key={id} kind="info">auto · {byId.get(id)?.name ?? `#${id}`}</Tag>
           ))}
       {!device.emailConfigured && (
-        <Tag kind="want">owner email not set</Tag>
+        <Tag kind="want">no outgoing email</Tag>
       )}
       <div className="ml-auto flex gap-2">
         <Button variant="outline" className="h-8" disabled={testing || !device.emailConfigured} onClick={test}>
@@ -145,8 +146,10 @@ function KindleDeviceRow({ device, tags, allowed, keepPersonal, onChanged }: {
 /* ---------- Outgoing email ---------- */
 
 function OutgoingEmailCard({ configured, onChanged }: { configured: boolean; onChanged: () => void }) {
+  const { isAdmin } = useAccess()
   const { data, reload } = useApi(() => kindle.smtp())
   const cfg = data?.config
+  const sharedFrom = data?.sharedFrom ?? ""
   const [draft, setDraft] = useState<Omit<ApiSmtpConfig, "passwordSet"> | null>(null)
   const [password, setPassword] = useState("")
   const [editingPassword, setEditingPassword] = useState(false)
@@ -155,13 +158,14 @@ function OutgoingEmailCard({ configured, onChanged }: { configured: boolean; onC
   const form = draft ?? {
     fromAddr: cfg?.fromAddr ?? "", host: cfg?.host ?? "", port: cfg?.port ?? 587,
     security: cfg?.security ?? "starttls", username: cfg?.username ?? "",
+    shared: cfg?.shared ?? false,
   }
   const edit = (patch: Partial<typeof form>) => setDraft({ ...form, ...patch })
 
   const save = async () => {
     setBusy(true)
     try {
-      await kindle.putSmtp({ ...form, password })
+      await kindle.putSmtp({ ...form, shared: isAdmin && form.shared, password })
       toast.success("Outgoing email saved")
       setDraft(null); setPassword(""); setEditingPassword(false)
       reload(); onChanged()
@@ -197,14 +201,25 @@ function OutgoingEmailCard({ configured, onChanged }: { configured: boolean; onC
 
   return (
     <Card title="Outgoing email"
-      action={configured ? <Tag kind="good">configured</Tag> : <Tag kind="dim">not set</Tag>}
-      desc="The account your books are sent from — required before your devices can receive anything. Use an app password, not your real one.">
+      action={configured
+        ? <Tag kind="good">{cfg?.shared ? "configured · shared" : "configured"}</Tag>
+        : sharedFrom ? <Tag kind="info">using the shared account</Tag> : <Tag kind="dim">not set</Tag>}
+      desc={sharedFrom && !configured
+        ? "Optional. Set this up only if you'd rather your books came from your own email address. Use an app password, not your real one."
+        : "The account your books are sent from — required before your devices can receive anything. Use an app password, not your real one."}>
+      {sharedFrom && (
+        <div className="mb-4 max-w-xl rounded-r-lg border-l-[3px] border-info bg-info/10 px-4 py-2.5 text-[13px]">
+          {configured
+            ? <>A shared account (<span className="font-medium [overflow-wrap:anywhere]">{sharedFrom}</span>) is available, but your books go out through your own email below.</>
+            : <>Your books are sent from <span className="font-medium [overflow-wrap:anywhere]">{sharedFrom}</span>, an account shared with everyone here. Add that address to your Kindle's approved senders on Amazon (Preferences → Personal Document Settings). It only sends to @kindle.com addresses.</>}
+        </div>
+      )}
       <div className="grid max-w-xl gap-4">
         <div>
           <Label>From address</Label>
           <Input value={form.fromAddr} onChange={e => edit({ fromAddr: e.target.value })} placeholder="you@gmail.com" />
         </div>
-        <div className="grid grid-cols-2 gap-3">
+        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
           <div>
             <Label>SMTP server</Label>
             <Input value={form.host} onChange={e => edit({ host: e.target.value })} placeholder="smtp.gmail.com" />
@@ -214,7 +229,7 @@ function OutgoingEmailCard({ configured, onChanged }: { configured: boolean; onC
             <div className="flex gap-2">
               <Input value={String(form.port)} inputMode="numeric" className="w-[76px]"
                 onChange={e => edit({ port: Number(e.target.value) || 0 })} />
-              <select className="h-9 flex-1 rounded-md border border-input bg-transparent px-2.5 text-[12.5px]"
+              <select className="h-9 min-w-0 flex-1 rounded-md border border-input bg-transparent px-2.5 text-[12.5px]"
                 value={form.security} onChange={e => edit({ security: e.target.value as ApiSmtpConfig["security"] })}>
                 <option value="starttls">STARTTLS</option>
                 <option value="tls">TLS (implicit, 465)</option>
@@ -223,7 +238,7 @@ function OutgoingEmailCard({ configured, onChanged }: { configured: boolean; onC
             </div>
           </div>
         </div>
-        <div className="grid grid-cols-2 gap-3">
+        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
           <div>
             <Label>Username</Label>
             <Input value={form.username} onChange={e => edit({ username: e.target.value })} placeholder="you@gmail.com" />
@@ -241,6 +256,18 @@ function OutgoingEmailCard({ configured, onChanged }: { configured: boolean; onC
             )}
           </div>
         </div>
+        {isAdmin && (
+          <label className="flex items-start gap-3 rounded-lg border border-linesoft px-4 py-3">
+            <Switch className="mt-0.5" checked={form.shared} onCheckedChange={on => edit({ shared: on })} aria-label="Share with everyone" />
+            <span>
+              <span className="block text-[13px] font-medium">Share with everyone</span>
+              <span className="block text-[12.5px] text-muted-foreground">
+                People who haven't set up outgoing email of their own send through this account, to @kindle.com addresses only.
+                They'll see the from address so they can approve it on Amazon. Takes effect when you save.
+              </span>
+            </span>
+          </label>
+        )}
         <div className="flex flex-wrap items-center gap-2">
           <Button className="h-9" disabled={busy || !form.fromAddr.trim() || !form.host.trim()} onClick={save}>Save</Button>
           <Input value={testTo} onChange={e => setTestTo(e.target.value)} placeholder="name_xxxx@kindle.com"
@@ -268,6 +295,7 @@ export function KindlePanel() {
   const allowed = isAdmin ? undefined : tagIds
   const devices = data?.devices ?? []
   const configured = smtp.data?.configured === true
+  const canSend = configured || (smtp.data?.sharedFrom ?? "") !== ""
   const [adding, setAdding] = useState(false)
   const [name, setName] = useState("")
   const [email, setEmail] = useState("")
@@ -295,10 +323,10 @@ export function KindlePanel() {
         }
         desc={
           isAdmin
-            ? "Books are emailed to a Kindle's @kindle.com address — EPUB or PDF, up to 50 MB. The Kindle must approve your from address first (Amazon → Preferences → Personal Document Settings). Auto-send emails books carrying the tags you pick — each book once. You see every account's devices; each sends through its owner's outgoing email and never reaches past its owner's tags."
-            : "Books are emailed to a Kindle's @kindle.com address — EPUB or PDF, up to 50 MB. The Kindle must approve your from address first (Amazon → Preferences → Personal Document Settings). Auto-send emails books carrying the tags you pick — each book once. Only your devices appear here."
+            ? "Books are emailed to a Kindle's @kindle.com address — EPUB or PDF, up to 50 MB. The Kindle must approve your from address first (Amazon → Preferences → Personal Document Settings). Auto-send emails books carrying the tags you pick — each book once. You see every account's devices; each sends through its owner's outgoing email (or the shared one, if you share yours below) and never reaches past its owner's tags."
+            : "Books are emailed to a Kindle's @kindle.com address — EPUB or PDF, up to 50 MB. The Kindle must approve the from address first (Amazon → Preferences → Personal Document Settings); it's shown under Outgoing email below. Auto-send emails books carrying the tags you pick — each book once. Only your devices appear here."
         }>
-        {!configured && !smtp.loading && (
+        {!canSend && !smtp.loading && (
           <div className="mb-3 rounded-r-lg border-l-[3px] border-want bg-want/10 px-4 py-2.5 text-[13px]">
             Set up your outgoing email below to turn on Send to Kindle.
           </div>

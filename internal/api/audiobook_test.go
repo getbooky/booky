@@ -148,7 +148,9 @@ func TestReadAlongFilesAreWhitelisted(t *testing.T) {
 
 func TestAudiobookUploadRejectsNonAudio(t *testing.T) {
 	f := newScopedFixture(t)
-	if f.srv.ReadAlong.ToolsErr != nil {
+	// uploads are checked with ffprobe alone: an install with ffmpeg but no
+	// speech model still takes (and vets) them
+	if f.srv.ReadAlong.Tools.FFprobe == "" {
 		book := idStr(f.addBook(t, f.userCookie, map[string]any{"title": "Haze"}, nil)["id"])
 		if rec := f.uploadAudio(t, f.userCookie, book, map[string][]byte{"a.mp3": []byte("ID3")}); rec.Code != http.StatusServiceUnavailable {
 			t.Fatalf("without ffmpeg: got %d, want 503", rec.Code)

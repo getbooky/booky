@@ -2,9 +2,11 @@ package api
 
 import (
 	"errors"
+	"fmt"
 	"log"
 	"net"
 	"net/http"
+	"strconv"
 
 	"github.com/getbooky/booky/internal/auth"
 )
@@ -46,10 +48,14 @@ func (s *Server) handleCreateInvite(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, err)
 		return
 	}
-	log.Printf("auth: %s created an invite link", by) //nolint:gosec // G706: a validated username
+	log.Printf("auth: %q created an invite link", by) //nolint:gosec // G706: %q escapes it
 	writeJSON(w, http.StatusCreated, map[string]any{"invite": inv, "token": token})
 }
 
+// handleRevokeInvite cancels an unused link, or with ?used=1 drops a used
+// one from the list. Revoking a link that turns out to have been used is
+// refused and says who joined: the caller wanted someone kept out, and the
+// account exists.
 func (s *Server) handleRevokeInvite(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAdmin(w, r) {
 		return
@@ -59,18 +65,41 @@ func (s *Server) handleRevokeInvite(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, errors.New("bad id"))
 		return
 	}
-	if err := s.Auth.RevokeInvite(id); err != nil {
-		writeErr(w, http.StatusNotFound, err)
+	if r.URL.Query().Get("used") == "1" {
+		if err := s.Auth.ForgetInvite(id); err != nil {
+			writeErr(w, http.StatusNotFound, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+	usedBy, err := s.Auth.RevokeInvite(id)
+	switch {
+	case errors.Is(err, auth.ErrInviteUsed):
+		who := "someone"
+		if usedBy != "" {
+			who = strconv.Quote(usedBy)
+		}
+		writeErr(w, http.StatusConflict, fmt.Errorf("that link was already used — %s joined with it. Delete the account under Users if they shouldn't have one", who))
+	case err != nil:
+		writeErr(w, http.StatusNotFound, err)
+	default:
+		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+	}
 }
 
 // handleInviteCheck lets the sign-up page say up front whether a link still
-// works. It gives away nothing about the link beyond that.
+// works. It gives away nothing about the link beyond that. The token rides
+// in the body, never the address, so it stays out of proxy access logs.
 func (s *Server) handleInviteCheck(w http.ResponseWriter, r *http.Request) {
-	ip, _, _ := net.SplitHostPort(r.RemoteAddr)
-	if err := s.Auth.CheckInvite(r.PathValue("token"), ip); err != nil {
+	var req struct {
+		Token string `json:"token"`
+	}
+	if err := decodeJSON(r, &req); err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	if err := s.Auth.CheckInvite(req.Token); err != nil {
 		writeErr(w, inviteStatus(err), err)
 		return
 	}
@@ -80,6 +109,7 @@ func (s *Server) handleInviteCheck(w http.ResponseWriter, r *http.Request) {
 // handleInviteAccept creates the account the link stands for and signs it in.
 func (s *Server) handleInviteAccept(w http.ResponseWriter, r *http.Request) {
 	var req struct {
+		Token    string `json:"token"`
 		Username string `json:"username"`
 		Password string `json:"password"`
 	}
@@ -87,14 +117,20 @@ func (s *Server) handleInviteAccept(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, err)
 		return
 	}
-	ip, _, _ := net.SplitHostPort(r.RemoteAddr)
-	token, user, err := s.Auth.AcceptInvite(r.PathValue("token"), req.Username, req.Password, ip)
+	// a link makes a new account for someone who has none: a signed-in
+	// browser would end up holding two sessions
+	if s.sessionUser(r) != nil {
+		writeErr(w, http.StatusBadRequest, errors.New("you're already signed in — sign out to use an invite link"))
+		return
+	}
+	token, user, err := s.Auth.AcceptInvite(req.Token, req.Username, req.Password)
 	if err != nil {
 		writeErr(w, inviteStatus(err), err)
 		return
 	}
 	setSession(w, r, token)
-	log.Printf("auth: %s joined with an invite link from %s", user.Username, ip) //nolint:gosec // G706: a validated username and a parsed address
+	ip, _, _ := net.SplitHostPort(r.RemoteAddr)
+	log.Printf("auth: %q joined with an invite link from %s", user.Username, ip) //nolint:gosec // G706: %q escapes it; the address is parsed
 	writeJSON(w, http.StatusCreated, user)
 }
 

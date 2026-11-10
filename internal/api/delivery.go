@@ -32,11 +32,14 @@ func (s *Server) requireAuth(next http.Handler) http.Handler {
 		"/api/v1/auth/login":    true,
 		"/api/v1/auth/me":       true,
 		"/api/v1/system/status": true,
+		// an invite link is its own credential: its holder has no account yet
+		"/api/v1/invite/check":  true,
+		"/api/v1/invite/accept": true,
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		p := r.URL.Path
 		if !strings.HasPrefix(p, "/api/") || open[p] ||
-			strings.HasPrefix(p, "/api/koreader/") || strings.HasPrefix(p, "/api/v1/invite/") {
+			strings.HasPrefix(p, "/api/koreader/") {
 			next.ServeHTTP(w, r)
 			return
 		}

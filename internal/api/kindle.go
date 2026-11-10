@@ -91,7 +91,19 @@ func (s *Server) handleKindleSMTPGet(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"configured": cfg != nil, "config": cfg})
+	writeJSON(w, http.StatusOK, s.smtpView(owner, cfg))
+}
+
+// smtpView is what the Send to Kindle settings show: the caller's own
+// outgoing email, and — when an admin shares theirs — the address shared
+// sends come from, which is what people approve on Amazon. Nothing else
+// about the shared account is shown to anyone but its owner.
+func (s *Server) smtpView(owner int64, cfg *kindle.SMTPConfig) map[string]any {
+	out := map[string]any{"configured": cfg != nil, "config": cfg, "sharedFrom": ""}
+	if shared := s.Kindle.SharedOwner(); shared != 0 && shared != owner {
+		out["sharedFrom"] = s.Kindle.SharedFrom()
+	}
+	return out
 }
 
 func (s *Server) handleKindleSMTPPut(w http.ResponseWriter, r *http.Request) {
@@ -108,8 +120,17 @@ func (s *Server) handleKindleSMTPPut(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, err)
 		return
 	}
+	// lending a mailbox to everyone is an admin's call
+	if req.Shared && !s.access(r).admin() {
+		writeErr(w, http.StatusForbidden, errors.New("only an admin can share their outgoing email"))
+		return
+	}
 	if err := s.Kindle.SetSMTP(owner, req.SMTPConfig, req.Password); err != nil {
 		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	if err := s.Kindle.SetShared(owner, req.Shared); err != nil {
+		writeErr(w, http.StatusInternalServerError, err)
 		return
 	}
 	cfg, err := s.Kindle.GetSMTP(owner)
@@ -117,7 +138,7 @@ func (s *Server) handleKindleSMTPPut(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"configured": true, "config": cfg})
+	writeJSON(w, http.StatusOK, s.smtpView(owner, cfg))
 }
 
 func (s *Server) handleKindleSMTPDelete(w http.ResponseWriter, r *http.Request) {
@@ -201,8 +222,7 @@ func (s *Server) handleKindleDevices(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		if _, probed := emailSet[d.OwnerID]; !probed {
-			cfg, _ := s.Kindle.GetSMTP(d.OwnerID)
-			emailSet[d.OwnerID] = cfg != nil
+			emailSet[d.OwnerID] = s.Kindle.CanSend(d.OwnerID)
 		}
 		view := kindleDeviceView{Device: d, EmailConfigured: emailSet[d.OwnerID]}
 		if a.admin() {
@@ -323,7 +343,7 @@ func (s *Server) handleKindleDeviceTest(w http.ResponseWriter, r *http.Request) 
 		writeErr(w, http.StatusNotFound, errors.New("device not found"))
 		return
 	}
-	acc, err := s.Kindle.ResolveAccount(device.OwnerID)
+	acc, err := s.Kindle.AccountFor(device.OwnerID, device.Email)
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, err)
 		return
@@ -407,7 +427,7 @@ func (s *Server) sendToKindle(ctx context.Context, device *kindle.Device, bookID
 	if !ok {
 		return fmt.Errorf("%q is %s — Amazon only accepts EPUB and PDF by email", book.Title, strings.ToUpper(format))
 	}
-	acc, err := s.Kindle.ResolveAccount(device.OwnerID)
+	acc, err := s.Kindle.AccountFor(device.OwnerID, device.Email)
 	if err != nil {
 		return err
 	}

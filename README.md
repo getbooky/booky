@@ -185,7 +185,12 @@ safe:
   not an admin. Rather than making up a password for them, send an invite
   link (Settings → Users → Invite links): they choose their own username
   and password. A link makes one account, works once and expires after 7
-  days — whoever holds it can use it, so send it privately. They can change their password under Settings → Account; if
+  days — whoever holds it can use it, so send it privately.
+- **Send to Kindle needs an outgoing email account.** Each person can set
+  up their own, or an admin can share theirs (Settings → Send to Kindle →
+  Share with everyone). People using the shared account see its from
+  address — they have to approve it on Amazon — and it only ever sends to
+  `@kindle.com` addresses on their behalf. They can change their password under Settings → Account; if
   they forget it, an admin sets a new one from Settings → Users.
 - **Passwords**: at least 8 characters. Wrong guesses lock that username
   from that address for 30 seconds, doubling up to 15 minutes; an address

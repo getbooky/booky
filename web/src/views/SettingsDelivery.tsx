@@ -273,11 +273,13 @@ function InvitesCard({ tags }: { tags: ApiTag[] }) {
     const what = inv.note ? `the invite for "${inv.note}"` : "this invite"
     if (!inv.usedAt && !window.confirm(`Revoke ${what}?\n\nThe link stops working straight away.`)) return
     try {
-      await invites.revoke(inv.id)
-      reload()
+      if (inv.usedAt) await invites.forget(inv.id)
+      else await invites.revoke(inv.id)
     } catch (e) {
-      toast.error(`Couldn't remove it: ${e instanceof Error ? e.message : e}`)
+      // most likely: the link was used since this list was loaded
+      toast.error(e instanceof Error ? e.message : String(e))
     }
+    reload()
   }
 
   return (

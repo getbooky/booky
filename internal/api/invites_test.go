@@ -38,19 +38,19 @@ func TestInviteLinks(t *testing.T) {
 	}
 
 	// the link works without a session
-	if rec, _ := f.do(t, nil, "GET", "/api/v1/invite/"+token, nil); rec.Code != http.StatusOK {
+	if rec, _ := f.do(t, nil, "POST", "/api/v1/invite/check", map[string]any{"token": token}); rec.Code != http.StatusOK {
 		t.Fatalf("check: %d %s", rec.Code, rec.Body)
 	}
-	if rec, _ := f.do(t, nil, "GET", "/api/v1/invite/nope", nil); rec.Code != http.StatusNotFound {
+	if rec, _ := f.do(t, nil, "POST", "/api/v1/invite/check", map[string]any{"token": "nope"}); rec.Code != http.StatusNotFound {
 		t.Fatalf("bad token: %d", rec.Code)
 	}
 	// a link only makes plain accounts: asking for a role is refused outright
-	if rec, _ := f.do(t, nil, "POST", "/api/v1/invite/"+token,
-		map[string]any{"username": "kim", "password": "long enough password", "role": "admin"}); rec.Code != http.StatusBadRequest {
+	if rec, _ := f.do(t, nil, "POST", "/api/v1/invite/accept",
+		map[string]any{"token": token, "username": "kim", "password": "long enough password", "role": "admin"}); rec.Code != http.StatusBadRequest {
 		t.Fatalf("accept with a role: %d", rec.Code)
 	}
-	rec, out = f.do(t, nil, "POST", "/api/v1/invite/"+token,
-		map[string]any{"username": "kim", "password": "long enough password"})
+	rec, out = f.do(t, nil, "POST", "/api/v1/invite/accept",
+		map[string]any{"token": token, "username": "kim", "password": "long enough password"})
 	if rec.Code != http.StatusCreated || out["role"] != "user" {
 		t.Fatalf("accept: %d %s", rec.Code, rec.Body)
 	}
@@ -66,9 +66,29 @@ func TestInviteLinks(t *testing.T) {
 		t.Fatalf("invited account reached the user list: %d", rec.Code)
 	}
 	// spent
-	if rec, _ := f.do(t, nil, "POST", "/api/v1/invite/"+token,
-		map[string]any{"username": "kim2", "password": "long enough password"}); rec.Code != http.StatusNotFound {
+	if rec, _ := f.do(t, nil, "POST", "/api/v1/invite/accept",
+		map[string]any{"token": token, "username": "kim2", "password": "long enough password"}); rec.Code != http.StatusNotFound {
 		t.Fatalf("second use: %d", rec.Code)
+	}
+
+	// revoking the used link is refused and names who joined; it can only
+	// be dropped from the list
+	_, listed := f.do(t, f.adminCooke, "GET", "/api/v1/invites", nil)
+	usedID := idStr(list(listed, "invites")[0].(map[string]any)["id"])
+	if rec, out := f.do(t, f.adminCooke, "DELETE", "/api/v1/invites/"+usedID, nil); rec.Code != http.StatusConflict || !strings.Contains(out["error"].(string), "kim") {
+		t.Fatalf("revoke of a used link: %d %s", rec.Code, rec.Body)
+	}
+	if rec, _ := f.do(t, f.adminCooke, "DELETE", "/api/v1/invites/"+usedID+"?used=1", nil); rec.Code != http.StatusOK {
+		t.Fatalf("forget: %d", rec.Code)
+	}
+	// a signed-in browser can't spend a link
+	rec, out = f.do(t, f.adminCooke, "POST", "/api/v1/invites", map[string]any{})
+	if rec.Code != http.StatusCreated {
+		t.Fatal(rec.Body)
+	}
+	if rec, _ := f.do(t, f.userCookie, "POST", "/api/v1/invite/accept",
+		map[string]any{"token": out["token"], "username": "second", "password": "long enough password"}); rec.Code != http.StatusBadRequest {
+		t.Fatalf("accept while signed in: %d", rec.Code)
 	}
 
 	// revoke
@@ -81,7 +101,7 @@ func TestInviteLinks(t *testing.T) {
 	if rec, _ := f.do(t, f.adminCooke, "DELETE", "/api/v1/invites/"+id, nil); rec.Code != http.StatusOK {
 		t.Fatalf("revoke: %d", rec.Code)
 	}
-	if rec, _ := f.do(t, nil, "GET", "/api/v1/invite/"+token, nil); rec.Code != http.StatusNotFound {
+	if rec, _ := f.do(t, nil, "POST", "/api/v1/invite/check", map[string]any{"token": token}); rec.Code != http.StatusNotFound {
 		t.Fatalf("revoked link: %d", rec.Code)
 	}
 }
