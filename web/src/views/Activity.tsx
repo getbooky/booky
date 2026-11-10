@@ -77,7 +77,7 @@ export function ActivityView() {
                     </div>
                     <div className="mt-0.5 truncate text-xs text-muted-foreground">{q.releaseTitle}</div>
                     <div className="mt-0.5 text-xs text-faint">
-                      {q.source} · {q.protocol}{q.detail ? ` · ${q.detail}` : ""}
+                      {q.source.replace(/^prowlarr:/, "")} · {q.protocol}{q.detail ? ` · ${q.detail}` : ""}
                     </div>
                   </div>
                   <div className="flex flex-col items-end gap-1.5">

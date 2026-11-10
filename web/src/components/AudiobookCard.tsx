@@ -225,7 +225,7 @@ export function AudiobookCard({ book, onReadAlong, onChanged }: {
       )}
       {ab?.status === "failed" && (
         <div className="mt-2">
-          <p className="text-[12.5px] text-want">{ab.error || "Couldn't line it up with the text."}</p>
+          <p className="text-[12.5px] text-want">{ab.error ? ab.error.charAt(0).toUpperCase() + ab.error.slice(1) : "Couldn't line it up with the text."}</p>
           {isAdmin && (
             <Button variant="outline" className="mt-2 h-8" onClick={() => void rebuild()}>
               <RefreshCw className="mr-1.5 h-3.5 w-3.5" /> Try again
